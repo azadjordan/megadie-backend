@@ -2,15 +2,19 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import cookieParser from "cookie-parser";
-
-dotenv.config();
+// ✅ Load correct .env file based on NODE_ENV
+const envFile =
+  process.env.NODE_ENV === "production"
+    ? ".env.production"
+    : ".env.development";
+dotenv.config({ path: envFile });
 import connectDB from "./config/db.js";
 import productRoutes from "./routes/productRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
 import orderRoutes from "./routes/orderRoutes.js";
 import paymentRoutes from "./routes/paymentRoutes.js";
 import categoryRoutes from "./routes/categoryRoutes.js";
-import quoteRoutes from "./routes/quoteRoutes.js"; 
+import quoteRoutes from "./routes/quoteRoutes.js";
 import invoiceRoutes from "./routes/invoiceRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 
@@ -23,7 +27,11 @@ const app = express();
 const port = process.env.PORT || 5000;
 
 // ✅ Fix CORS to allow cookies
-const allowedOrigins = ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5174'];
+const allowedOrigins = [
+  "http://localhost:3000",
+  "http://localhost:5173",
+  "http://localhost:5174",
+];
 app.use(
   cors({
     origin: allowedOrigins,
@@ -56,7 +64,6 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/quotes", quoteRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/contact", contactRoutes);
-
 
 // ✅ Error Handling
 app.use(notFound);

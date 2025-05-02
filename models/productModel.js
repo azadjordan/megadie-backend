@@ -18,7 +18,7 @@ const productSchema = new mongoose.Schema(
     color: String,
     code: String,
 
-    displaySpecs: String,
+    displaySpecs: String, // Ex: "100-yd, A++, Code 117"
     sku: { type: String, required: true, unique: true },
 
     // === OTHER FIELDS ===
