@@ -1,0 +1,36 @@
+# Logs and temp files
+logs
+*.log
+npm-debug.log*
+
+# Dependency directory
+node_modules/
+
+# Env files
+.env
+.env.development
+.env.production
+.env.local
+.env.*.local
+
+
+# Build/output/temp
+dist/
+tmp/
+coverage/
+
+# IDE/editor junk
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AWS credentials (if ever copied)
+.aws/
+.env*
+.env*
+.env*
