@@ -7,7 +7,6 @@ import puppeteer from "puppeteer";
 import Payment from "../models/paymentModel.js"; // ✅ Make sure this is imported
 import { roundToTwo } from "../utils/rounding.js"; // ✅ Add this utility function
 
-
 // @desc Generate PDF invoice using Puppeteer and Tailwind template
 // @route GET /api/invoices/:id/pdf
 // @access Private/Admin
@@ -32,7 +31,7 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
   }
 
   // 3. Read HTML template
-  const template = await fs.readFile("backend/templates/invoice.html", "utf8");
+  const template = await fs.readFile("megadie-backend/templates/invoice.html", "utf8");
 
   // 4. Prepare the items HTML
   const itemsHtml = order.orderItems
@@ -86,7 +85,6 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
   res.setHeader("Content-Disposition", `inline; filename=invoice-${invoice.invoiceNumber}.pdf`);
   res.end(pdfBuffer);
 });
-
 
 // @desc    Get all invoices (Admin only)
 // @route   GET /api/invoices
@@ -212,7 +210,6 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
 
   res.status(204).end();
 });
-
 
 // @desc    Get logged-in user's invoices
 // @route   GET /api/invoices/my

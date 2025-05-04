@@ -1,7 +1,6 @@
 import asyncHandler from "../middleware/asyncHandler.js"
 import User from "../models/userModel.js"
 import generateToken from "../utils/generateToken.js"
-// import sendEmail from "../utils/sendEmails.js";
 
 // @desc    Auth user & get token
 // @route   POST /api/users/auth
@@ -45,20 +44,6 @@ const registerUser = asyncHandler(async(req,res) => {
 
     if (user) {
         generateToken(res, user._id);
-
-        // Send email notification
-        // const currentDate = new Date().toLocaleString();
-        // await sendEmail({
-        //     to: ['azadkkurdi@gmail.com', 'almomani95hu@gmail.com'],
-        //     subject: 'New User Registration',
-        //     html: `
-        //         <p><strong>Date:</strong> ${currentDate}</p>
-        //         <p><strong>Name:</strong> ${user.name}</p>
-        //         <p><strong>Email:</strong> ${user.email}</p>
-        //         <p><strong>Phone:</strong> ${user.phoneNumber}</p>
-        //     `
-        // });
-
         res.status(201).json({
             _id: user._id,
             name: user.name,
@@ -71,7 +56,6 @@ const registerUser = asyncHandler(async(req,res) => {
         throw new Error('Invalid user data');
     }
 });
-
 
 // @desc    Logout user / clear cookie
 // @route   POST /api/users/logout
@@ -136,7 +120,6 @@ const updateUserProfile = asyncHandler(async (req, res) => {
       throw new Error("User not found");
     }
   });
-
 
 // @desc    Get users
 // @route   GET /api/users
@@ -212,7 +195,6 @@ const updateUser = asyncHandler(async (req, res) => {
         isAdmin: updatedUser.isAdmin,
     });
 });
-
 
 export {
     authUser,

@@ -70,4 +70,8 @@ app.use(notFound);
 app.use(errorHandler);
 
 // ✅ Start server
-app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
+  console.log(`🌱 NODE_ENV: ${process.env.NODE_ENV || "not set (defaulting to development)"}`);
+  console.log(`📄 Loaded env file: ${envFile}`);
+});

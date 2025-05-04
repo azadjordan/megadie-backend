@@ -4,8 +4,6 @@ import sendEmail from "../utils/sendEmail.js";
 import buildQuoteEmail from "../utils/quoteRequestEmail.js";
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
-import User from '../models/userModel.js';
-
 
 // @desc    Generate PDF version of a quote using Puppeteer and Tailwind template
 // @route   GET /api/quotes/:id/pdf
@@ -17,7 +15,7 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
 
   if (!quote) throw new Error("Quote not found");
 
-  const template = await fs.readFile("backend/templates/quote.html", "utf8");
+  const template = await fs.readFile("megadie-backend/templates/quote.html", "utf8");
 
   const itemsHtml = quote.requestedItems
     .map(

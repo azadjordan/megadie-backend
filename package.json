@@ -4,12 +4,11 @@
   "description": "npm ecommerce built with MERN stack",
   "type": "module",
   "main": "server.js",
-  "scripts": {
-    "start": "node backend/server.js",
-    "server": "nodemon backend/server.js",
-    "client": "npm run dev --prefix frontend",
-    "dev": "concurrently \"npm run server\" \"npm run client\""
-  },
+"scripts": {
+  "start": "node server.js",
+  "server": "nodemon server.js",
+  "dev": "npm run server"
+},
   "author": "Azad Kurdi",
   "license": "MIT",
   "dependencies": {
