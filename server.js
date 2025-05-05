@@ -31,7 +31,13 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:5174",
+  "https://megadie-frontend.onrender.com",
+  "https://www.megadie.com",     // if you’re using the custom domain
+  "https://megadie.com",
 ];
+
+
+
 app.use(
   cors({
     origin: allowedOrigins,
