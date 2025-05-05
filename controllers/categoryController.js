@@ -33,7 +33,7 @@ const createCategory = asyncHandler(async (req, res) => {
     productType: "Ribbon",
     filters: [
       {
-        Key: "Width",
+        Key: "width",
         displayName: "Width",
         values: ["1-inch", "0.5-inch"],
         order: 0, // ✅ NEW

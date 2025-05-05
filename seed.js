@@ -2,24 +2,85 @@
 import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
+import Category from "./models/categoryModel.js";
+
 import mongoose from "mongoose";
 import connectDB from "./config/db.js";
 import Product from "./models/productModel.js";
-import Category from "./models/categoryModel.js";
 
 // Load env variables
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-dotenv.config({ path: path.resolve(__dirname, "../.env") });
+dotenv.config({ path: path.resolve(__dirname, "./.env.development") });
 
-const colors = ["Red", "Blue", "Black", "White", "Transparent", "Green"];
-const origins = ["China", "Germany", "UAE", "India"];
-const generateRandomPrice = () => +(Math.random() * (20 - 2) + 2).toFixed(2);
-const generateImages = () => [
-  `https://picsum.photos/200/300?random=${Math.floor(Math.random() * 1000)}`,
-  `https://picsum.photos/200/300?random=${Math.floor(Math.random() * 1000) + 1}`,
+const categoryData = [
+  {
+    _id: "68185c40f741188e53b71509",
+    displayName: "Grosgrain Ribbon",
+    productType: "Ribbon",
+    sizes: ["1-inch", "0.5-inch"],
+    codes: ["028", "117", "030", "260", "009", "012", "370", "860"],
+  },
+  {
+    _id: "68185ce8f741188e53b71526",
+    displayName: "Satin Ribbon",
+    productType: "Ribbon",
+    sizes: ["1-inch", "0.5-inch"],
+    codes: ["333", "222", "111", "028", "030", "009", "029", "444", "860"],
+  },
+  {
+    _id: "68185da9edb5f397aaeb7019",
+    displayName: "Acrylic (Red)",
+    productType: "Double Face Tape",
+    sizes: ["6mm", "9mm", "10mm", "12mm"],
+    codes: [],
+  },
+  {
+    _id: "68185e54edb5f397aaeb7037",
+    displayName: "Paper (White)",
+    productType: "Double Face Tape",
+    sizes: ["6mm", "9mm", "10mm", "12mm"],
+    codes: [],
+  },
+  {
+    _id: "68185eaaedb5f397aaeb7067",
+    displayName: "PVC",
+    productType: "Creasing Matrix",
+    sizes: ["0.4x1.5", "0.5x1.5", "0.5x1.6"],
+    codes: [],
+  },
 ];
-const getRandomItem = (arr) => arr[Math.floor(Math.random() * arr.length)];
+
+const codeToColor = {
+  "028": "Red",
+  "117": "Blue",
+  "030": "Green",
+  "260": "Yellow",
+  "009": "Black",
+  "012": "White",
+  "370": "Pink",
+  "860": "Beige",
+  "333": "Navy",
+  "222": "Silver",
+  "111": "Gold",
+  "029": "Orange",
+  "444": "Teal",
+};
+
+const random = (arr) => arr[Math.floor(Math.random() * arr.length)];
+const getPrice = (type) => {
+  if (type === "Ribbon") return +(Math.random() * 8 + 8).toFixed(2);
+  if (type === "Double Face Tape") return +(Math.random() * 5 + 5).toFixed(2);
+  return +(Math.random() * 8 + 12).toFixed(2);
+};
+
+const descriptions = [
+  "High quality product for industrial use.",
+  "Reliable and durable, suitable for professionals.",
+  "Premium quality, competitively priced.",
+  "Ideal for packaging and craft applications.",
+  "Tested for strength and performance."
+];
 
 const seedDatabase = async () => {
   try {
@@ -27,52 +88,61 @@ const seedDatabase = async () => {
     await Product.deleteMany();
     console.log("🧹 Cleared existing products");
 
-    const categories = await Category.find();
-    if (categories.length === 0) throw new Error("No categories found");
+    let totalInserted = 0;
 
-    const products = [];
+    for (const category of categoryData) {
+      for (const size of category.sizes) {
+        const codes = category.codes.length > 0 ? category.codes : [null];
 
-    for (let i = 0; i < 50; i++) {
-      const category = getRandomItem(categories);
+        for (const code of codes) {
+          const moq = Math.random() < 0.35 ? 1 : random([3, 5, 10]);
+          const quality = random(["A++", "A+", "B"]);
+          const color = code ? codeToColor[code] || `Color ${code}` : null;
+          const description = random(descriptions);
+          const price = getPrice(category.productType);
+          const origin = random(["China", "UAE", "Korea"]);
+          const unit = category.productType === "Ribbon" ? "roll" : random(["box", "piece"]);
+          const isAvailable = Math.random() < 0.9;
+          const isActive = Math.random() < 0.95;
 
-      const filterMap = {};
-      for (const filter of category.filters) {
-        filterMap[filter.Key] = filter.values;
+          const product = new Product({
+            productType: category.productType,
+            category: category._id,
+            size,
+            code,
+            color,
+            displaySpecs: code
+              ? `100-yd, ${quality}, Code ${code}`
+              : `100-yd, ${quality}`,
+            stock: Math.floor(Math.random() * 291 + 10),
+            moq,
+            isAvailable,
+            isActive,
+            origin,
+            unit,
+            price,
+            quality,
+            images: [
+              `https://picsum.photos/200/300?random=${Date.now() + totalInserted}`,
+              `https://picsum.photos/200/300?random=${Date.now() + totalInserted + 1}`
+            ],
+            description
+          });
+
+          try {
+            await product.save();
+            totalInserted++;
+          } catch (err) {
+            console.error("❌ Failed to insert:", err.message);
+          }
+        }
       }
-
-      const size = getRandomItem(filterMap.size || []);
-      const colorCode = getRandomItem(filterMap.code || []);
-
-      const product = new Product({
-        name: `${category.name} Product ${i + 1}`,
-        productType: category.productType,
-        category: category._id,
-        size: size || "Unknown",
-        color: getRandomItem(colors),
-        code: colorCode || 1000 + i,
-        displaySpecs: `${colorCode || "N/A"} | ${size || "N/A"}`,
-        stock: Math.floor(Math.random() * 100) + 10,
-        moq: Math.floor(Math.random() * 10) + 1,
-        isAvailable: Math.random() < 0.9,
-        origin: getRandomItem(origins),
-        storageLocation: `Warehouse ${getRandomItem(["A", "B", "C"])} - Shelf ${Math.ceil(
-          Math.random() * 10
-        )}`,
-        price: generateRandomPrice(),
-        unit: "roll",
-        images: generateImages(),
-        description: `High-quality ${category.name} product.`,
-        sku: `SKU-${category.name.substring(0, 3).toUpperCase()}-${i + 1}`,
-      });
-
-      products.push(product);
     }
 
-    await Product.insertMany(products);
-    console.log(`✅ Inserted ${products.length} products.`);
+    console.log(`✅ Seeded ${totalInserted} products.`);
     process.exit();
   } catch (err) {
-    console.error("❌ Error:", err);
+    console.error("❌ Error seeding database:", err);
     process.exit(1);
   }
 };
