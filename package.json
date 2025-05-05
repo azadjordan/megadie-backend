@@ -4,11 +4,11 @@
   "description": "npm ecommerce built with MERN stack",
   "type": "module",
   "main": "server.js",
-"scripts": {
-  "start": "node server.js",
-  "server": "nodemon server.js",
-  "dev": "npm run server"
-},
+  "scripts": {
+    "start": "node server.js",
+    "server": "nodemon server.js",
+    "dev": "npm run server"
+  },
   "author": "Azad Kurdi",
   "license": "MIT",
   "dependencies": {
@@ -19,11 +19,11 @@
     "express": "^4.21.2",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^8.9.5",
-    "puppeteer": "^24.6.1"
+    "puppeteer": "^24.6.1",
+    "dotenv": "^16.5.0"
   },
   "devDependencies": {
     "concurrently": "^9.1.2",
-    "dotenv": "^16.4.7",
     "nodemon": "^3.1.9"
   }
 }
