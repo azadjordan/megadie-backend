@@ -2,12 +2,16 @@ import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
 import cookieParser from "cookie-parser";
+import path from "path";
+
 // ✅ Load correct .env file based on NODE_ENV
 const envFile =
   process.env.NODE_ENV === "production"
     ? ".env.production"
     : ".env.development";
 dotenv.config({ path: envFile });
+
+// ✅ Import routes and middlewares
 import connectDB from "./config/db.js";
 import productRoutes from "./routes/productRoutes.js";
 import userRoutes from "./routes/userRoutes.js";
@@ -17,7 +21,6 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import quoteRoutes from "./routes/quoteRoutes.js";
 import invoiceRoutes from "./routes/invoiceRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
-
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 // ✅ Initialize and connect to DB
@@ -32,16 +35,14 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "https://megadie-frontend.onrender.com",
-  "https://www.megadie.com",     // if you’re using the custom domain
+  "https://www.megadie.com", // if you’re using the custom domain
   "https://megadie.com",
 ];
-
-
 
 app.use(
   cors({
     origin: allowedOrigins,
-    credentials: true,
+    credentials: true, // Allow cookies
   })
 );
 
@@ -58,6 +59,16 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
+// ✅ Serve static assets in production
+if (process.env.NODE_ENV === "production") {
+  // Serve static files from the React app (build folder)
+  app.use(express.static(path.join(__dirname, "public", "build")));
+
+  // Handle all other requests by serving the index.html for React Router
+  app.get("*", (req, res) => {
+    res.sendFile(path.resolve(__dirname, "public", "build", "index.html"));
+  });
+}
 
 // ✅ Root endpoint
 app.get("/", (req, res) => {
