@@ -15,7 +15,6 @@ node_modules/
 
 
 # Build/output/temp
-dist/
 tmp/
 coverage/
 
