@@ -4,6 +4,9 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import path from "path";
 
+// ✅ Use import.meta.url to get the directory in ES modules
+const __dirname = path.dirname(new URL(import.meta.url).pathname);
+
 // ✅ Load correct .env file based on NODE_ENV
 const envFile =
   process.env.NODE_ENV === "production"
