@@ -50,11 +50,14 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
-// ✅ Log every request
-app.use((req, res, next) => {
-  console.log(`PATH: [${req.path}]      METHOD: [${req.method}]`);
-  next();
-});
+// ✅ Log requests only in development
+if (process.env.NODE_ENV !== 'production') {
+  app.use((req, res, next) => {
+    console.log(`PATH: [${req.path}]      METHOD: [${req.method}]`);
+    next();
+  });
+}
+
 
 // ✅ Root endpoint
 app.get("/", (req, res) => {
