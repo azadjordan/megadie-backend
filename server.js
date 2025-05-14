@@ -62,17 +62,6 @@ if (process.env.NODE_ENV !== 'production') {
   });
 }
 
-// ✅ Serve static assets in production
-if (process.env.NODE_ENV === "production") {
-  // Serve static files from the React app (dist folder)
-  app.use(express.static(path.join(__dirname, "public", "dist")));
-
-  // Handle all other requests by serving the index.html for React Router
-  app.get("*", (req, res) => {
-    res.sendFile(path.resolve(__dirname, "public", "dist", "index.html"));
-  });
-}
-
 // ✅ Root endpoint
 app.get("/", (req, res) => {
   res.send("API is running...");
