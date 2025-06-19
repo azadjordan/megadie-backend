@@ -40,6 +40,7 @@ const allowedOrigins = [
   "https://megadie-frontend.onrender.com",
   "https://www.megadie.com", // if you’re using the custom domain
   "https://megadie.com",
+  "https://api.megadie.com",
 ];
 
 app.use(

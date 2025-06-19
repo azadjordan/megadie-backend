@@ -5,13 +5,11 @@ const generateToken = (res, userId) => {
     expiresIn: '30d',
   });
 
-  const isLocalhost = process.env.NODE_ENV !== 'production';
-
   res.cookie('jwt', token, {
     httpOnly: true,
-    secure: !isLocalhost, // only true on live (HTTPS)
-    sameSite: isLocalhost ? 'Lax' : 'None', // avoid iOS issues
-    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days
+    secure: true,            // ✅ Must be HTTPS
+    sameSite: 'Strict',      // ✅ Or 'Lax' if you want login to work from external links
+    maxAge: 30 * 24 * 60 * 60 * 1000,
   });
 };
 
