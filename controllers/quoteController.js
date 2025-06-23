@@ -7,7 +7,7 @@ import puppeteer from "puppeteer";
 import path from "path";
 import { fileURLToPath } from "url";
 
-// Required to use __dirname with ES modules
+// Enable __dirname in ES modules
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -21,7 +21,7 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
 
   if (!quote) throw new Error("Quote not found");
 
-  // Safely resolve template path regardless of environment
+  // Resolve template path
   const templatePath = path.join(__dirname, "../templates/quote.html");
   const template = await fs.readFile(templatePath, "utf8");
 
@@ -46,10 +46,13 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     .replace("{{totalPrice}}", quote.totalPrice.toFixed(2))
     .replace("{{items}}", itemsHtml);
 
-  const browser = await puppeteer.launch({ headless: true });
+  // Launch Puppeteer with safe arguments
+  const browser = await puppeteer.launch({
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
   const page = await browser.newPage();
 
-  // Block unnecessary resources
   await page.setRequestInterception(true);
   page.on("request", (req) => {
     if (["image", "stylesheet", "font"].includes(req.resourceType())) {
