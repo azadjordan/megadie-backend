@@ -8,7 +8,7 @@
     "start": "node server.js",
     "server": "nodemon server.js",
     "dev": "npm run server",
-"postinstall": "PUPPETEER_PRODUCT=chrome npm install"
+  "postinstall": "PUPPETEER_PRODUCT=chrome node node_modules/puppeteer/install.js"
   },
   "author": "Azad Kurdi",
   "license": "MIT",
