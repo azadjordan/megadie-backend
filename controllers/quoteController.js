@@ -1,8 +1,8 @@
+import React from "react"; // ⬅️ REQUIRED
 import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
-import QuotePDF from "../utils/QuotePDF.js";
 import { renderToStream } from "@react-pdf/renderer";
-import { createElement } from "react";
+import QuotePDF from "../utils/QuotePDF.js";
 
 // @desc    Generate PDF version of a quote using React PDF
 // @route   GET /api/quotes/:id/pdf
@@ -18,18 +18,11 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
   }
 
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader(
-    "Content-Disposition",
-    `inline; filename=quote-${quote._id}.pdf`
-  );
+  res.setHeader("Content-Disposition", `inline; filename=quote-${quote._id}.pdf`);
 
-  // ✅ Use createElement instead of JSX
-  const stream = await renderToStream(createElement(QuotePDF, { quote }));
-  stream.pipe(res);
+  const pdfStream = await renderToStream(React.createElement(QuotePDF, { quote }));
+  pdfStream.pipe(res);
 });
-
-
-
 
 // @desc    Get logged-in user's own quotes
 // @route   GET /api/quotes/my

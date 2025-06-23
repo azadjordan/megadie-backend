@@ -10,6 +10,7 @@ import { roundToTwo } from "../utils/rounding.js";
 // @route   GET /api/invoices/:id/pdf
 // @access  Private/Admin
 export const getInvoicePDF = asyncHandler(async (req, res) => {
+  // Get invoice by ID and populate user and order reference
   const invoice = await Invoice.findById(req.params.id)
     .populate("user", "name email")
     .populate("order");
@@ -19,22 +20,30 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
     throw new Error("Invoice not found");
   }
 
-  const order = await Order.findById(invoice.order._id).populate("orderItems.product", "name");
+  // Get the related order and populate product names
+  const order = await Order.findById(invoice.order._id).populate(
+    "orderItems.product",
+    "name"
+  );
+
   if (!order) {
     res.status(404);
     throw new Error("Order not found");
   }
 
+  // Set headers for streaming PDF
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
     "Content-Disposition",
-    `inline; filename=invoice-${invoice.invoiceNumber}.pdf`
+    `inline; filename=invoice-${invoice.invoiceNumber || invoice._id}.pdf`
   );
 
-  const stream = await renderToStream(createElement(InvoicePDF, { invoice, order }));
-  stream.pipe(res);
-});
+  // Render the InvoicePDF component as a stream
+  const pdfStream = await renderToStream(createElement(InvoicePDF, { invoice, order }));
 
+  // Pipe the stream to response
+  pdfStream.pipe(res);
+});
 
 // @desc    Get all invoices (Admin only)
 // @route   GET /api/invoices
