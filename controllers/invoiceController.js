@@ -1,17 +1,15 @@
-// ✅ invoiceController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import Invoice from "../models/invoiceModel.js";
 import Order from "../models/orderModel.js";
-import fs from "fs/promises";
-import puppeteer from "puppeteer";
-import Payment from "../models/paymentModel.js"; // ✅ Make sure this is imported
-import { roundToTwo } from "../utils/rounding.js"; // ✅ Add this utility function
+import InvoicePDF from "../utils/InvoicePDF.js";
+import { renderToStream } from "@react-pdf/renderer";
+import { createElement } from "react";
+import { roundToTwo } from "../utils/rounding.js";
 
-// @desc Generate PDF invoice using Puppeteer and Tailwind template
-// @route GET /api/invoices/:id/pdf
-// @access Private/Admin
+// @desc    Generate PDF invoice using React PDF
+// @route   GET /api/invoices/:id/pdf
+// @access  Private/Admin
 export const getInvoicePDF = asyncHandler(async (req, res) => {
-  // 1. Fetch invoice
   const invoice = await Invoice.findById(req.params.id)
     .populate("user", "name email")
     .populate("order");
@@ -21,70 +19,22 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
     throw new Error("Invoice not found");
   }
 
-  // 2. Fetch order
-  const order = await Order.findById(invoice.order._id)
-    .populate("orderItems.product", "name");
-
+  const order = await Order.findById(invoice.order._id).populate("orderItems.product", "name");
   if (!order) {
     res.status(404);
     throw new Error("Order not found");
   }
 
-  // 3. Read HTML template
-  const template = await fs.readFile("megadie-backend/templates/invoice.html", "utf8");
-
-  // 4. Prepare the items HTML
-  const itemsHtml = order.orderItems
-    .map(
-      (item) => `
-        <tr>
-          <td class="border p-3">${item.product?.name || "Unnamed Item"}</td>
-          <td class="border p-3 text-right">${item.qty}</td>
-        </tr>`
-    )
-    .join("");
-
-  // 5. Prepare values
-  const totalAmount = invoice.amountDue || 0;      // Original full invoice amount
-  const amountPaid = invoice.amountPaid || 0;       // What client has paid so far
-  const amountDue = totalAmount - amountPaid;       // Remaining balance
-
-  // 6. Fill the template
-  const filledHtml = template
-    .replace("{{invoiceNumber}}", invoice.invoiceNumber || "N/A")
-    .replace("{{invoiceDate}}", new Date(invoice.createdAt).toLocaleDateString())
-    .replace("{{status}}", invoice.status || "Pending")
-    .replace("{{userName}}", invoice.user?.name || "Client")
-    .replace("{{userEmail}}", invoice.user?.email || "—")
-    .replace("{{totalAmount}}", totalAmount.toFixed(2))
-    .replace("{{amountPaid}}", amountPaid.toFixed(2))
-    .replace("{{amountDue}}", amountDue.toFixed(2))  // <-- Correct placeholder
-    .replace("{{items}}", itemsHtml);
-
-  // 7. Launch Puppeteer
-  const browser = await puppeteer.launch({ headless: true });
-  const page = await browser.newPage();
-
-  await page.setRequestInterception(true);
-  page.on("request", (req) => {
-    if (["image", "stylesheet", "font"].includes(req.resourceType())) {
-      req.abort();
-    } else {
-      req.continue();
-    }
-  });
-
-  await page.setContent(filledHtml, { waitUntil: "networkidle0" });
-
-  // 8. Generate the PDF
-  const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
-  await browser.close();
-
-  // 9. Send the PDF
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename=invoice-${invoice.invoiceNumber}.pdf`);
-  res.end(pdfBuffer);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename=invoice-${invoice.invoiceNumber}.pdf`
+  );
+
+  const stream = await renderToStream(createElement(InvoicePDF, { invoice, order }));
+  stream.pipe(res);
 });
+
 
 // @desc    Get all invoices (Admin only)
 // @route   GET /api/invoices

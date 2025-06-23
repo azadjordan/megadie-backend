@@ -1,17 +1,10 @@
 import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
-import sendEmail from "../utils/sendEmail.js";
-import buildQuoteEmail from "../utils/quoteRequestEmail.js";
-import fs from "fs/promises";
-import puppeteer from "puppeteer";
-import path from "path";
-import { fileURLToPath } from "url";
+import QuotePDF from "../utils/QuotePDF.js";
+import { renderToStream } from "@react-pdf/renderer";
+import { createElement } from "react";
 
-// Enable __dirname in ES modules
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// @desc    Generate PDF version of a quote using Puppeteer and Tailwind template
+// @desc    Generate PDF version of a quote using React PDF
 // @route   GET /api/quotes/:id/pdf
 // @access  Private/Admin
 export const getQuotePDF = asyncHandler(async (req, res) => {
@@ -19,58 +12,23 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     .populate("user", "name email")
     .populate("requestedItems.product", "name");
 
-  if (!quote) throw new Error("Quote not found");
-
-  // Resolve template path
-  const templatePath = path.join(__dirname, "../templates/quote.html");
-  const template = await fs.readFile(templatePath, "utf8");
-
-  const itemsHtml = quote.requestedItems
-    .map(
-      (item) =>
-        `<tr>
-          <td class="border p-2">${item.product?.name || "Unnamed Item"}</td>
-          <td class="border p-2 text-right">${item.qty}</td>
-          <td class="border p-2 text-right">${(item.qty * item.unitPrice).toFixed(2)}</td>
-        </tr>`
-    )
-    .join("");
-
-  const filledHtml = template
-    .replace("{{quoteDate}}", new Date(quote.createdAt).toLocaleDateString())
-    .replace("{{status}}", quote.status)
-    .replace("{{userName}}", quote.user?.name || "Client")
-    .replace("{{userEmail}}", quote.user?.email || "—")
-    .replace("{{deliveryCharge}}", quote.deliveryCharge.toFixed(2))
-    .replace("{{extraFee}}", quote.extraFee.toFixed(2))
-    .replace("{{totalPrice}}", quote.totalPrice.toFixed(2))
-    .replace("{{items}}", itemsHtml);
-
-  // Launch Puppeteer with safe arguments
-  const browser = await puppeteer.launch({
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
-  });
-  const page = await browser.newPage();
-
-  await page.setRequestInterception(true);
-  page.on("request", (req) => {
-    if (["image", "stylesheet", "font"].includes(req.resourceType())) {
-      req.abort();
-    } else {
-      req.continue();
-    }
-  });
-
-  await page.setContent(filledHtml, { waitUntil: "networkidle0" });
-
-  const pdfBuffer = await page.pdf({ format: "A4", printBackground: true });
-  await browser.close();
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found");
+  }
 
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename=quote-${quote._id}.pdf`);
-  res.end(pdfBuffer);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename=quote-${quote._id}.pdf`
+  );
+
+  // ✅ Use createElement instead of JSX
+  const stream = await renderToStream(createElement(QuotePDF, { quote }));
+  stream.pipe(res);
 });
+
+
 
 
 // @desc    Get logged-in user's own quotes
