@@ -7,7 +7,7 @@
   "scripts": {
     "start": "node server.js",
     "server": "nodemon server.js",
-    "dev": "npm run server",
+    "dev": "npm run server"
   },
   "author": "Azad Kurdi",
   "license": "MIT",
