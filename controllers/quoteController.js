@@ -4,6 +4,12 @@ import sendEmail from "../utils/sendEmail.js";
 import buildQuoteEmail from "../utils/quoteRequestEmail.js";
 import fs from "fs/promises";
 import puppeteer from "puppeteer";
+import path from "path";
+import { fileURLToPath } from "url";
+
+// Required to use __dirname with ES modules
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 // @desc    Generate PDF version of a quote using Puppeteer and Tailwind template
 // @route   GET /api/quotes/:id/pdf
@@ -15,7 +21,9 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
 
   if (!quote) throw new Error("Quote not found");
 
-  const template = await fs.readFile("megadie-backend/templates/quote.html", "utf8");
+  // Safely resolve template path regardless of environment
+  const templatePath = path.join(__dirname, "../templates/quote.html");
+  const template = await fs.readFile(templatePath, "utf8");
 
   const itemsHtml = quote.requestedItems
     .map(
@@ -41,6 +49,7 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
   const browser = await puppeteer.launch({ headless: true });
   const page = await browser.newPage();
 
+  // Block unnecessary resources
   await page.setRequestInterception(true);
   page.on("request", (req) => {
     if (["image", "stylesheet", "font"].includes(req.resourceType())) {
@@ -59,6 +68,7 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
   res.setHeader("Content-Disposition", `inline; filename=quote-${quote._id}.pdf`);
   res.end(pdfBuffer);
 });
+
 
 // @desc    Get logged-in user's own quotes
 // @route   GET /api/quotes/my
