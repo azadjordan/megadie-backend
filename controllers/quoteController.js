@@ -3,6 +3,7 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
 import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
+import sendEmail from "../utils/sendEmail.js";
 
 // @desc    Generate PDF version of a quote using React PDF
 // @route   GET /api/quotes/:id/pdf
