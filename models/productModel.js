@@ -1,22 +1,43 @@
 import mongoose from "mongoose";
+import Category from "./categoryModel.js";
 
 const productSchema = new mongoose.Schema(
   {
-    // === PRIMARY FIELDS === 
+    // === PRIMARY FIELDS ===
     name: { type: String, required: true },
-    productType: { 
-      type: String, 
-      enum: ["Ribbon", "Creasing Matrix", "Double Face Tape"], 
-      required: true 
+    productType: {
+      type: String,
+      enum: ["Ribbon", "Creasing Matrix", "Double Face Tape"],
+      required: true,
     },
-    category: { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
-    size: { 
-      type: String, 
-      enum: ["1-inch", "0.5-inch", "0.4x1.5", "0.5x1.5", "0.5x1.6", "6mm", "9mm", "10mm", "12mm"], 
-      required: true 
+    category: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Category",
+      required: true,
+    },
+    size: {
+      type: String,
+      enum: [
+        "1-inch",
+        "1/2-inch",
+        "3/4-inch",
+        "0.4x1.5-mm",
+        "0.5x1.5-mm",
+        "0.5x1.6-mm",
+        "6-mm",
+        "9-mm",
+        "10-mm",
+        "12-mm",
+      ],
+      required: true,
+    },
+    variant: {
+      type: String,
+      enum: ["100-yd", "150-yd", "35-yd"],
     },
     color: String,
     code: String,
+    sort: { type: Number },
 
     displaySpecs: String, // Ex: "100-yd, A++, Code 117"
     sku: { type: String, required: true, unique: true },
@@ -31,11 +52,9 @@ const productSchema = new mongoose.Schema(
     unit: String,
     images: { type: [String], default: [] },
     description: String,
-
-    // === NEW FIELDS ===
     quality: {
       type: String,
-      enum: ["A++", "A+", "B"],
+      enum: ["A++", "A", "B"],
     },
     isActive: {
       type: Boolean,
@@ -51,29 +70,71 @@ productSchema.index({ category: 1 });
 
 // === AUTO-GENERATION HOOK ===
 productSchema.pre("validate", async function (next) {
-  if (this.isNew && !this.sku) {
-    const typeMap = {
-      Ribbon: "RIB",
-      "Creasing Matrix": "CRM",
-      "Double Face Tape": "TAP",
-    };
-    const typeCode = typeMap[this.productType] || "OTH";
-    const count = await mongoose.model("Product").countDocuments({ productType: this.productType });
-    const counter = String(count + 1).padStart(4, "0");
-    this.sku = `${typeCode}-${counter}`;
-  }
-
   const categoryModel = mongoose.model("Category");
   const categoryDoc = await categoryModel.findById(this.category).lean();
-  const categoryName = categoryDoc ? categoryDoc.displayName : "";
+  const categoryNameRaw = categoryDoc?.name || "uncat";
 
-  const parts = [
-    this.productType,
-    this.color,
+  // First 2 capital letters of category name
+  const categoryCode = categoryNameRaw.slice(0, 2).toUpperCase();
+
+  if (
+    this.isModified("category") ||
+    this.isModified("size") ||
+    this.isModified("code")
+  ) {
+    const sizeCode =
+      this.size
+        ?.toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .replace(/INCH/gi, "") || "NOSIZE";
+
+    const productCode =
+      this.code?.toUpperCase().replace(/\s+/g, "") || "NOCODE";
+    const randomSuffix = Date.now().toString().slice(-4);
+
+    this.sku = `${categoryCode}-${sizeCode}-${productCode}-${randomSuffix}`;
+  }
+
+  const splitCamelCase = (str) => str?.replace(/([a-z])([A-Z])/g, "$1-$2");
+
+  const capitalize = (str) =>
+    splitCamelCase(str)
+      ?.split("-")
+      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join("-");
+
+  // === Generate Name ===
+  const nameParts = [
+    categoryNameRaw && capitalize(categoryNameRaw),
+    this.color && capitalize(this.color),
     this.size,
-    categoryName,
+    this.variant, // ensure it comes right after size
+    this.productType && capitalize(this.productType),
   ].filter(Boolean);
-  this.name = parts.join(" ");
+
+  this.name = nameParts.join(" ");
+
+  // === Generate Display Specs ===
+  // === Generate Display Specs ===
+  if (
+    this.productType === "Ribbon" &&
+    (this.isModified("size") ||
+      this.isModified("variant") ||
+      this.isModified("code") ||
+      this.isModified("quality") ||
+      this.isModified("unit") || // also check for unit
+      !this.displaySpecs)
+  ) {
+    const specParts = [];
+
+    if (this.size) specParts.push(this.size);
+    if (this.variant) specParts.push(this.variant);
+    if (this.quality) specParts.push(this.quality);
+    if (this.code) specParts.push(`#${this.code}`);
+    if (this.unit) specParts.push(this.unit); // 🟣 use unit instead of "One Roll"
+
+    this.displaySpecs = specParts.join(", ");
+  }
 
   next();
 });

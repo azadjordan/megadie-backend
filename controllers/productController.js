@@ -7,9 +7,19 @@ import asyncHandler from "../middleware/asyncHandler.js";
 const getProductsAdmin = async (req, res) => {
   const { productType, categoryIds } = req.query;
   const filter = {};
+  const sort = {};
 
   if (productType) {
     filter.productType = productType;
+
+    // Admins also benefit from structured sorting for Ribbons
+    if (productType === "Ribbon") {
+      sort.sort = 1;
+    } else {
+      sort.createdAt = -1;
+    }
+  } else {
+    sort.createdAt = -1; // default sort if no productType specified
   }
 
   if (categoryIds) {
@@ -27,8 +37,8 @@ const getProductsAdmin = async (req, res) => {
   }
 
   const products = await Product.find(filter)
-    .populate("category", "name displayName productType") // helpful for admin UI
-    .sort({ createdAt: -1 });
+    .populate("category", "name displayName productType")
+    .sort(sort);
 
   res.json(products);
 };
@@ -38,10 +48,17 @@ const getProductsAdmin = async (req, res) => {
 // @access  Public
 const getProducts = async (req, res) => {
   const { productType, categoryIds } = req.query;
+ 
   const filter = {};
+  const sort = {};
 
   if (productType) {
     filter.productType = productType;
+
+    // Sort Ribbon products by numeric sort field
+    if (productType === "Ribbon") {
+      sort.sort = 1; // ascending
+    }
   }
 
   if (categoryIds) {
@@ -58,7 +75,7 @@ const getProducts = async (req, res) => {
     }
   }
 
-  const products = await Product.find(filter).sort({ createdAt: -1 });
+  const products = await Product.find(filter).sort(sort);
   res.json(products);
 };
 
