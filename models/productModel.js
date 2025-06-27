@@ -48,7 +48,7 @@ const productSchema = new mongoose.Schema(
     isAvailable: { type: Boolean, default: true },
     origin: String,
     storageLocation: String,
-    price: Number,
+    price: { type: Number, default: 0 },
     unit: String,
     images: { type: [String], default: [] },
     description: String,

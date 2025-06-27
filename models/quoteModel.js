@@ -16,7 +16,7 @@ const quoteSchema = new mongoose.Schema(
           required: true,
         },
         qty: { type: Number, required: true },
-        unitPrice: { type: Number, required: true },
+        unitPrice: { type: Number, required: true, default: 0.0 },
       },
     ],
 
