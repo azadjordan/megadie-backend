@@ -116,22 +116,19 @@ productSchema.pre("validate", async function (next) {
 
   // === Generate Display Specs ===
   // === Generate Display Specs ===
+  // === Generate Display Specs (cleaned, no size or variant) ===
   if (
     this.productType === "Ribbon" &&
-    (this.isModified("size") ||
-      this.isModified("variant") ||
-      this.isModified("code") ||
+    (this.isModified("code") ||
       this.isModified("quality") ||
-      this.isModified("unit") || // also check for unit
+      this.isModified("unit") ||
       !this.displaySpecs)
   ) {
     const specParts = [];
 
-    if (this.size) specParts.push(this.size);
-    if (this.variant) specParts.push(this.variant);
-    if (this.quality) specParts.push(this.quality);
-    if (this.code) specParts.push(`#${this.code}`);
-    if (this.unit) specParts.push(this.unit); // 🟣 use unit instead of "One Roll"
+    if (this.quality) specParts.push(`Quality ${this.quality}`);
+    if (this.code) specParts.push(`Code #${this.code}`);
+    if (this.unit) specParts.push(this.unit);
 
     this.displaySpecs = specParts.join(", ");
   }
