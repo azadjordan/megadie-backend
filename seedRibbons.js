@@ -121,10 +121,9 @@ const seedRibbons = async () => {
         for (const size of sizes) {
           const imageUrl = `https://megadie.s3.eu-central-1.amazonaws.com/Plain+${catName}+Ribbons/${code}${color}${catName}.jpg`;
 
-          const variant = "100-yd"; // or use random: VARIANT_OPTIONS[Math.floor(Math.random() * 3)];
-          const quality = "A++"; // or use random: QUALITY_OPTIONS[Math.floor(Math.random() * 3)];
-
-          const sort = Number(code); // Converts "007" to 7, "117" to 117
+          const variant = "100-yd";
+          const quality = "A++";
+          const sort = Number(code);
 
           products.push({
             productType: "Ribbon",
@@ -133,9 +132,9 @@ const seedRibbons = async () => {
             variant,
             color,
             code,
-            sort, // ✅ add this
+            sort,
             quality,
-            unit: 'One Roll',
+            unit: "One Roll",
             images: [imageUrl],
           });
         }
