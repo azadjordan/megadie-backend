@@ -33,8 +33,9 @@ const productSchema = new mongoose.Schema(
     },
     variant: {
       type: String,
-      enum: ["100-yd", "150-yd", "35-yd"],
+      enum: ["100-yd", "150-yd", "35-yd", "none"],
     },
+
     color: String,
     code: String,
     sort: { type: Number },
