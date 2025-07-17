@@ -33,7 +33,8 @@ const productSchema = new mongoose.Schema(
     },
     variant: {
       type: String,
-      enum: ["100-yd", "150-yd", "35-yd", "none"],
+      enum: ["100-yd", "150-yd", "35-yd"],
+      // not required ✅
     },
 
     color: String,
@@ -109,7 +110,7 @@ productSchema.pre("validate", async function (next) {
     categoryNameRaw && capitalize(categoryNameRaw),
     this.color && capitalize(this.color),
     this.size,
-    this.variant, // ensure it comes right after size
+    this.variant || undefined, // skip if empty or undefined
     this.productType && capitalize(this.productType),
   ].filter(Boolean);
 
