@@ -5,6 +5,60 @@ import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
 import sendEmail from "../utils/sendEmail.js";
 import buildQuoteEmail from "../utils/quoteRequestEmail.js";
+import sendTelegramAlert from "../utils/sendTelegramAlert.js"; // ✅ NEW
+
+// @desc    Create a new quote (Client)
+// @route   POST /api/quotes
+// @access  Private
+export const createQuote = asyncHandler(async (req, res) => {
+  const { requestedItems, clientToAdminNote } = req.body;
+
+  if (!requestedItems || requestedItems.length === 0) {
+    res.status(400);
+    throw new Error("No items in the quote.");
+  }
+
+  const quote = await Quote.create({
+    user: req.user._id,
+    requestedItems,
+    clientToAdminNote,
+    totalPrice: 0,
+  });
+
+  const populatedQuote = await quote.populate("requestedItems.product", "name");
+
+  try {
+    console.log("📧 Sending quote request email...");
+    
+    await sendEmail({
+      to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
+      subject: "New Quote Request Received",
+      html: buildQuoteEmail({ user: req.user, quote: populatedQuote }),
+    });
+  } catch (error) {
+    console.error("❌ Failed to send email:", error);
+  }
+
+  // ✅ Send Telegram Alert (aligned with email content)
+  try {
+const itemList = populatedQuote.requestedItems
+  .map((item) => {
+    const name = item.product?.name || "Unnamed product";
+    const qty = item.qty ?? "N/A"; // ✅ use actual qty, never default to 1
+    return `• ${name} — Qty: ${qty}`;
+  })
+  .join("\n");
+
+const message = `📥 *New Quote Request*\n👤 *Client:* ${req.user.name} (${req.user.email})\n📝 *Note:* ${clientToAdminNote || "—"}\n📦 *Items:* ${requestedItems.length}\n\n${itemList}`;
+
+await sendTelegramAlert(message);
+
+  } catch (err) {
+    console.error("❌ Failed to send Telegram alert:", err.message);
+  }
+
+  res.status(201).json(quote);
+});
 
 // @desc    Generate PDF version of a quote using React PDF
 // @route   GET /api/quotes/:id/pdf
@@ -55,38 +109,6 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
   res.json(sanitizedQuotes);
 });
 
-// @desc    Create a new quote (Client)
-// @route   POST /api/quotes
-// @access  Private
-export const createQuote = asyncHandler(async (req, res) => {
-  const { requestedItems, clientToAdminNote } = req.body;
-
-  if (!requestedItems || requestedItems.length === 0) {
-    res.status(400);
-    throw new Error("No items in the quote.");
-  }
-
-  const quote = await Quote.create({
-    user: req.user._id,
-    requestedItems,
-    clientToAdminNote,
-    totalPrice: 0,
-  });
-
-  const populatedQuote = await quote.populate("requestedItems.product", "name");
-
-  try {
-    await sendEmail({
-      to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
-      subject: "New Quote Request Received",
-      html: buildQuoteEmail({ user: req.user, quote: populatedQuote }),
-    });
-  } catch (error) {
-    console.error("❌ Failed to send email:", error);
-  }
-
-  res.status(201).json(quote);
-});
 
 
 // @desc    Get all quotes (Admin only) sorted from latest to oldest

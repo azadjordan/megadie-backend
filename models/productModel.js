@@ -33,7 +33,7 @@ const productSchema = new mongoose.Schema(
     },
     variant: {
       type: String,
-      enum: ["100-yd", "150-yd", "35-yd"],
+      enum: ["100-yd", "150-yd", "35-yd", "50-m"],
       // not required ✅
     },
 
@@ -45,8 +45,8 @@ const productSchema = new mongoose.Schema(
     sku: { type: String, required: true, unique: true },
 
     // === OTHER FIELDS ===
-    stock: { type: Number, required: true, default: 0 },
-    moq: { type: Number, required: true, default: 1 },
+    stock: { type: Number, default: 0 },
+    moq: { type: Number, default: 1 },
     isAvailable: { type: Boolean, default: true },
     origin: String,
     storageLocation: String,
@@ -97,13 +97,11 @@ productSchema.pre("validate", async function (next) {
     this.sku = `${categoryCode}-${sizeCode}-${productCode}-${randomSuffix}`;
   }
 
-  const splitCamelCase = (str) => str?.replace(/([a-z])([A-Z])/g, "$1-$2");
-
   const capitalize = (str) =>
-    splitCamelCase(str)
-      ?.split("-")
+    str
+      ?.split(" ")
       .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join("-");
+      .join(" ");
 
   // === Generate Name ===
   const nameParts = [
