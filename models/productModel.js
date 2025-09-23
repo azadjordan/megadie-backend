@@ -33,7 +33,7 @@ const productSchema = new mongoose.Schema(
     },
     variant: {
       type: String,
-      enum: ["100-yd", "150-yd", "35-yd", "50-m"],
+      enum: ["100-yd", "150-yd", "35-yd", "50-m", "50-pcs"], // ✅ Added 50-pcs as a variant option
       // not required ✅
     },
 
@@ -74,10 +74,10 @@ productSchema.index({ category: 1 });
 productSchema.pre("validate", async function (next) {
   const categoryModel = mongoose.model("Category");
   const categoryDoc = await categoryModel.findById(this.category).lean();
-  const categoryNameRaw = categoryDoc?.name || "uncat";
+  const categoryName = categoryDoc?.displayName || categoryDoc?.name || "uncat";
 
-  // First 2 capital letters of category name
-  const categoryCode = categoryNameRaw.slice(0, 2).toUpperCase();
+  // First 2 capital letters of category name (still using raw name for SKU)
+  const categoryCode = (categoryDoc?.name || "uncat").slice(0, 2).toUpperCase();
 
   if (
     this.isModified("category") ||
@@ -97,26 +97,30 @@ productSchema.pre("validate", async function (next) {
     this.sku = `${categoryCode}-${sizeCode}-${productCode}-${randomSuffix}`;
   }
 
-  const capitalize = (str) =>
-    str
-      ?.split(" ")
-      .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-      .join(" ");
+const capitalize = (str) =>
+  str
+    ?.split(" ")
+    .map((word) =>
+      word
+        .split("-")
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join("-")
+    )
+    .join(" ");
 
-  // === Generate Name ===
+
+  // === Generate Product Name ===
   const nameParts = [
-    categoryNameRaw && capitalize(categoryNameRaw),
+    categoryName, // Use displayName as-is
     this.color && capitalize(this.color),
     this.size,
-    this.variant || undefined, // skip if empty or undefined
+    this.variant || undefined,
     this.productType && capitalize(this.productType),
   ].filter(Boolean);
 
   this.name = nameParts.join(" ");
 
-  // === Generate Display Specs ===
-  // === Generate Display Specs ===
-  // === Generate Display Specs (cleaned, no size or variant) ===
+  // === Generate Display Specs (for Ribbons only) ===
   if (
     this.productType === "Ribbon" &&
     (this.isModified("code") ||
