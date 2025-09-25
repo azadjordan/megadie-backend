@@ -1,5 +1,6 @@
 import asyncHandler from "../middleware/asyncHandler.js";
-import Invoice from "../models/invoiceModel.js";
+import Invoice from '../models/invoiceModel.js';
+import Payment from '../models/paymentModel.js';
 import Order from "../models/orderModel.js";
 import InvoicePDF from "../utils/InvoicePDF.js";
 import { renderToStream } from "@react-pdf/renderer";
@@ -52,11 +53,12 @@ export const getInvoices = asyncHandler(async (req, res) => {
   const invoices = await Invoice.find({})
     .populate("user", "name email")
     .populate("order", "orderNumber totalPrice")
-    .populate("payments")
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1 })
+    .lean(); // optional: makes result plain JS objects (faster)
 
   res.json(invoices);
 });
+
 
 // @desc    Get invoice by ID (Admin or Owner)
 // @route   GET /api/invoices/:id
