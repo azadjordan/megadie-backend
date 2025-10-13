@@ -43,22 +43,23 @@ const getProductsAdmin = async (req, res) => {
   res.json(products);
 };
 
-// @desc    Get filtered products (public-facing shop view)
+// @desc    Get filtered products (public-facing shop view) with pagination
 // @route   GET /api/products
 // @access  Public
 const getProducts = async (req, res) => {
   const { productType, categoryIds } = req.query;
- 
+
+  // --- pagination
+  const page  = Math.max(parseInt(req.query.page, 10) || 1, 1);
+const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 48, 1), 100);
+  const skip  = (page - 1) * limit;
+
   const filter = {};
   const sort = {};
 
   if (productType) {
     filter.productType = productType;
-
-    // Sort Ribbon products by numeric sort field
-    if (productType === "Ribbon") {
-      sort.sort = 1; // ascending
-    }
+    if (productType === "Ribbon") sort.sort = 1; // numeric asc for ribbons
   }
 
   if (categoryIds) {
@@ -69,15 +70,32 @@ const getProducts = async (req, res) => {
   if (req.query.attributes) {
     for (const key in req.query.attributes) {
       const values = req.query.attributes[key];
-      filter[key] = {
-        $in: Array.isArray(values) ? values : [values],
-      };
+      filter[key] = { $in: Array.isArray(values) ? values : [values] };
     }
   }
 
-  const products = await Product.find(filter).sort(sort);
-  res.json(products);
+  const [total, products] = await Promise.all([
+    Product.countDocuments(filter),
+    Product.find(filter).sort(sort).skip(skip).limit(limit).lean(),
+  ]);
+
+  const totalPages = Math.max(Math.ceil(total / limit), 1);
+
+  res.json({
+    data: products,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
+  });
 };
+
+
+export default getProducts;
 
 // @desc    Get product by ID
 // @route   GET /api/products/:id

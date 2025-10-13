@@ -18,6 +18,7 @@ export const createQuote = asyncHandler(async (req, res) => {
     throw new Error("No items in the quote.");
   }
 
+  // Create the base quote
   const quote = await Quote.create({
     user: req.user._id,
     requestedItems,
@@ -25,11 +26,16 @@ export const createQuote = asyncHandler(async (req, res) => {
     totalPrice: 0,
   });
 
-  const populatedQuote = await quote.populate("requestedItems.product", "name");
+  // Populate ONLY name and code for each product
+  const populatedQuote = await quote.populate({
+    path: "requestedItems.product",
+    select: "name code",
+  });
 
+  // ==== Email Notification ====
   try {
     console.log("📧 Sending quote request email...");
-    
+
     await sendEmail({
       to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
       subject: "New Quote Request Received",
@@ -39,26 +45,34 @@ export const createQuote = asyncHandler(async (req, res) => {
     console.error("❌ Failed to send email:", error);
   }
 
-  // ✅ Send Telegram Alert (aligned with email content)
+  // ==== Telegram Alert ====
   try {
-const itemList = populatedQuote.requestedItems
-  .map((item) => {
-    const name = item.product?.name || "Unnamed product";
-    const qty = item.qty ?? "N/A"; // ✅ use actual qty, never default to 1
-    return `• ${name} — Qty: ${qty}`;
-  })
-  .join("\n");
+    const itemList = populatedQuote.requestedItems
+      .map((item) => {
+        const prod = item.product || {};
+        const name = prod.name || "Unnamed product";
+        const code = prod.code || "—";
+        const qty = item.qty ?? "N/A";
+        return `• ${name} — Qty: ${qty}\n   Code: ${code}`;
+      })
+      .join("\n");
 
-const message = `📥 *New Quote Request*\n👤 *Client:* ${req.user.name} (${req.user.email})\n📝 *Note:* ${clientToAdminNote || "—"}\n📦 *Items:* ${requestedItems.length}\n\n${itemList}`;
+    const message =
+      `📥 *New Quote Request*\n` +
+      `👤 *Client:* ${req.user.name} (${req.user.email})\n` +
+      `📝 *Note:* ${clientToAdminNote || "—"}\n` +
+      `📦 *Items:* ${requestedItems.length}\n\n` +
+      itemList;
 
-await sendTelegramAlert(message);
-
+    await sendTelegramAlert(message);
   } catch (err) {
     console.error("❌ Failed to send Telegram alert:", err.message);
   }
 
-  res.status(201).json(quote);
+  // Return populated result so client gets name + code immediately
+  res.status(201).json(populatedQuote);
 });
+
 
 // @desc    Generate PDF version of a quote using React PDF
 // @route   GET /api/quotes/:id/pdf

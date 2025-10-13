@@ -45,11 +45,9 @@ const productSchema = new mongoose.Schema(
     sku: { type: String, required: true, unique: true },
 
     // === OTHER FIELDS ===
-    stock: { type: Number, default: 0 },
     moq: { type: Number, default: 1 },
     isAvailable: { type: Boolean, default: true },
     origin: String,
-    storageLocation: String,
     price: { type: Number, default: 0 },
     unit: String,
     images: { type: [String], default: [] },
