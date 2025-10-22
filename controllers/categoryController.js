@@ -1,11 +1,11 @@
-import asyncHandler from "../middleware/asyncHandler.js";
 import Category from "../models/categoryModel.js";
+import asyncHandler from "../middleware/asyncHandler.js";
 
 // @desc    Get all categories
 // @route   GET /api/categories
 // @access  Public
 const getCategories = asyncHandler(async (req, res) => {
-  const categories = await Category.find().sort({ position: 1, name: 1 });
+  const categories = await Category.find({}).sort({ sort: 1 });
   res.json(categories);
 });
 
@@ -14,88 +14,86 @@ const getCategories = asyncHandler(async (req, res) => {
 // @access  Public
 const getCategoryById = asyncHandler(async (req, res) => {
   const category = await Category.findById(req.params.id);
-  if (!category) {
+  if (category) {
+    res.json(category);
+  } else {
     res.status(404);
     throw new Error("Category not found");
   }
-  res.json(category);
 });
 
-// @desc    Create a new category with dummy data
+// @desc    Create a new category
 // @route   POST /api/categories
-// @access  Admin
+// @access  Private/Admin
 const createCategory = asyncHandler(async (req, res) => {
-  const timestamp = Date.now();
+  try {
+    const category = new Category(req.body);
+    const createdCategory = await category.save();
+    res.status(201).json(createdCategory);
+  } catch (error) {
+    console.error("❌ Failed to create category:", error);
 
-  const category = new Category({
-    name: `Sample Category ${timestamp}`,
-    displayName: `Sample Display ${timestamp}`, // ✅ NEW
-    productType: "Ribbon",
-    filters: [
-      {
-        Key: "width",
-        displayName: "Width",
-        values: ["1-inch", "0.5-inch"],
-        order: 0, // ✅ NEW
-      },
-    ],
-    description: "This is a sample category. You can update it later.",
-    position: 0,
-    isActive: true,
-    image: `https://picsum.photos/seed/${timestamp}/300/200`,
-  });
-  
-
-  const created = await category.save();
-  res.status(201).json(created);
+    if (error?.code === 11000) {
+      res.status(409).json({
+        message: "Category already exists for this product type.",
+        keyValue: error.keyValue,
+      });
+    } else if (error?.name === "ValidationError") {
+      res.status(400).json({
+        message: "Validation failed. Check required fields and enums.",
+        details: error.errors,
+      });
+    } else {
+      res.status(500).json({ message: "Server error while creating category." });
+    }
+  }
 });
 
 // @desc    Update category
 // @route   PUT /api/categories/:id
-// @access  Admin
+// @access  Private/Admin
 const updateCategory = asyncHandler(async (req, res) => {
-  const {
-    name,
-    displayName,
-    productType,
-    filters,
-    description,
-    position,
-    isActive,
-    image,
-  } = req.body;
-
   const category = await Category.findById(req.params.id);
+
   if (!category) {
     res.status(404);
     throw new Error("Category not found");
   }
 
-  category.name = name ?? category.name;
-  category.displayName = displayName ?? category.displayName;
-  category.productType = productType ?? category.productType;
-  category.filters = filters ?? category.filters;
-  category.description = description ?? category.description;
-  category.position = position ?? category.position;
-  category.isActive = isActive ?? category.isActive;
-  category.image = image ?? category.image;
-
-  const updated = await category.save();
-  res.json(updated);
+  Object.assign(category, req.body);
+  const updatedCategory = await category.save();
+  res.json(updatedCategory);
 });
 
 // @desc    Delete category
 // @route   DELETE /api/categories/:id
-// @access  Admin
+// @access  Private/Admin
 const deleteCategory = asyncHandler(async (req, res) => {
   const category = await Category.findById(req.params.id);
+
   if (!category) {
     res.status(404);
     throw new Error("Category not found");
   }
 
   await category.deleteOne();
-  res.json({ message: "Category deleted" });
+  res.json({ message: "Category removed" });
+});
+
+// @desc    Delete all categories
+// @route   DELETE /api/categories
+// @access  Private/Admin
+const deleteAllCategories = asyncHandler(async (req, res) => {
+  try {
+    const result = await Category.deleteMany({});
+    res.json({
+      message: `All categories deleted successfully.`,
+      deletedCount: result.deletedCount,
+    });
+  } catch (error) {
+    console.error("❌ Failed to delete all categories:", error);
+    res.status(500).json({ message: "Server error while deleting all categories." });
+  }
 });
 
 export {
@@ -104,4 +102,5 @@ export {
   createCategory,
   updateCategory,
   deleteCategory,
+  deleteAllCategories, // 👈 export it
 };

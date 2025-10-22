@@ -1,142 +1,116 @@
+// models/Product.js
 import mongoose from "mongoose";
-import Category from "./categoryModel.js";
+import {
+  PRODUCT_TYPES, PARENT_COLORS, SIZES, GRADES, VARIANTS,
+} from "../constants.js";
+
+/** Uppercase, trim, and normalize tokens. Keep A–Z, 0–9, dot, and slash. */
+function sanitizeToken(value) {
+  if (!value) return "";
+  return String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9./]+/g, "-")  // spaces & others -> dash
+    .replace(/^-+|-+$/g, "");       // trim edge dashes
+}
+
+/** Build deterministic SKU using Category.key and product fields (skip empty parts). */
+async function buildSkuForDoc(doc) {
+  const Category = doc.model("Category");
+  const cat = await Category.findById(doc.category).select("key productType").lean();
+  if (!cat) throw new Error("Invalid category");
+
+  // Ensure productType mirrors category
+  doc.productType = cat.productType;
+
+  const parts = [
+    sanitizeToken(doc.productType),  // productType (from category)
+    sanitizeToken(cat.key),          // category key
+    sanitizeToken(doc.size),
+    sanitizeToken(doc.color),
+    sanitizeToken(doc.catalogCode),
+    sanitizeToken(doc.variant),
+    sanitizeToken(doc.grade),
+    sanitizeToken(doc.source),
+    sanitizeToken(doc.packingUnit),
+  ].filter(Boolean);
+
+  return parts.length ? parts.join("-") : "SKU";
+}
 
 const productSchema = new mongoose.Schema(
   {
-    // === PRIMARY FIELDS ===
-    name: { type: String, required: true },
-    productType: {
-      type: String,
-      enum: ["Ribbon", "Creasing Matrix", "Double Face Tape"],
-      required: true,
-    },
-    category: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Category",
-      required: true,
-    },
-    size: {
-      type: String,
-      enum: [
-        "1-inch",
-        "1/2-inch",
-        "3/4-inch",
-        "0.4x1.5-mm",
-        "0.5x1.5-mm",
-        "0.5x1.6-mm",
-        "6-mm",
-        "9-mm",
-        "10-mm",
-        "12-mm",
-      ],
-      required: true,
-    },
-    variant: {
-      type: String,
-      enum: ["100-yd", "150-yd", "35-yd", "50-m", "50-pcs"], // ✅ Added 50-pcs as a variant option
-      // not required ✅
-    },
+    name:         { type: String, required: true, trim: true },
+    displaySpecs: { type: String, trim: true },
 
-    color: String,
-    code: String,
-    sort: { type: Number },
+    productType:  { type: String, enum: PRODUCT_TYPES, required: true },
+    category:     { type: mongoose.Schema.Types.ObjectId, ref: "Category", required: true },
+    size:         { type: String, enum: SIZES, required: true },
 
-    displaySpecs: String, // Ex: "100-yd, A++, Code 117"
-    sku: { type: String, required: true, unique: true },
+    color:        { type: String, trim: true },
+    catalogCode:  { type: String, trim: true },
+    parentColor:  { type: String, enum: PARENT_COLORS, required: true, index: true },
 
-    // === OTHER FIELDS ===
-    moq: { type: Number, default: 1 },
-    isAvailable: { type: Boolean, default: true },
-    origin: String,
-    price: { type: Number, default: 0 },
-    unit: String,
-    images: { type: [String], default: [] },
-    description: String,
-    quality: {
-      type: String,
-      enum: ["A++", "A", "B"],
-    },
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
+    variant:      { type: String, enum: VARIANTS },
+    cbm:          { type: Number, min: 0, default: 0 },
+
+    grade:        { type: String, enum: GRADES },
+    source:       { type: String, trim: true },
+    packingUnit:  { type: String, trim: true },
+
+    sku:          { type: String, required: true, unique: true, trim: true },
+
+    moq:          { type: Number, default: 1 },
+    isAvailable:  { type: Boolean, default: true },
+    price:        { type: Number, default: 0 },
+    images:       { type: [String], default: [] },
+    description:  { type: String, trim: true },
+    sort:         { type: Number },
+    isActive:     { type: Boolean, default: true },
   },
   { timestamps: true }
 );
 
-// Indexes for efficient queries
-productSchema.index({ productType: 1 });
-productSchema.index({ category: 1 });
+/**
+ * Auto-sync productType from Category and build/rebuild SKU on create/update.
+ * No duplicate handling here — unique index on `sku` will surface conflicts.
+ */
+productSchema.pre("validate", async function(next) {
+  try {
+    if (!this.category) return next(new Error("Category is required"));
 
-// === AUTO-GENERATION HOOK ===
-productSchema.pre("validate", async function (next) {
-  const categoryModel = mongoose.model("Category");
-  const categoryDoc = await categoryModel.findById(this.category).lean();
-  const categoryName = categoryDoc?.displayName || categoryDoc?.name || "uncat";
+    // Fields that affect the SKU
+    const contributing = [
+      "category",
+      "productType", // will mirror category
+      "size",
+      "color",
+      "catalogCode",
+      "variant",
+      "grade",
+      "source",
+      "packingUnit",
+    ];
 
-  // First 2 capital letters of category name (still using raw name for SKU)
-  const categoryCode = (categoryDoc?.name || "uncat").slice(0, 2).toUpperCase();
+    const needsSku = !this.sku || contributing.some((f) => this.isModified(f));
+    if (needsSku) {
+      this.sku = await buildSkuForDoc(this);
+    }
 
-  if (
-    this.isModified("category") ||
-    this.isModified("size") ||
-    this.isModified("code")
-  ) {
-    const sizeCode =
-      this.size
-        ?.toUpperCase()
-        .replace(/[^A-Z0-9]/g, "")
-        .replace(/INCH/gi, "") || "NOSIZE";
-
-    const productCode =
-      this.code?.toUpperCase().replace(/\s+/g, "") || "NOCODE";
-    const randomSuffix = Date.now().toString().slice(-4);
-
-    this.sku = `${categoryCode}-${sizeCode}-${productCode}-${randomSuffix}`;
+    next();
+  } catch (err) {
+    next(err);
   }
-
-const capitalize = (str) =>
-  str
-    ?.split(" ")
-    .map((word) =>
-      word
-        .split("-")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-        .join("-")
-    )
-    .join(" ");
-
-
-  // === Generate Product Name ===
-  const nameParts = [
-    categoryName, // Use displayName as-is
-    this.color && capitalize(this.color),
-    this.size,
-    this.variant || undefined,
-    this.productType && capitalize(this.productType),
-  ].filter(Boolean);
-
-  this.name = nameParts.join(" ");
-
-  // === Generate Display Specs (for Ribbons only) ===
-  if (
-    this.productType === "Ribbon" &&
-    (this.isModified("code") ||
-      this.isModified("quality") ||
-      this.isModified("unit") ||
-      !this.displaySpecs)
-  ) {
-    const specParts = [];
-
-    if (this.quality) specParts.push(`Quality ${this.quality}`);
-    if (this.code) specParts.push(`Code #${this.code}`);
-    if (this.unit) specParts.push(this.unit);
-
-    this.displaySpecs = specParts.join(", ");
-  }
-
-  next();
 });
+
+// Helpful indexes
+productSchema.index({ productType: 1, category: 1, isActive: 1 });
+productSchema.index({ size: 1 });
+productSchema.index({ parentColor: 1 });
+productSchema.index({ catalogCode: 1 });
 
 const Product = mongoose.model("Product", productSchema);
 export default Product;
+
+// Optional bundle
+export const ENUMS = { PRODUCT_TYPES, PARENT_COLORS, SIZES, GRADES, VARIANTS };
