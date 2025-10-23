@@ -24,6 +24,7 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import quoteRoutes from "./routes/quoteRoutes.js";
 import invoiceRoutes from "./routes/invoiceRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
+import filterConfigRoutes from "./routes/filterConfigRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 // ✅ Initialize and connect to DB
@@ -77,6 +78,8 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/quotes", quoteRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/contact", contactRoutes);
+app.use("/api/filter-configs", filterConfigRoutes);
+
 
 // ✅ Error Handling
 app.use(notFound);
