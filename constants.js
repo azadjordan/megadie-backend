@@ -3,8 +3,8 @@
 export const PRODUCT_TYPES = ["Ribbon", "Creasing Matrix", "Double Face Tape"];
 
 export const PARENT_COLORS = [
-  "Red","Pink","Orange","Yellow","Green","Teal",
-  "Blue","Purple","Brown","Grey","Black","White", "OffWhite"
+  "Red","Pink","Orange","Yellow","Green",
+  "Blue","Purple","Brown","Grey","Black","White", "Beige"
 ];
 
 export const SIZES = [
