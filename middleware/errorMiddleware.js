@@ -1,56 +1,82 @@
+// middleware/errorMiddleware.js
 const notFound = (req, res, next) => {
-    const error = new Error(`Not Found - ${req.originalUrl}`);
-    res.status(404);
-    next(error);
+  const error = new Error(`Not Found - ${req.originalUrl}`);
+  res.status(404);
+  next(error);
 };
 
 const errorHandler = (err, req, res, next) => {
-    let statusCode = res.statusCode === 200 ? 500 : res.statusCode;
-    let message = err.message;
+  // If a handler set a status already, use it; otherwise default to 500
+  let statusCode = res.statusCode && res.statusCode !== 200 ? res.statusCode : 500;
+  let message = err.message || "Server error";
 
-    // Log the error details to the console for debugging
-    console.error({
-        message: message,
-        errorStack: err.stack,
-        method: req.method,
-        url: req.originalUrl,
-        body: req.body, // Optional: Log request body for context (avoid logging sensitive info)
+  // Log (avoid sensitive info in production)
+  const logPayload = {
+    message,
+    name: err.name,
+    code: err.code,
+    method: req.method,
+    url: req.originalUrl,
+  };
+  if (process.env.NODE_ENV !== "production") {
+    logPayload.errorStack = err.stack;
+    logPayload.body = req.body;
+  }
+  console.error(logPayload);
+
+  // ----- Mongoose / MongoDB standard cases -----
+
+  // Duplicate key
+  if (err && err.code === 11000) {
+    statusCode = 409; // Conflict
+    const fields = Object.keys(err.keyValue || {});
+    message = fields.length
+      ? `Duplicate value for: ${fields.join(", ")}`
+      : "Duplicate key error";
+    return res.status(statusCode).json({
+      message,
+      keyValue: err.keyValue,
+      stack: process.env.NODE_ENV === "production" ? "PanCake" : err.stack,
     });
+  }
 
-    // Specific error handling based on error type
-    if (err.name === 'CastError') {
-        message = `Resource not found with id of ${err.value}`;
-        statusCode = 404;
-    }
-
-    if (err.code === 11000) {
-        message = 'Duplicate field value entered';
-        statusCode = 400;
-    }
-
-    if (err.name === 'ValidationError') {
-        message = 'Validation failed';
-        const errors = Object.values(err.errors).map(e => e.message);
-        return res.status(statusCode).json({ message, errors });
-    }
-
-    if (err.name === 'JsonWebTokenError') {
-        message = 'Invalid token';
-        statusCode = 401;
-    }
-
-    if (err.name === 'TokenExpiredError') {
-        message = 'Token has expired';
-        statusCode = 401;
-    }
-
-    // Any other error types you want to handle can be added here
-
-    // Send the error response to the client
-    res.status(statusCode).json({
-        message,
-        stack: process.env.NODE_ENV === "production" ? "PanCake" : err.stack,
+  // CastError: invalid ObjectId / cast failure
+  if (err?.name === "CastError") {
+    statusCode = 400; // invalid input
+    message = `Invalid ${err.path}`;
+    return res.status(statusCode).json({
+      message,
+      value: err.value,
+      stack: process.env.NODE_ENV === "production" ? "PanCake" : err.stack,
     });
+  }
+
+  // ValidationError: schema/hook invalidation
+  if (err?.name === "ValidationError") {
+    statusCode = 400;
+    const errors = Object.values(err.errors || {}).map((e) => e.message);
+    return res.status(statusCode).json({
+      message: "Validation failed",
+      errors,
+      stack: process.env.NODE_ENV === "production" ? "PanCake" : err.stack,
+    });
+  }
+
+  // JWT
+  if (err?.name === "JsonWebTokenError") {
+    statusCode = 401;
+    message = "Invalid token";
+  }
+  if (err?.name === "TokenExpiredError") {
+    statusCode = 401;
+    message = "Token has expired";
+  }
+
+  // Fallback
+  res.status(statusCode).json({
+    message,
+    stack: process.env.NODE_ENV === "production" ? "PanCake" : err.stack,
+  });
 };
 
 export { notFound, errorHandler };

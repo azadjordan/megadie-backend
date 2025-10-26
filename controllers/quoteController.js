@@ -1,56 +1,59 @@
-import React from "react"; // ⬅️ REQUIRED
+import React from "react";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
 import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
 import sendEmail from "../utils/sendEmail.js";
 import buildQuoteEmail from "../utils/quoteRequestEmail.js";
-import sendTelegramAlert from "../utils/sendTelegramAlert.js"; // ✅ NEW
+import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 
-// @desc    Create a new quote (Client)
-// @route   POST /api/quotes
-// @access  Private
+/* =========================
+   Create new quote (Client)
+   POST /api/quotes
+   ========================= */
 export const createQuote = asyncHandler(async (req, res) => {
   const { requestedItems, clientToAdminNote } = req.body;
 
-  if (!requestedItems || requestedItems.length === 0) {
+  if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
     res.status(400);
-    throw new Error("No items in the quote.");
+    throw new Error("Quote must contain at least one item.");
   }
 
-  // Create the base quote
+  // Trust nothing about prices from client; schema will validate the rest
+  const safeItems = requestedItems.map((it) => ({
+    product: it.product,
+    qty: Number(it.qty),
+    unitPrice: 0,
+  }));
+
   const quote = await Quote.create({
     user: req.user._id,
-    requestedItems,
+    requestedItems: safeItems,
     clientToAdminNote,
-    totalPrice: 0,
   });
 
-  // Populate ONLY name and code for each product
-  const populatedQuote = await quote.populate({
+  const populated = await quote.populate({
     path: "requestedItems.product",
-    select: "name code",
+    select: "name code size",
   });
 
-  // ==== Email Notification ====
+  // Email (best-effort)
   try {
-    console.log("📧 Sending quote request email...");
-
     await sendEmail({
       to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
-      subject: "New Quote Request Received",
-      html: buildQuoteEmail({ user: req.user, quote: populatedQuote }),
+      subject: "🆕 New Quote Request Received",
+      html: buildQuoteEmail({ user: req.user, quote: populated }),
     });
-  } catch (error) {
-    console.error("❌ Failed to send email:", error);
+  } catch (err) {
+    console.error("❌ Email notification failed:", err.message);
   }
 
-  // ==== Telegram Alert ====
+  // Telegram (best-effort)
   try {
-    const itemList = populatedQuote.requestedItems
+    const itemList = populated.requestedItems
       .map((item) => {
         const prod = item.product || {};
-        const name = prod.name || "Unnamed product";
+        const name = prod.name || "Unnamed";
         const code = prod.code || "—";
         const qty = item.qty ?? "N/A";
         return `• ${name} — Qty: ${qty}\n   Code: ${code}`;
@@ -61,128 +64,166 @@ export const createQuote = asyncHandler(async (req, res) => {
       `📥 *New Quote Request*\n` +
       `👤 *Client:* ${req.user.name} (${req.user.email})\n` +
       `📝 *Note:* ${clientToAdminNote || "—"}\n` +
-      `📦 *Items:* ${requestedItems.length}\n\n` +
+      `📦 *Items:* ${safeItems.length}\n\n` +
       itemList;
 
     await sendTelegramAlert(message);
   } catch (err) {
-    console.error("❌ Failed to send Telegram alert:", err.message);
+    console.error("❌ Telegram alert failed:", err.message);
   }
 
-  // Return populated result so client gets name + code immediately
-  res.status(201).json(populatedQuote);
+  res.status(201).json(populated);
 });
 
-
-// @desc    Generate PDF version of a quote using React PDF
-// @route   GET /api/quotes/:id/pdf
-// @access  Private/Admin
-export const getQuotePDF = asyncHandler(async (req, res) => {
-  const quote = await Quote.findById(req.params.id)
-    .populate("user", "name email")
-    .populate("requestedItems.product", "name");
-
-  if (!quote) {
-    res.status(404);
-    throw new Error("Quote not found");
-  }
-
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename=quote-${quote._id}.pdf`);
-
-  const pdfStream = await renderToStream(React.createElement(QuotePDF, { quote }));
-  pdfStream.pipe(res);
-});
-
-// @desc    Get logged-in user's own quotes
-// @route   GET /api/quotes/my
-// @access  Private
+/* =========================
+   Get logged-in user's quotes
+   GET /api/quotes/my
+   ========================= */
 export const getMyQuotes = asyncHandler(async (req, res) => {
   const quotes = await Quote.find({ user: req.user._id })
     .populate("requestedItems.product", "name code size")
     .sort({ createdAt: -1 });
 
-  const sanitizedQuotes = quotes.map((quote) => {
-    const quoteObj = quote.toObject();
-
-    if (quote.status === "Requested") {
-      // Remove pricing info
-      quoteObj.requestedItems = quoteObj.requestedItems.map((item) => ({
-        product: item.product,
-        qty: item.qty,
+  // Hide pricing for "Requested"
+  const sanitized = quotes.map((q) => {
+    const obj = q.toObject();
+    if (q.status === "Requested") {
+      obj.requestedItems = obj.requestedItems.map((it) => ({
+        product: it.product,
+        qty: it.qty,
       }));
-
-      quoteObj.deliveryCharge = undefined;
-      quoteObj.extraFee = undefined;
-      quoteObj.totalPrice = undefined;
+      delete obj.deliveryCharge;
+      delete obj.extraFee;
+      delete obj.totalPrice;
     }
-
-    return quoteObj;
+    return obj;
   });
 
-  res.json(sanitizedQuotes);
+  res.json(sanitized);
 });
 
-
-
-// @desc    Get all quotes (Admin only) sorted from latest to oldest
-// @route   GET /api/quotes/admin
-// @access  Private/Admin
+/* =========================
+   Get all quotes (Admin)
+   GET /api/quotes/admin
+   ========================= */
 export const getQuotes = asyncHandler(async (req, res) => {
   const quotes = await Quote.find({})
     .populate("user", "name email")
     .populate("requestedItems.product", "name code size")
-    .sort({ createdAt: -1 }); // 👈 Sort by creation date, newest first
+    .sort({ createdAt: -1 });
 
   res.json(quotes);
 });
 
-// @desc    Get single quote by ID
-// @route   GET /api/quotes/:id
-// @access  Private/Admin or Owner
+/* =========================
+   Get quote by ID
+   GET /api/quotes/:id
+   ========================= */
 export const getQuoteById = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
     .populate("user", "name email")
     .populate("requestedItems.product", "name code size");
-
-  if (quote) {
-    // ✅ Allow user to access their own quote
-    if (req.user.isAdmin || req.user._id.equals(quote.user._id)) {
-      res.json(quote);
-    } else {
-      res.status(403);
-      throw new Error("Not authorized to view this quote.");
-    }
-  } else {
-    res.status(404);
-    throw new Error("Quote not found.");
-  }
-});
-
-// @desc    Update quote (Admin)
-// @route   PUT /api/quotes/:id
-// @access  Private/Admin
-export const updateQuote = asyncHandler(async (req, res) => {
-  const quote = await Quote.findById(req.params.id);
 
   if (!quote) {
     res.status(404);
     throw new Error("Quote not found.");
   }
 
-  // Apply updates from request body (including status if admin changes it)
-  Object.assign(quote, req.body);
+  const isAdmin = !!req.user?.isAdmin;
+  const isOwner = String(quote.user?._id || quote.user) === String(req.user._id);
+  if (!isAdmin && !isOwner) {
+    res.status(403);
+    throw new Error("Not authorized to view this quote.");
+  }
 
+  // Hide pricing from owners when still Requested
+  if (!isAdmin && quote.status === "Requested") {
+    const obj = quote.toObject();
+    obj.requestedItems = obj.requestedItems.map((it) => ({
+      product: it.product,
+      qty: it.qty,
+    }));
+    delete obj.deliveryCharge;
+    delete obj.extraFee;
+    delete obj.totalPrice;
+    return res.json(obj);
+  }
+
+  res.json(quote);
+});
+
+/* =========================
+   Generate PDF for quote (Admin only)
+   GET /api/quotes/:id/pdf
+   ========================= */
+export const getQuotePDF = asyncHandler(async (req, res) => {
+  const quote = await Quote.findById(req.params.id)
+    .populate("user", "name email")
+    .populate("requestedItems.product", "name code size");
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  const pdfStream = await renderToStream(React.createElement(QuotePDF, { quote }));
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename=quote-${quote._id}.pdf`);
+  pdfStream.pipe(res);
+});
+
+/* =========================
+   Update quote (Admin)
+   PUT /api/quotes/:id
+   ========================= */
+export const updateQuote = asyncHandler(async (req, res) => {
+  const quote = await Quote.findById(req.params.id);
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  // Admin may update requested items (prices/qty) if provided
+  if (Array.isArray(req.body.requestedItems)) {
+    quote.requestedItems = req.body.requestedItems.map((it) => ({
+      product: it.product,
+      qty: Number(it.qty),
+      unitPrice: Number(it.unitPrice),
+    }));
+  }
+
+  const allowed = new Set([
+    "status",
+    "deliveryCharge",
+    "extraFee",
+    "adminToAdminNote",
+    "adminToClientNote",
+  ]);
+
+  Object.keys(req.body || {}).forEach((k) => {
+    if (!allowed.has(k)) return;
+    if (k === "deliveryCharge" || k === "extraFee") {
+      const v = Number(req.body[k]);
+      if (!Number.isFinite(v) || v < 0) {
+        throw new Error(`${k} must be a non-negative number`);
+      }
+      quote[k] = v;
+    } else {
+      quote[k] = req.body[k];
+    }
+  });
+
+  // Totals are auto-recomputed by the model hook
   const updated = await quote.save();
   res.json(updated);
 });
 
-// @desc    Delete quote (Admin)
-// @route   DELETE /api/quotes/:id
-// @access  Private/Admin
+/* =========================
+   Delete quote (Admin)
+   DELETE /api/quotes/:id
+   ========================= */
 export const deleteQuote = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id);
-
   if (!quote) {
     res.status(404);
     throw new Error("Quote not found.");

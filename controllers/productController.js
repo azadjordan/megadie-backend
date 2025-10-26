@@ -27,7 +27,10 @@ const applyAttributesFilter = (filter, attributesObj) => {
     if (!ALLOWED_ATTRS.has(key)) continue;
     const v = attributesObj[key];
     const values = Array.isArray(v) ? v : [v];
-    const clean = values.filter((x) => x !== undefined && x !== null && String(x).length > 0);
+    const clean = values
+      .map((x) => (x === undefined || x === null ? "" : String(x)))
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
     if (clean.length) filter[key] = { $in: clean };
   }
 };
@@ -46,26 +49,9 @@ const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
 // @route   POST /api/products
 // @access  Private/Admin
 const createProduct = asyncHandler(async (req, res) => {
-  try {
-    const product = new Product(req.body);
-    const created = await product.save();
-    res.status(201).json(created);
-  } catch (error) {
-    if (error?.code === 11000) {
-      return res.status(409).json({
-        message: "Duplicate SKU — please modify one of the product fields to make it unique.",
-        keyValue: error.keyValue,
-      });
-    }
-    if (error?.name === "ValidationError") {
-      return res.status(400).json({
-        message: "Validation failed. Check provided values.",
-        details: error.errors,
-      });
-    }
-    console.error("❌ Failed to create product:", error);
-    res.status(500).json({ message: "Server error while creating product." });
-  }
+  const product = new Product(req.body);
+  const created = await product.save(); // Mongoose validations + hooks run here
+  res.status(201).json(created);
 });
 
 // ------------------------
@@ -78,28 +64,58 @@ const getProducts = asyncHandler(async (req, res) => {
   const { productType } = req.query;
   const { page, limit, skip } = parsePagination(req, { defaultLimit: 48, maxLimit: 100 });
 
-  const filter = { isActive: true }; // Hide inactive by default
+  // Only active products on the public shop
+  const filter = { isActive: true };
   const sort = {};
 
   if (productType) {
     filter.productType = productType;
-    if (productType === "Ribbon") sort.sort = 1;         // curated order
-    else sort.createdAt = -1;                             // newest first
+    // Curated ordering for Ribbons, otherwise newest first
+    if (productType === "Ribbon") sort.sort = 1;
+    else sort.createdAt = -1;
   } else {
     sort.createdAt = -1;
   }
 
+  // ---------------------
   // Category filter
+  // ---------------------
+  // IDs (already supported)
   const categoryIds = parseIds(req.query.categoryIds);
-  if (categoryIds.length) filter.category = { $in: categoryIds };
 
-  // Attributes filter
+  // NEW: keys (human-friendly) -> map to ObjectIds server-side
+  let idsFromKeys = [];
+  if (req.query.categoryKeys) {
+    const keys = Array.isArray(req.query.categoryKeys)
+      ? req.query.categoryKeys
+      : String(req.query.categoryKeys)
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+
+    if (keys.length) {
+      const Category = mongoose.model("Category");
+      const cats = await Category.find({
+        key: { $in: keys },
+        ...(productType ? { productType } : {}),
+      })
+        .select("_id")
+        .lean();
+      idsFromKeys = cats.map((c) => c._id);
+    }
+  }
+
+  const allCategoryIds = [...categoryIds, ...idsFromKeys];
+  if (allCategoryIds.length) filter.category = { $in: allCategoryIds };
+
+  // Attributes filter (size, parentColor, variant, etc.)
   applyAttributesFilter(filter, req.query.attributes);
 
   const [total, products] = await Promise.all([
     Product.countDocuments(filter),
     Product.find(filter)
-      .select("name images price size parentColor variant sku sort isAvailable productType category") // public projection
+      // Lean card payload for shop listing
+      .select("name displaySpecs moq images price sku isAvailable")
       .sort(Object.keys(sort).length ? sort : { createdAt: -1, _id: 1 })
       .skip(skip)
       .limit(limit)
@@ -122,6 +138,30 @@ const getProducts = asyncHandler(async (req, res) => {
 });
 
 // ------------------------
+// Get by id
+// ------------------------
+// @desc    Get product by ID
+// @route   GET /api/products/:id
+// @access  Public
+const getProductById = asyncHandler(async (req, res) => {
+  // If invalid ObjectId, Mongoose will throw a CastError handled by error middleware
+  const product = await Product.findById(req.params.id)
+    .populate("category", "name displayName productType key")
+    .lean(); // return ALL fields (no .select)
+
+  if (!product) {
+    res.status(404);
+    throw new Error("Product not found");
+  }
+
+  // Normalize _id → id for frontend consistency (since lean() bypasses toJSON())
+  product.id = product._id;
+  delete product._id;
+
+  res.json(product);
+});
+
+// ------------------------
 // Admin listing
 // ------------------------
 // @desc    Get filtered products for admin view (optional pagination)
@@ -130,7 +170,7 @@ const getProducts = asyncHandler(async (req, res) => {
 const getProductsAdmin = asyncHandler(async (req, res) => {
   const { productType } = req.query;
 
-  // optional pagination for admin; pass ?page and ?limit to use it
+  // optional pagination; pass ?page and ?limit to use it
   const hasPaging = !!(req.query.page || req.query.limit);
   const { page, limit, skip } = parsePagination(req, { defaultLimit: 50, maxLimit: 200 });
 
@@ -176,7 +216,6 @@ const getProductsAdmin = asyncHandler(async (req, res) => {
     });
   }
 
-  // No pagination requested → return full list (be careful on very large datasets)
   const products = await Product.find(filter)
     .populate("category", "name displayName productType key")
     .sort(Object.keys(sort).length ? sort : { createdAt: -1, _id: 1 })
@@ -186,42 +225,13 @@ const getProductsAdmin = asyncHandler(async (req, res) => {
 });
 
 // ------------------------
-// Get by id
-// ------------------------
-// @desc    Get product by ID
-// @route   GET /api/products/:id
-// @access  Public
-const getProductById = asyncHandler(async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) {
-    res.status(400);
-    throw new Error("Invalid product id");
-  }
-
-  const product = await Product.findById(req.params.id)
-    .populate("category", "name displayName productType key")
-    .lean();
-
-  if (!product) {
-    res.status(404);
-    throw new Error("Product not found");
-  }
-
-  res.json(product);
-});
-
-// ------------------------
 // Update
 // ------------------------
 // @desc    Update product
 // @route   PUT /api/products/:id
 // @access  Private/Admin
 const updateProduct = asyncHandler(async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) {
-    res.status(400);
-    throw new Error("Invalid product id");
-  }
-
-  const product = await Product.findById(req.params.id);
+  const product = await Product.findById(req.params.id); // CastError → middleware
   if (!product) {
     res.status(404);
     throw new Error("Product not found");
@@ -232,25 +242,8 @@ const updateProduct = asyncHandler(async (req, res) => {
     product[key] = req.body[key] ?? product[key];
   });
 
-  try {
-    const updated = await product.save();
-    res.json(updated);
-  } catch (error) {
-    if (error?.code === 11000) {
-      return res.status(409).json({
-        message: "Duplicate SKU after update — adjust fields to make SKU unique.",
-        keyValue: error.keyValue,
-      });
-    }
-    if (error?.name === "ValidationError") {
-      return res.status(400).json({
-        message: "Validation failed. Check provided values.",
-        details: error.errors,
-      });
-    }
-    console.error("❌ Failed to update product:", error);
-    res.status(500).json({ message: "Server error while updating product." });
-  }
+  const updated = await product.save(); // validations + hooks
+  res.json(updated);
 });
 
 // ------------------------
@@ -260,12 +253,7 @@ const updateProduct = asyncHandler(async (req, res) => {
 // @route   DELETE /api/products/:id
 // @access  Private/Admin
 const deleteProduct = asyncHandler(async (req, res) => {
-  if (!mongoose.isValidObjectId(req.params.id)) {
-    res.status(400);
-    throw new Error("Invalid product id");
-  }
-
-  const product = await Product.findById(req.params.id);
+  const product = await Product.findById(req.params.id); // CastError → middleware
   if (!product) {
     res.status(404);
     throw new Error("Product not found");
