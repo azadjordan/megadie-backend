@@ -15,27 +15,12 @@ const OrderItemSchema = new mongoose.Schema(
 
 const orderSchema = new mongoose.Schema(
   {
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      required: true,
-      ref: "User",
-      index: true,
-    },
+    user: { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User", index: true },
 
-    orderNumber: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
+    orderNumber: { type: String, required: true, unique: true, index: true },
 
-    // ✅ NEW: Optional link to Invoice; only allowed when status === "Delivered"
-    invoice: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Invoice",
-      default: null,
-      index: true,
-    },
+    // One-to-one optional link to Invoice; must be set only after delivery
+    invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null, index: true },
 
     orderItems: {
       type: [OrderItemSchema],
@@ -65,9 +50,6 @@ const orderSchema = new mongoose.Schema(
     adminToClientNote: { type: String },
 
     stockUpdated: { type: Boolean, default: false },
-
-    // Will be auto-synced with presence of `invoice` (see pre('save'))
-    invoiceGenerated: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
@@ -77,22 +59,23 @@ orderSchema.virtual("isDelivered").get(function () {
   return this.status === "Delivered";
 });
 
-/* ------------ Validators & Business Rules ------------ */
+// Backward-compatible virtual (replaces the old stored flag)
+orderSchema.virtual("invoiceGenerated").get(function () {
+  return !!this.invoice;
+});
 
+/* ------------ Validators & Business Rules ------------ */
 // Only allow attaching an invoice when the order is Delivered
 orderSchema.path("invoice").validate(function (val) {
-  if (val && this.status !== "Delivered") {
-    return false;
-  }
+  if (val && this.status !== "Delivered") return false;
   return true;
 }, "Invoice can only be attached after the order is delivered.");
 
 /* ------------ Hooks ------------ */
-
-// Pre-validate: generate orderNumber, compute totals, and stamp deliveredAt if needed
-orderSchema.pre("validate", async function (next) {
+// Generate order number & compute totals; stamp deliveredAt when first delivered
+orderSchema.pre("validate", function (next) {
   try {
-    // Generate order number: ORD-YYMMDD-XXXXXX
+    // ORD-YYMMDD-XXXXXX
     if (!this.orderNumber) {
       const now = new Date();
       const yy = String(now.getFullYear()).slice(-2);
@@ -102,7 +85,7 @@ orderSchema.pre("validate", async function (next) {
       this.orderNumber = `ORD-${yy}${mm}${dd}-${randomHex}`;
     }
 
-    // Compute line totals and grand total
+    // Recompute line totals & grand total
     let itemsSum = 0;
     this.orderItems = (this.orderItems || []).map((it) => {
       const unit = typeof it.unitPrice === "number" ? it.unitPrice : 0;
@@ -118,7 +101,7 @@ orderSchema.pre("validate", async function (next) {
     const extra = this.extraFee || 0;
     this.totalPrice = Math.max(0, itemsSum + delivery + extra);
 
-    // Stamp deliveredAt once when status is Delivered and no timestamp yet
+    // Stamp deliveredAt once when moving to Delivered
     if (this.status === "Delivered" && !this.deliveredAt) {
       this.deliveredAt = new Date();
     }
@@ -127,16 +110,6 @@ orderSchema.pre("validate", async function (next) {
   } catch (err) {
     next(err);
   }
-});
-
-// Keep invoiceGenerated in sync with presence of invoice (and delivery state)
-orderSchema.pre("save", function (next) {
-  if (this.invoice && this.status === "Delivered") {
-    this.invoiceGenerated = true;
-  } else if (!this.invoice) {
-    this.invoiceGenerated = false;
-  }
-  next();
 });
 
 /* ------------ Serialization ------------ */
@@ -152,11 +125,11 @@ orderSchema.set("toJSON", {
 /* ------------ Indexes ------------ */
 orderSchema.index({ user: 1, createdAt: -1 });
 
-// One-to-one safety: prevent the same invoice from being linked to multiple orders
+// Ensure one invoice cannot be linked to multiple orders
 orderSchema.index(
   { invoice: 1 },
   { unique: true, partialFilterExpression: { invoice: { $exists: true, $ne: null } } }
 );
 
-const Order = mongoose.model("Order", orderSchema);
+const Order = mongoose.models.Order || mongoose.model("Order", orderSchema);
 export default Order;

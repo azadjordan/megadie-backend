@@ -7,6 +7,10 @@ import sendEmail from "../utils/sendEmail.js";
 import buildQuoteEmail from "../utils/quoteRequestEmail.js";
 import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 
+// ===== Feature flags (defaults OFF) =====
+const ENABLE_EMAIL = process.env.ENABLE_EMAIL_NOTIFS === "true";
+const ENABLE_TELEGRAM = process.env.ENABLE_TELEGRAM_NOTIFS === "true";
+
 /* =========================
    Create new quote (Client)
    POST /api/quotes
@@ -37,43 +41,48 @@ export const createQuote = asyncHandler(async (req, res) => {
     select: "name code size",
   });
 
-  // Email (best-effort)
-  try {
-    await sendEmail({
-      to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
-      subject: "🆕 New Quote Request Received",
-      html: buildQuoteEmail({ user: req.user, quote: populated }),
-    });
-  } catch (err) {
-    console.error("❌ Email notification failed:", err.message);
+  // Email (best-effort, gated)
+  if (ENABLE_EMAIL) {
+    try {
+      await sendEmail({
+        to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
+        subject: "🆕 New Quote Request Received",
+        html: buildQuoteEmail({ user: req.user, quote: populated }),
+      });
+    } catch (err) {
+      console.error("❌ Email notification failed:", err.message);
+    }
   }
 
-  // Telegram (best-effort)
-  try {
-    const itemList = populated.requestedItems
-      .map((item) => {
-        const prod = item.product || {};
-        const name = prod.name || "Unnamed";
-        const code = prod.code || "—";
-        const qty = item.qty ?? "N/A";
-        return `• ${name} — Qty: ${qty}\n   Code: ${code}`;
-      })
-      .join("\n");
+  // Telegram (best-effort, gated)
+  if (ENABLE_TELEGRAM) {
+    try {
+      const itemList = populated.requestedItems
+        .map((item) => {
+          const prod = item.product || {};
+          const name = prod.name || "Unnamed";
+          const code = prod.code || "—";
+          const qty = item.qty ?? "N/A";
+          return `• ${name} — Qty: ${qty}\n   Code: ${code}`;
+        })
+        .join("\n");
 
-    const message =
-      `📥 *New Quote Request*\n` +
-      `👤 *Client:* ${req.user.name} (${req.user.email})\n` +
-      `📝 *Note:* ${clientToAdminNote || "—"}\n` +
-      `📦 *Items:* ${safeItems.length}\n\n` +
-      itemList;
+      const message =
+        `📥 *New Quote Request*\n` +
+        `👤 *Client:* ${req.user.name} (${req.user.email})\n` +
+        `📝 *Note:* ${clientToAdminNote || "—"}\n` +
+        `📦 *Items:* ${safeItems.length}\n\n` +
+        itemList;
 
-    await sendTelegramAlert(message);
-  } catch (err) {
-    console.error("❌ Telegram alert failed:", err.message);
+      await sendTelegramAlert(message);
+    } catch (err) {
+      console.error("❌ Telegram alert failed:", err.message);
+    }
   }
 
   res.status(201).json(populated);
 });
+
 
 /* =========================
    Get logged-in user's quotes

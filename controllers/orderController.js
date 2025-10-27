@@ -156,6 +156,13 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         res.status(404);
         throw new Error("Quote not found.");
       }
+
+      // ✅ Allow creating an order only if quote is Confirmed
+      if (quote.status !== "Confirmed") {
+        res.status(409);
+        throw new Error("Quote must be Confirmed before creating an order.");
+      }
+
       if (!Array.isArray(quote.requestedItems) || quote.requestedItems.length === 0) {
         res.status(400);
         throw new Error("Quote has no items.");
@@ -163,7 +170,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
 
       const orderItems = quote.requestedItems.map((it) => {
         const product = it.product;
-        const skuSnapshot = product?.sku || ""; // ✅ fixed: rely on Product.sku only
+        const skuSnapshot = product?.sku || "";
         if (!skuSnapshot) {
           res.status(400);
           throw new Error("Missing SKU on referenced product.");
@@ -185,7 +192,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         orderItems,
         deliveryCharge: Math.max(0, quote.deliveryCharge || 0),
         extraFee: Math.max(0, quote.extraFee || 0),
-        totalPrice: 0, // computed in pre('validate')
+        totalPrice: 0, // computed automatically in model
         clientToAdminNote: quote.clientToAdminNote,
         adminToAdminNote: quote.adminToAdminNote,
         adminToClientNote: quote.adminToClientNote,
@@ -195,6 +202,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
       const [order] = await Order.create([orderPayload], { session });
       createdOrder = order;
 
+      // Quote fully replaced by Order -> remove it
       await Quote.deleteOne({ _id: quote._id }).session(session);
     });
 
@@ -215,13 +223,13 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  // ❌ Still blocking orderItems edits
+  // ❌ Block direct modification of order items
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {
     res.status(400);
     throw new Error("Order items are immutable after creation and cannot be modified.");
   }
 
-  // ✅ Allow status edits even after delivery, but deliveredAt only set once
+  // ✅ Allow status edits, auto-stamp deliveredAt when first delivered
   const { status } = req.body;
   if (status && status === "Delivered" && !order.deliveredAt) {
     order.deliveredAt = new Date();
@@ -237,7 +245,6 @@ export const updateOrder = asyncHandler(async (req, res) => {
     "adminToAdminNote",
     "adminToClientNote",
     "stockUpdated",
-    "invoiceGenerated",
   ]);
 
   Object.keys(req.body || {}).forEach((k) => {
