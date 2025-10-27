@@ -1,4 +1,4 @@
-// ✅ orderRoutes.js
+// routes/orderRoutes.js
 import express from "express";
 import {
   getOrders,
@@ -6,11 +6,16 @@ import {
   getMyOrders,
   getOrderById,
   deleteOrder,
-  updateOrder, // ✅ Import the update controller
+  updateOrder,
 } from "../controllers/orderController.js";
+import { createInvoice } from "../controllers/invoiceController.js"; // ✅ add invoice creation here
 import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
+
+// ✅ Create an invoice for a specific order (admin)
+// POST /api/orders/:orderId/invoice
+router.post("/:orderId/invoice", protect, admin, createInvoice);
 
 // ✅ Get all orders (admin)
 router.get("/", protect, admin, getOrders);
@@ -25,7 +30,7 @@ router.post("/from-quote/:quoteId", protect, admin, createOrderFromQuote);
 router
   .route("/:id")
   .get(protect, getOrderById)
-  .put(protect, admin, updateOrder)    // ✅ Add update route
-  .delete(protect, admin, deleteOrder); // ✅ Delete route
+  .put(protect, admin, updateOrder)
+  .delete(protect, admin, deleteOrder);
 
 export default router;

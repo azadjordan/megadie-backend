@@ -1,12 +1,15 @@
+// controllers/paymentController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import Payment from "../models/paymentModel.js";
 import Invoice from "../models/invoiceModel.js";
-import { roundToTwo } from "../utils/rounding.js"; // ✅ Add this utility function
+import { roundToTwo } from "../utils/rounding.js";
 
-// @desc Get all payments for a specific invoice
-// @route GET /api/payments?invoice=invoiceId
-// @access Private/Admin
-const getPaymentsByInvoice = asyncHandler(async (req, res) => {
+/* =========================
+   GET /api/payments?invoice=invoiceId
+   Private/Admin (guarded in routes)
+   Get all payments for a specific invoice
+   ========================= */
+export const getPaymentsByInvoice = asyncHandler(async (req, res) => {
   const { invoice } = req.query;
   if (!invoice) {
     res.status(400);
@@ -17,97 +20,92 @@ const getPaymentsByInvoice = asyncHandler(async (req, res) => {
   res.json(payments);
 });
 
-// @desc Add payment to invoice and update status based on math
-// @route POST /api/payments/from-invoice/:invoiceId
-// @access Private/Admin
-const addPaymentToInvoice = asyncHandler(async (req, res) => {
-  const { amount, paymentMethod, note, paymentDate, paidTo } = req.body;
+/* =========================
+   POST /api/payments/from-invoice/:invoiceId
+   Private/Admin (guarded in routes)
+   Add payment to invoice and validate against remaining balance
+   ========================= */
+export const addPaymentToInvoice = asyncHandler(async (req, res) => {
+  const { amount, paymentMethod, note, paymentDate, paidTo } = req.body || {};
   const { invoiceId } = req.params;
 
-  const invoice = await Invoice.findById(invoiceId);
+  const invoice = await Invoice.findById(invoiceId).select("user amount");
   if (!invoice) {
     res.status(404);
-    throw new Error("Invoice not found");
+    throw new Error("Invoice not found.");
   }
 
-  const remainingDue = roundToTwo(invoice.amountDue - invoice.amountPaid);
-  const roundedAmount = roundToTwo(amount);
+  // Sum of already "Received" payments for this invoice
+  const received = await Payment.aggregate([
+    { $match: { invoice: invoice._id, status: "Received" } },
+    { $group: { _id: null, total: { $sum: "$amount" } } },
+  ]);
+  const totalPaid = roundToTwo(received[0]?.total || 0);
+  const remaining = roundToTwo(invoice.amount - totalPaid);
 
-  if (roundedAmount <= 0) {
+  const roundedAmount = roundToTwo(Number(amount));
+  if (!Number.isFinite(roundedAmount) || roundedAmount <= 0) {
     res.status(400);
-    throw new Error("Payment amount must be greater than zero.");
+    throw new Error("Payment amount must be a positive number.");
   }
-
-  if (roundedAmount > remainingDue) {
+  if (roundedAmount > remaining) {
     res.status(400);
     throw new Error(
-      `Payment amount exceeds remaining balance. Remaining due: ${remainingDue.toFixed(2)}`
+      `Payment amount exceeds remaining balance. Remaining due: ${remaining.toFixed(2)}`
     );
   }
-
-  if (!paidTo || paidTo.trim() === "") {
+  if (!paidTo || !String(paidTo).trim()) {
     res.status(400);
     throw new Error("The 'paidTo' field is required.");
   }
 
-  const payment = new Payment({
+  const payment = await Payment.create({
     invoice: invoice._id,
     user: invoice.user,
     amount: roundedAmount,
     paymentMethod,
     note,
     paymentDate: paymentDate || Date.now(),
-    paidTo: paidTo.trim(), // ✅ Store plain string
+    paidTo: String(paidTo).trim(),
+    status: "Received", // <- counted by Invoice virtuals
   });
 
-  await payment.save();
-
-  invoice.payments.push(payment._id);
-  invoice.amountPaid = roundToTwo(invoice.amountPaid + roundedAmount);
-
-  const isFullyPaid =
-    roundToTwo(invoice.amountPaid) === roundToTwo(invoice.amountDue);
-
-  if (isFullyPaid) {
-    invoice.status = "Paid";
-    invoice.paidAt = new Date();
-  } else if (invoice.amountPaid > 0) {
-    invoice.status = "Partially Paid";
-    invoice.paidAt = null;
-  } else {
-    invoice.status = "Unpaid";
-    invoice.paidAt = null;
-  }
-
-  await invoice.save();
+  // Recompute remaining after this payment
+  const newRemaining = roundToTwo(remaining - roundedAmount);
 
   res.status(201).json({
-    message: "✅ Payment added and invoice updated.",
-    invoice,
+    message: "✅ Payment recorded.",
     payment,
-    remainingDue: roundToTwo(invoice.amountDue - invoice.amountPaid),
+    invoice: { _id: invoice._id, amount: invoice.amount },
+    remainingDue: newRemaining,
+    totalPaid: roundToTwo(totalPaid + roundedAmount),
   });
 });
 
-// @desc    Get all payments (Admin)
-// @route   GET /api/payments
-// @access  Private/Admin
-const getAllPayments = asyncHandler(async (req, res) => {
-    const payments = await Payment.find({})
-      .populate("user", "name email")
-      .populate("invoice", "invoiceNumber amountDue status")
-      .sort({ createdAt: -1 }); // ✅ newest first
-  
-    res.json(payments);
-  });
-  
-// @desc    Get a payment by ID (Admin)
-// @route   GET /api/payments/:id
-// @access  Private/Admin
-const getPaymentById = asyncHandler(async (req, res) => {
+/* =========================
+   GET /api/payments
+   Private/Admin (guarded in routes)
+   Get all payments (Admin)
+   ========================= */
+export const getAllPayments = asyncHandler(async (_req, res) => {
+  const payments = await Payment.find({})
+    .populate("user", "name email")
+    // Note: invoice.status is a virtual that requires payment population; here we only fetch identifiers
+    .populate("invoice", "invoiceNumber amount")
+    .sort({ createdAt: -1 });
+
+  res.json(payments);
+});
+
+/* =========================
+   GET /api/payments/:id
+   Private/Admin (guarded in routes)
+   Get a payment by ID (Admin)
+   ========================= */
+export const getPaymentById = asyncHandler(async (req, res) => {
   const payment = await Payment.findById(req.params.id)
     .populate("user", "name email")
-    .populate("invoice", "invoiceNumber amountDue status");
+    .populate("invoice", "invoiceNumber amount");
 
   if (!payment) {
     res.status(404);
@@ -117,38 +115,31 @@ const getPaymentById = asyncHandler(async (req, res) => {
   res.json(payment);
 });
 
-// @desc    Get logged-in user's payments
-// @route   GET /api/payments/my
-// @access  Private
-// ✅ NEW CONTROLLER: getMyPayments
-const getMyPayments = asyncHandler(async (req, res) => {
-    const payments = await Payment.find({ user: req.user._id })
-      .populate("invoice", "invoiceNumber amountDue status")
-      .sort({ createdAt: -1 });
-  
-    res.json(payments);
-  });
-  
-// @desc    Delete a payment by ID (Admin only)
-// @route   DELETE /api/payments/:id
-// @access  Private/Admin
-const deletePayment = asyncHandler(async (req, res) => {
-  const payment = await Payment.findById(req.params.id);
+/* =========================
+   GET /api/payments/my
+   Private (guarded in routes)
+   Get logged-in user's payments
+   ========================= */
+export const getMyPayments = asyncHandler(async (req, res) => {
+  const payments = await Payment.find({ user: req.user._id })
+    .populate("invoice", "invoiceNumber amount")
+    .sort({ createdAt: -1 });
 
+  res.json(payments);
+});
+
+/* =========================
+   DELETE /api/payments/:id
+   Private/Admin (guarded in routes)
+   Delete a payment by ID (Admin)
+   ========================= */
+export const deletePayment = asyncHandler(async (req, res) => {
+  const payment = await Payment.findById(req.params.id);
   if (!payment) {
     res.status(404);
     throw new Error("Payment not found");
   }
 
   await payment.deleteOne();
-  res.json({ message: "Payment deleted" });
+  res.status(204).end();
 });
-
-export {
-  getAllPayments,
-  getPaymentById,
-  deletePayment,
-    addPaymentToInvoice,
-    getMyPayments,
-  getPaymentsByInvoice,
-};

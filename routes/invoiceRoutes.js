@@ -1,7 +1,7 @@
-// ✅ invoiceRoutes.js
+// routes/invoiceRoutes.js
 import express from "express";
 import {
-  createInvoice,
+  // createInvoice,  // ❌ moved to orderRoutes (nested under /orders/:orderId/invoice)
   getInvoices,
   getInvoiceById,
   updateInvoice,
@@ -13,22 +13,19 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
-// ✅ Generate a PDF version of an invoice
+// PDF (admin only)
 router.get("/:id/pdf", protect, admin, getInvoicePDF);
 
-// ✅ Create a new invoice (admin only)
-router.route("/").post(protect, admin, createInvoice);
+// My invoices (owner) — keep before "/:id"
+router.get("/my", protect, getMyInvoices);
 
-// ✅ Get current user's own invoices
-router.get("/my", protect, getMyInvoices); // 👈 this MUST come before "/:id"
+// All invoices (admin)
+router.get("/", protect, admin, getInvoices);
 
-// ✅ Get all invoices (admin only)
-router.route("/").get(protect, admin, getInvoices);
-
-// ✅ Get / update / delete a specific invoice
+// Single invoice: get / update / delete
 router
   .route("/:id")
-  .get(protect, getInvoiceById)
+  .get(protect, getInvoiceById)     // admin or owner (checked in controller)
   .put(protect, admin, updateInvoice)
   .delete(protect, admin, deleteInvoice);
 

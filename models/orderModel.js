@@ -19,7 +19,7 @@ const orderSchema = new mongoose.Schema(
 
     orderNumber: { type: String, required: true, unique: true, index: true },
 
-    // One-to-one optional link to Invoice; must be set only after delivery
+    // One-to-one optional link to Invoice
     invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null, index: true },
 
     orderItems: {
@@ -59,17 +59,17 @@ orderSchema.virtual("isDelivered").get(function () {
   return this.status === "Delivered";
 });
 
-// Backward-compatible virtual (replaces the old stored flag)
+// Backward-compatible virtual
 orderSchema.virtual("invoiceGenerated").get(function () {
   return !!this.invoice;
 });
 
 /* ------------ Validators & Business Rules ------------ */
-// Only allow attaching an invoice when the order is Delivered
+// ✅ Allow invoice link while Delivered **or** Cancelled (so you can flip status first, then delete)
 orderSchema.path("invoice").validate(function (val) {
-  if (val && this.status !== "Delivered") return false;
-  return true;
-}, "Invoice can only be attached after the order is delivered.");
+  if (!val) return true;
+  return this.status === "Delivered" || this.status === "Cancelled";
+}, "Invoice can only be attached after the order is delivered (or while cancelled).");
 
 /* ------------ Hooks ------------ */
 // Generate order number & compute totals; stamp deliveredAt when first delivered

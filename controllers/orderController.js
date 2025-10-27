@@ -2,6 +2,8 @@ import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Order from "../models/orderModel.js";
 import Quote from "../models/quoteModel.js";
+import Invoice from "../models/invoiceModel.js";
+import Payment from "../models/paymentModel.js";
 
 /* =========================
    Helpers
@@ -14,7 +16,7 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
 };
 
 /* =========================
-   Delete (Admin)
+   Delete (Admin) — only if Cancelled
    DELETE /api/orders/:id
    ========================= */
 export const deleteOrder = asyncHandler(async (req, res) => {
@@ -24,14 +26,36 @@ export const deleteOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  // ✅ Prevent deleting delivered orders
+  // ❌ Block deletion if still Delivered (you must flip to Cancelled first)
   if (order.status === "Delivered") {
     res.status(400);
-    throw new Error("Delivered orders cannot be deleted. Set status to 'Cancelled' instead.");
+    throw new Error("Delivered orders cannot be deleted. Change status to 'Cancelled' first, then delete.");
   }
 
-  await order.deleteOne();
-  res.status(204).end();
+  // ✅ Require explicit Cancelled before deletion (your confirm step)
+  if (order.status !== "Cancelled") {
+    res.status(409);
+    throw new Error("Only 'Cancelled' orders can be deleted. Update status to 'Cancelled' first.");
+  }
+
+  // 🔥 Cascade delete: payments → invoice → order (single transaction)
+  const session = await mongoose.startSession();
+  try {
+    await session.withTransaction(async () => {
+      if (order.invoice) {
+        const inv = await Invoice.findById(order.invoice).session(session);
+        if (inv) {
+          await Payment.deleteMany({ invoice: inv._id }, { session });
+          await inv.deleteOne({ session });
+        }
+      }
+      await order.deleteOne({ session });
+    });
+
+    res.status(204).end();
+  } finally {
+    session.endSession();
+  }
 });
 
 /* =========================
@@ -51,7 +75,7 @@ export const getOrderById = asyncHandler(async (req, res) => {
   const isAdmin = !!req.user?.isAdmin;
   const isOwner = String(order.user?._id || order.user) === String(req.user._id);
   if (!isAdmin && !isOwner) {
-    res.status(403); // ✅ changed from 401 to 403
+    res.status(403);
     throw new Error("Not authorized to view this order");
   }
 
@@ -157,7 +181,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         throw new Error("Quote not found.");
       }
 
-      // ✅ Allow creating an order only if quote is Confirmed
+      // ✅ Only from Confirmed quotes
       if (quote.status !== "Confirmed") {
         res.status(409);
         throw new Error("Quote must be Confirmed before creating an order.");
@@ -192,7 +216,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         orderItems,
         deliveryCharge: Math.max(0, quote.deliveryCharge || 0),
         extraFee: Math.max(0, quote.extraFee || 0),
-        totalPrice: 0, // computed automatically in model
+        totalPrice: 0, // computed in model
         clientToAdminNote: quote.clientToAdminNote,
         adminToAdminNote: quote.adminToAdminNote,
         adminToClientNote: quote.adminToClientNote,
@@ -202,7 +226,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
       const [order] = await Order.create([orderPayload], { session });
       createdOrder = order;
 
-      // Quote fully replaced by Order -> remove it
+      // Replace quote with order
       await Quote.deleteOne({ _id: quote._id }).session(session);
     });
 
@@ -223,16 +247,23 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  // ❌ Block direct modification of order items
+  // ❌ Keep items immutable after creation
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {
     res.status(400);
     throw new Error("Order items are immutable after creation and cannot be modified.");
   }
 
-  // ✅ Allow status edits, auto-stamp deliveredAt when first delivered
-  const { status } = req.body;
-  if (status && status === "Delivered" && !order.deliveredAt) {
+  const prevStatus = order.status;
+  const nextStatus = req.body.status;
+
+  // ✅ When marking Delivered, stamp deliveredAt once
+  if (nextStatus === "Delivered" && !order.deliveredAt) {
     order.deliveredAt = new Date();
+  }
+
+  // ✅ Allow Delivered → Cancelled (your reversal step); clear stamp (optional)
+  if (prevStatus === "Delivered" && nextStatus === "Cancelled") {
+    order.deliveredAt = null; // optional cleanup
   }
 
   const allowedTopLevel = new Set([

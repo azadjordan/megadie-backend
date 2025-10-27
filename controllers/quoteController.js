@@ -3,17 +3,14 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
 import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
-import sendEmail from "../utils/sendEmail.js";
-import buildQuoteEmail from "../utils/quoteRequestEmail.js";
-import sendTelegramAlert from "../utils/sendTelegramAlert.js";
-
-// ===== Feature flags (defaults OFF) =====
-const ENABLE_EMAIL = process.env.ENABLE_EMAIL_NOTIFS === "true";
-const ENABLE_TELEGRAM = process.env.ENABLE_TELEGRAM_NOTIFS === "true";
+// import sendEmail from "../utils/sendEmail.js";
+// import buildQuoteEmail from "../utils/quoteRequestEmail.js";
+// import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 
 /* =========================
-   Create new quote (Client)
    POST /api/quotes
+   Private (guarded in routes)
+   Create new quote (Client)
    ========================= */
 export const createQuote = asyncHandler(async (req, res) => {
   const { requestedItems, clientToAdminNote } = req.body;
@@ -41,52 +38,52 @@ export const createQuote = asyncHandler(async (req, res) => {
     select: "name code size",
   });
 
-  // Email (best-effort, gated)
-  if (ENABLE_EMAIL) {
-    try {
-      await sendEmail({
-        to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
-        subject: "🆕 New Quote Request Received",
-        html: buildQuoteEmail({ user: req.user, quote: populated }),
-      });
-    } catch (err) {
-      console.error("❌ Email notification failed:", err.message);
-    }
+  /* -------------------------------------------
+     Notifications (disabled for now — prod toggle)
+     -------------------------------------------
+  // Email (best-effort)
+  try {
+    await sendEmail({
+      to: ["azadkkurdi@gmail.com", "almomani95hu@gmail.com"],
+      subject: "🆕 New Quote Request Received",
+      html: buildQuoteEmail({ user: req.user, quote: populated }),
+    });
+  } catch (err) {
+    console.error("❌ Email notification failed:", err.message);
   }
 
-  // Telegram (best-effort, gated)
-  if (ENABLE_TELEGRAM) {
-    try {
-      const itemList = populated.requestedItems
-        .map((item) => {
-          const prod = item.product || {};
-          const name = prod.name || "Unnamed";
-          const code = prod.code || "—";
-          const qty = item.qty ?? "N/A";
-          return `• ${name} — Qty: ${qty}\n   Code: ${code}`;
-        })
-        .join("\n");
+  // Telegram (best-effort)
+  try {
+    const itemList = populated.requestedItems
+      .map((item) => {
+        const prod = item.product || {};
+        const name = prod.name || "Unnamed";
+        const code = prod.code || "—";
+        const qty = item.qty ?? "N/A";
+        return `• ${name} — Qty: ${qty}\n   Code: ${code}`;
+      })
+      .join("\n");
 
-      const message =
-        `📥 *New Quote Request*\n` +
-        `👤 *Client:* ${req.user.name} (${req.user.email})\n` +
-        `📝 *Note:* ${clientToAdminNote || "—"}\n` +
-        `📦 *Items:* ${safeItems.length}\n\n` +
-        itemList;
+    const message =
+      `📥 *New Quote Request*\n` +
+      `👤 *Client:* ${req.user.name} (${req.user.email})\n` +
+      `📝 *Note:* ${clientToAdminNote || "—"}\n` +
+      `📦 *Items:* ${safeItems.length}\n\n` +
+      itemList;
 
-      await sendTelegramAlert(message);
-    } catch (err) {
-      console.error("❌ Telegram alert failed:", err.message);
-    }
+    await sendTelegramAlert(message);
+  } catch (err) {
+    console.error("❌ Telegram alert failed:", err.message);
   }
+  ------------------------------------------- */
 
   res.status(201).json(populated);
 });
 
-
 /* =========================
-   Get logged-in user's quotes
    GET /api/quotes/my
+   Private (guarded in routes)
+   Get logged-in user's quotes
    ========================= */
 export const getMyQuotes = asyncHandler(async (req, res) => {
   const quotes = await Quote.find({ user: req.user._id })
@@ -112,10 +109,11 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   Get all quotes (Admin)
    GET /api/quotes/admin
+   Private/Admin (guarded in routes)
+   Get all quotes (Admin)
    ========================= */
-export const getQuotes = asyncHandler(async (req, res) => {
+export const getQuotes = asyncHandler(async (_req, res) => {
   const quotes = await Quote.find({})
     .populate("user", "name email")
     .populate("requestedItems.product", "name code size")
@@ -125,8 +123,9 @@ export const getQuotes = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   Get quote by ID
    GET /api/quotes/:id
+   Private (guarded in routes); owner or admin (checked here)
+   Get quote by ID
    ========================= */
 export const getQuoteById = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
@@ -162,8 +161,9 @@ export const getQuoteById = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   Generate PDF for quote (Admin only)
    GET /api/quotes/:id/pdf
+   Private/Admin (guarded in routes)
+   Generate PDF for quote
    ========================= */
 export const getQuotePDF = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
@@ -182,8 +182,9 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   Update quote (Admin)
    PUT /api/quotes/:id
+   Private/Admin (guarded in routes)
+   Update quote (without changing product IDs)
    ========================= */
 export const updateQuote = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id);
@@ -192,15 +193,74 @@ export const updateQuote = asyncHandler(async (req, res) => {
     throw new Error("Quote not found.");
   }
 
-  // Admin may update requested items (prices/qty) if provided
+  // If requestedItems provided, ensure product IDs are immutable
   if (Array.isArray(req.body.requestedItems)) {
-    quote.requestedItems = req.body.requestedItems.map((it) => ({
-      product: it.product,
-      qty: Number(it.qty),
-      unitPrice: Number(it.unitPrice),
-    }));
+    const current = quote.requestedItems || [];
+
+    // Build sets/maps for comparison & fast lookup
+    const currentIds = current.map((it) => String(it.product));
+    const incoming = req.body.requestedItems;
+
+    // Basic shape validation
+    for (const it of incoming) {
+      if (!it || !it.product) {
+        res.status(400);
+        throw new Error("Each requested item must include a product id.");
+      }
+    }
+
+    const incomingIds = incoming.map((it) => String(it.product));
+
+    // 1) same length
+    if (incomingIds.length !== currentIds.length) {
+      res.status(400);
+      throw new Error("You cannot add or remove items from the quote.");
+    }
+
+    // 2) same multiset (no reordering-based attacks)
+    const count = (arr) => arr.reduce((m, id) => (m[id] = (m[id] || 0) + 1, m), {});
+    const a = count(currentIds);
+    const b = count(incomingIds);
+    const sameSet = Object.keys(a).length === Object.keys(b).length &&
+      Object.keys(a).every((k) => a[k] === b[k]);
+
+    if (!sameSet) {
+      res.status(400);
+      throw new Error("You cannot change product IDs in quote items.");
+    }
+
+    // 3) merge only qty/unitPrice onto existing items by product id
+    const incomingByProduct = new Map(
+      incoming.map((it) => [String(it.product), it])
+    );
+
+    quote.requestedItems = current.map((existing) => {
+      const key = String(existing.product);
+      const inc = incomingByProduct.get(key);
+
+      // Parse & validate numbers if provided; fall back to existing
+      const nextQty = inc?.qty !== undefined ? Number(inc.qty) : existing.qty;
+      const nextUnit = inc?.unitPrice !== undefined ? Number(inc.unitPrice) : existing.unitPrice;
+
+      if (!Number.isFinite(nextQty) || nextQty <= 0) {
+        res.status(400);
+        throw new Error(`Invalid qty for product ${key}`);
+      }
+      if (!Number.isFinite(nextUnit) || nextUnit < 0) {
+        res.status(400);
+        throw new Error(`Invalid unitPrice for product ${key}`);
+      }
+
+      // Keep product id immutable; only update qty/unitPrice
+      return {
+        product: existing.product,
+        qty: nextQty,
+        unitPrice: nextUnit,
+      };
+    });
   }
 
+  // Whitelist simple fields
   const allowed = new Set([
     "status",
     "deliveryCharge",
@@ -214,6 +274,7 @@ export const updateQuote = asyncHandler(async (req, res) => {
     if (k === "deliveryCharge" || k === "extraFee") {
       const v = Number(req.body[k]);
       if (!Number.isFinite(v) || v < 0) {
+        res.status(400);
         throw new Error(`${k} must be a non-negative number`);
       }
       quote[k] = v;
@@ -222,14 +283,15 @@ export const updateQuote = asyncHandler(async (req, res) => {
     }
   });
 
-  // Totals are auto-recomputed by the model hook
+  // Totals auto-recompute in model hooks
   const updated = await quote.save();
   res.json(updated);
 });
 
 /* =========================
-   Delete quote (Admin)
    DELETE /api/quotes/:id
+   Private/Admin (guarded in routes)
+   Delete quote
    ========================= */
 export const deleteQuote = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id);

@@ -1,11 +1,10 @@
-// controllers/productController.js
 import mongoose from "mongoose";
 import Product from "../models/productModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 
-// ------------------------
-// Helpers
-// ------------------------
+/* =========================
+   Helpers
+   ========================= */
 const ALLOWED_ATTRS = new Set([
   "size", "parentColor", "variant", "grade", "source", "packingUnit",
   "catalogCode", "color", "isAvailable",
@@ -42,25 +41,23 @@ const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
   return { page, limit, skip };
 };
 
-// ------------------------
-// Create
-// ------------------------
-// @desc    Create a new product
-// @route   POST /api/products
-// @access  Private/Admin
-const createProduct = asyncHandler(async (req, res) => {
+/* =========================
+   POST /api/products
+   Private/Admin (guarded in routes)
+   Create a new product
+   ========================= */
+export const createProduct = asyncHandler(async (req, res) => {
   const product = new Product(req.body);
-  const created = await product.save(); // Mongoose validations + hooks run here
+  const created = await product.save(); // Mongoose validations + hooks
   res.status(201).json(created);
 });
 
-// ------------------------
-// Public listing (shop)
-// ------------------------
-// @desc    Get filtered products (public-facing shop view) with pagination
-// @route   GET /api/products
-// @access  Public
-const getProducts = asyncHandler(async (req, res) => {
+/* =========================
+   GET /api/products
+   Public
+   Get filtered products (public-facing shop view) with pagination
+   ========================= */
+export const getProducts = asyncHandler(async (req, res) => {
   const { productType } = req.query;
   const { page, limit, skip } = parsePagination(req, { defaultLimit: 48, maxLimit: 100 });
 
@@ -77,13 +74,10 @@ const getProducts = asyncHandler(async (req, res) => {
     sort.createdAt = -1;
   }
 
-  // ---------------------
-  // Category filter
-  // ---------------------
-  // IDs (already supported)
+  // Category filter: by ids
   const categoryIds = parseIds(req.query.categoryIds);
 
-  // NEW: keys (human-friendly) -> map to ObjectIds server-side
+  // Category filter: by keys (map to ids)
   let idsFromKeys = [];
   if (req.query.categoryKeys) {
     const keys = Array.isArray(req.query.categoryKeys)
@@ -137,14 +131,12 @@ const getProducts = asyncHandler(async (req, res) => {
   });
 });
 
-// ------------------------
-// Get by id
-// ------------------------
-// @desc    Get product by ID
-// @route   GET /api/products/:id
-// @access  Public
-const getProductById = asyncHandler(async (req, res) => {
-  // If invalid ObjectId, Mongoose will throw a CastError handled by error middleware
+/* =========================
+   GET /api/products/:id
+   Public
+   Get product by ID
+   ========================= */
+export const getProductById = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id)
     .populate("category", "name displayName productType key")
     .lean(); // return ALL fields (no .select)
@@ -154,20 +146,19 @@ const getProductById = asyncHandler(async (req, res) => {
     throw new Error("Product not found");
   }
 
-  // Normalize _id → id for frontend consistency (since lean() bypasses toJSON())
+  // Normalize _id → id for frontend consistency (lean() bypasses toJSON())
   product.id = product._id;
   delete product._id;
 
   res.json(product);
 });
 
-// ------------------------
-// Admin listing
-// ------------------------
-// @desc    Get filtered products for admin view (optional pagination)
-// @route   GET /api/products/admin
-// @access  Private/Admin
-const getProductsAdmin = asyncHandler(async (req, res) => {
+/* =========================
+   GET /api/products/admin
+   Private/Admin (guarded in routes)
+   Get filtered products for admin view (optional pagination)
+   ========================= */
+export const getProductsAdmin = asyncHandler(async (req, res) => {
   const { productType } = req.query;
 
   // optional pagination; pass ?page and ?limit to use it
@@ -224,14 +215,13 @@ const getProductsAdmin = asyncHandler(async (req, res) => {
   res.json(products);
 });
 
-// ------------------------
-// Update
-// ------------------------
-// @desc    Update product
-// @route   PUT /api/products/:id
-// @access  Private/Admin
-const updateProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id); // CastError → middleware
+/* =========================
+   PUT /api/products/:id
+   Private/Admin (guarded in routes)
+   Update product
+   ========================= */
+export const updateProduct = asyncHandler(async (req, res) => {
+  const product = await Product.findById(req.params.id); // CastError → error middleware
   if (!product) {
     res.status(404);
     throw new Error("Product not found");
@@ -246,28 +236,18 @@ const updateProduct = asyncHandler(async (req, res) => {
   res.json(updated);
 });
 
-// ------------------------
-// Delete
-// ------------------------
-// @desc    Delete product
-// @route   DELETE /api/products/:id
-// @access  Private/Admin
-const deleteProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id); // CastError → middleware
+/* =========================
+   DELETE /api/products/:id
+   Private/Admin (guarded in routes)
+   Delete product
+   ========================= */
+export const deleteProduct = asyncHandler(async (req, res) => {
+  const product = await Product.findById(req.params.id); // CastError → error middleware
   if (!product) {
     res.status(404);
     throw new Error("Product not found");
   }
 
   await product.deleteOne();
-  res.json({ message: "Product removed" });
+  res.status(204).end();
 });
-
-export {
-  getProducts,
-  getProductsAdmin,
-  getProductById,
-  createProduct,
-  updateProduct,
-  deleteProduct,
-};

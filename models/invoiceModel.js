@@ -14,8 +14,9 @@ const invoiceSchema = new mongoose.Schema(
       index: true,
     },
 
-    // Single monetary source of truth
-    amount: { type: Number, required: true, min: 0 },
+// Single monetary source of truth
+amount: { type: Number, required: true, min: 0, immutable: true },
+
 
     // Simple human-friendly number like the order number
     invoiceNumber: { type: String, required: true, unique: true, index: true },
