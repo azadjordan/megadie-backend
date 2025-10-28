@@ -198,29 +198,82 @@ export const updatePaymentMeta = asyncHandler(async (req, res) => {
 /* =========================
    DELETE /api/payments/:id
    Private/Admin
-   Hard delete (startup policy)
+   Hard delete + return invoice context & new totals
    ========================= */
 export const deletePayment = asyncHandler(async (req, res) => {
-  const payment = await Payment.findById(req.params.id).select("_id amount paymentMethod reference");
-  if (!payment) {
-    res.status(404);
-    throw new Error("Payment not found.");
+  const session = await mongoose.startSession();
+  try {
+    let snapshot, invId, invNumber = null, newTotalPaid = 0, newRemaining = 0;
+
+    await session.withTransaction(async () => {
+      // 1) Find the payment with minimal fields + invoice reference
+      const payment = await Payment.findById(req.params.id)
+        .select("_id amount paymentMethod reference invoice user status")
+        .session(session);
+
+      if (!payment) {
+        res.status(404);
+        throw new Error("Payment not found.");
+      }
+
+      // 2) Keep a snapshot for response
+      snapshot = {
+        paymentId: payment._id,
+        amount: payment.amount,
+        paymentMethod: payment.paymentMethod,
+        reference: payment.reference ?? null,
+        user: payment.user ?? null,
+      };
+
+      // 3) Resolve invoice context (optional but useful for UI)
+      invId = payment.invoice || null;
+
+      // Try to fetch invoice basic data for response & totals math
+      let invDoc = null;
+      if (invId) {
+        invDoc = await Invoice.findById(invId)
+          .select("_id amount invoiceNumber")
+          .session(session);
+
+        if (invDoc) {
+          invNumber = invDoc.invoiceNumber ?? null;
+        }
+      }
+
+      // 4) Delete the payment
+      await payment.deleteOne({ session });
+
+      // 5) If there is an invoice, recalc totals after deletion
+      if (invId && invDoc) {
+        // Sum only "Received" payments (same rule used on creation)
+        const paidAgg = await Payment.aggregate([
+          { $match: { invoice: invDoc._id, status: "Received" } },
+          { $group: { _id: null, total: { $sum: "$amount" } } },
+        ]).session(session);
+
+        newTotalPaid = roundToTwo(paidAgg?.[0]?.total || 0);
+        newRemaining = roundToTwo(invDoc.amount - newTotalPaid);
+      }
+    });
+
+    const message = invId
+      ? "Payment deleted and invoice totals recalculated."
+      : "Payment deleted.";
+
+    res.status(200).json({
+      success: true,
+      message,
+      ...snapshot,
+      invoice: invId
+        ? { _id: invId, invoiceNumber: invNumber }
+        : null,
+      totals: invId
+        ? { totalPaid: newTotalPaid, remainingDue: newRemaining }
+        : null,
+    });
+  } finally {
+    session.endSession();
   }
-
-  const snapshot = {
-    paymentId: payment._id,
-    amount: payment.amount,
-    paymentMethod: payment.paymentMethod,
-    reference: payment.reference ?? null,
-  };
-
-  await payment.deleteOne();
-
-  res.status(200).json({
-    success: true,
-    message: "Payment deleted successfully.",
-    ...snapshot,
-  });
 });
 
 /* =========================

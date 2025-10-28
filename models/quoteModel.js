@@ -60,8 +60,8 @@ const quoteSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["Requested", "Quoted", "Confirmed", "Rejected"],
-      default: "Requested",
+      enum: ["Processing", "Quoted", "Confirmed", "Rejected", "Cancelled"], // ← includes Cancelled
+      default: "Processing", // ← replaces Requested
       index: true,
     },
 
@@ -72,7 +72,7 @@ const quoteSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// ✅ Automatically compute totals before save
+// Recompute totals before save
 quoteSchema.pre("save", function (next) {
   const itemsTotal = (this.requestedItems || []).reduce(
     (sum, it) => sum + (Number(it.unitPrice) || 0) * (Number(it.qty) || 0),
@@ -83,6 +83,8 @@ quoteSchema.pre("save", function (next) {
   this.totalPrice = itemsTotal + delivery + extra;
   next();
 });
+
+// ⚠️ No delete guard here anymore — controller handles it.
 
 const Quote = mongoose.model("Quote", quoteSchema);
 export default Quote;

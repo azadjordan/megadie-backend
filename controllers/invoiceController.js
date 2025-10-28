@@ -315,7 +315,7 @@ export const updateInvoice = asyncHandler(async (req, res) => {
 /* =========================
    DELETE /api/invoices/:id
    Private/Admin
-   Cascade delete payments, unlink order.invoice
+   Cascade delete dependent payments, then unlink from parent order.
    ========================= */
 export const deleteInvoice = asyncHandler(async (req, res) => {
   const invoice = await Invoice.findById(req.params.id).select("_id order");

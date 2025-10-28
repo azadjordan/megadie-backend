@@ -140,7 +140,6 @@ export const getProducts = asyncHandler(async (req, res) => {
   });
 });
 
-
 /* =========================
    GET /api/products/:id
    Public

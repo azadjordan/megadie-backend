@@ -19,7 +19,7 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
    DELETE /api/orders/:id
    Private/Admin
    Delete order only if status === "Cancelled".
-   Cascades: delete invoice + its payments (if exist).
+   Cascades: delete dependent invoice + its dependent payments (if any).
    ========================= */
 export const deleteOrder = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id).select("_id status invoice");
@@ -195,6 +195,8 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
 
   const session = await mongoose.startSession();
   let createdOrder;
+  let quoteDeleted = false;
+  let deletedQuoteId = null;
 
   try {
     await session.withTransaction(async () => {
@@ -251,16 +253,24 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
       const [order] = await Order.create([orderPayload], { session });
       createdOrder = order;
 
-      await Quote.deleteOne({ _id: quote._id }).session(session);
+      // Delete the source quote and record result for the response
+      deletedQuoteId = quote._id;
+      const delRes = await Quote.deleteOne({ _id: quote._id }).session(session);
+      quoteDeleted = !!delRes?.deletedCount;
     });
 
-    // Best-practice header
     res.setHeader("Location", `/api/orders/${createdOrder._id}`);
 
     res.status(201).json({
       success: true,
-      message: "Order created from quote successfully.",
+      message: quoteDeleted
+        ? "Order created from quote successfully. Source quote deleted."
+        : "Order created from quote successfully. Source quote was not deleted.",
       data: createdOrder,
+      meta: {
+        quoteDeleted,
+        deletedQuoteId,
+      },
     });
   } finally {
     session.endSession();

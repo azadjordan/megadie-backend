@@ -284,7 +284,7 @@ export const updateQuote = asyncHandler(async (req, res) => {
 /* =========================
    DELETE /api/quotes/:id
    Private/Admin
-   Delete quote
+   Delete quote (only if Cancelled)
    ========================= */
 export const deleteQuote = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id);
@@ -293,8 +293,12 @@ export const deleteQuote = asyncHandler(async (req, res) => {
     throw new Error("Quote not found.");
   }
 
-  const snapshot = { quoteId: quote._id, status: quote.status };
+  if (quote.status !== "Cancelled") {
+    res.status(400);
+    throw new Error("Only quotes with status 'Cancelled' can be deleted.");
+  }
 
+  const snapshot = { quoteId: quote._id, status: quote.status };
   await quote.deleteOne();
 
   res.status(200).json({
@@ -303,3 +307,4 @@ export const deleteQuote = asyncHandler(async (req, res) => {
     ...snapshot,
   });
 });
+
