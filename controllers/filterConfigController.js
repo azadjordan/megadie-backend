@@ -56,8 +56,7 @@ function normalizeAndValidateFields(fields) {
       ]
         .filter(Boolean)
         .join(", ");
-      const msg = `Each field requires: ${missing}`;
-      const err = new Error(msg);
+      const err = new Error(`Each field requires: ${missing}`);
       err.statusCode = 400;
       throw err;
     }
@@ -87,24 +86,25 @@ function normalizeAndValidateFields(fields) {
 }
 
 /* =========================
-   Controllers
+   GET /api/filter-configs
+   Public
+   Returns all filter configurations (sorted)
    ========================= */
-
-/**
- * @desc    Get all filter configurations
- * @route   GET /api/filter-configs
- * @access  Public
- */
-export const getFilterConfigs = asyncHandler(async (req, res) => {
+export const getFilterConfigs = asyncHandler(async (_req, res) => {
   const configs = await FilterConfig.find({}).sort({ productType: 1 });
-  res.status(200).json(configs);
+  res.status(200).json({
+    success: true,
+    message: "Filter configurations retrieved successfully.",
+    total: configs.length,
+    data: configs,
+  });
 });
 
-/**
- * @desc    Get filter configuration by product type
- * @route   GET /api/filter-configs/:productType
- * @access  Public
- */
+/* =========================
+   GET /api/filter-configs/:productType
+   Public
+   Returns a single filter configuration by product type
+   ========================= */
 export const getFilterConfig = asyncHandler(async (req, res) => {
   const { productType } = req.params;
 
@@ -112,26 +112,30 @@ export const getFilterConfig = asyncHandler(async (req, res) => {
 
   if (!config) {
     res.status(404);
-    throw new Error(`Filter configuration not found for "${productType}"`);
+    throw new Error(`Filter configuration not found for "${productType}".`);
   }
 
-  res.status(200).json(config);
+  res.status(200).json({
+    success: true,
+    message: "Filter configuration retrieved successfully.",
+    data: config,
+  });
 });
 
-/**
- * @desc    Create new filter configuration
- * @route   POST /api/filter-configs/:productType
- * @access  Admin
- * @body    { fields: Array<FilterField> }
- */
+/* =========================
+   POST /api/filter-configs/:productType
+   Private/Admin
+   Body: { fields: Array<FilterField> }
+   Creates a new filter configuration for a product type
+   ========================= */
 export const createFilterConfig = asyncHandler(async (req, res) => {
   const { productType } = req.params;
-  const { fields = [] } = req.body;
+  const { fields = [] } = req.body || {};
 
   const existing = await FilterConfig.findOne({ productType });
   if (existing) {
     res.status(409);
-    throw new Error(`Filter configuration for "${productType}" already exists`);
+    throw new Error(`Filter configuration for "${productType}" already exists.`);
   }
 
   const normalizedFields = normalizeAndValidateFields(fields);
@@ -141,51 +145,90 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
     fields: normalizedFields,
   });
 
-  res.status(201).json(doc);
+  // Nice REST touch
+  res.setHeader("Location", `/api/filter-configs/${encodeURIComponent(productType)}`);
+
+  res.status(201).json({
+    success: true,
+    message: `Filter configuration for "${productType}" created successfully.`,
+    data: doc,
+  });
 });
 
-/**
- * @desc    Update existing filter configuration (replace fields array)
- * @route   PUT /api/filter-configs/:productType
- * @access  Admin
- * @body    { fields: Array<FilterField> }
- */
+/* =========================
+   PUT /api/filter-configs/:productType
+   Private/Admin
+   Body: { fields: Array<FilterField> }
+   Replaces the fields array for an existing configuration
+   ========================= */
 export const updateFilterConfig = asyncHandler(async (req, res) => {
   const { productType } = req.params;
-  const { fields } = req.body;
+  const { fields } = req.body || {};
 
   const config = await FilterConfig.findOne({ productType });
   if (!config) {
     res.status(404);
-    throw new Error(`Filter configuration not found for "${productType}"`);
+    throw new Error(`Filter configuration not found for "${productType}".`);
   }
 
+  const changes = {};
   if (typeof fields !== "undefined") {
     const normalizedFields = normalizeAndValidateFields(fields);
+
+    // produce a tiny diff summary (length + keys changed) to keep payload small
+    const beforeKeys = new Set((config.fields || []).map((f) => f.key));
+    const afterKeys = new Set(normalizedFields.map((f) => f.key));
+
+    const added = [...afterKeys].filter((k) => !beforeKeys.has(k));
+    const removed = [...beforeKeys].filter((k) => !afterKeys.has(k));
+
+    if (added.length || removed.length || (config.fields?.length || 0) !== normalizedFields.length) {
+      changes.fields = {
+        fromLength: config.fields?.length || 0,
+        toLength: normalizedFields.length,
+        addedKeys: added,
+        removedKeys: removed,
+      };
+    }
+
     config.fields = normalizedFields;
   }
 
   const updated = await config.save();
-  res.status(200).json(updated);
+
+  const changedKeys = Object.keys(changes);
+  const message = changedKeys.length
+    ? `Filter configuration updated successfully (${changedKeys.join(", ")}).`
+    : "Filter configuration saved (no changes detected).";
+
+  res.status(200).json({
+    success: true,
+    message,
+    changed: changes,
+    data: updated,
+  });
 });
 
-/**
- * @desc    Delete filter configuration
- * @route   DELETE /api/filter-configs/:productType
- * @access  Admin
- */
+/* =========================
+   DELETE /api/filter-configs/:productType
+   Private/Admin
+   Deletes a specific filter configuration
+   ========================= */
 export const deleteFilterConfig = asyncHandler(async (req, res) => {
   const { productType } = req.params;
 
   const config = await FilterConfig.findOne({ productType });
   if (!config) {
     res.status(404);
-    throw new Error(`Filter configuration not found for "${productType}"`);
+    throw new Error(`Filter configuration not found for "${productType}".`);
   }
 
   await config.deleteOne();
 
   res.status(200).json({
-    message: `Filter configuration for "${productType}" deleted successfully`,
+    success: true,
+    message: `Filter configuration for "${productType}" deleted successfully.`,
+    productType,
+    configId: config._id,
   });
 });

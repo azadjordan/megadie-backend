@@ -5,12 +5,7 @@ import Category from "../models/categoryModel.js";
 /* =========================
    GET /api/categories
    Public
-   Query:
-     - productType=Ribbon|Creasing Matrix|Double Face Tape|...
-     - isActive=true|false
-     - q=search string (matches key or label)
-     - page=1
-     - limit=50
+   Supports filters, search, and pagination
    ========================= */
 export const getCategories = asyncHandler(async (req, res) => {
   const { productType, isActive, q, page = 1, limit = 50 } = req.query;
@@ -35,6 +30,8 @@ export const getCategories = asyncHandler(async (req, res) => {
     .limit(perPage);
 
   res.status(200).json({
+    success: true,
+    message: "Categories retrieved successfully.",
     page: pageNum,
     pages: Math.ceil(total / perPage) || 1,
     limit: perPage,
@@ -46,23 +43,29 @@ export const getCategories = asyncHandler(async (req, res) => {
 /* =========================
    GET /api/categories/:id
    Public
+   Returns a single category by ID
    ========================= */
 export const getCategoryById = asyncHandler(async (req, res) => {
   const category = await Category.findById(req.params.id);
   if (!category) {
     res.status(404);
-    throw new Error("Category not found");
+    throw new Error("Category not found.");
   }
-  res.status(200).json(category);
+
+  res.status(200).json({
+    success: true,
+    message: "Category retrieved successfully.",
+    data: category,
+  });
 });
 
 /* =========================
    POST /api/categories
-   Private/Admin (guarded in routes)
+   Private/Admin
    Body:
      - key (string, required)
      - label (string, required)
-     - productType (string, required; must be in enum)
+     - productType (string, required; must match enum)
      - imageUrl (string, optional)
      - isActive (boolean, optional)
      - sort (number, optional)
@@ -72,7 +75,7 @@ export const createCategory = asyncHandler(async (req, res) => {
 
   if (!key || !label || !productType) {
     res.status(400);
-    throw new Error("key, label, and productType are required");
+    throw new Error("key, label, and productType are required.");
   }
 
   const category = await Category.create({
@@ -84,12 +87,17 @@ export const createCategory = asyncHandler(async (req, res) => {
     sort: typeof sort === "number" ? sort : 0,
   });
 
-  res.status(201).json(category);
+  res.status(201).json({
+    success: true,
+    message: "Category created successfully.",
+    data: category,
+  });
 });
 
 /* =========================
    PUT /api/categories/:id
-   Private/Admin (guarded in routes)
+   Private/Admin
+   Updates existing category fields
    ========================= */
 export const updateCategory = asyncHandler(async (req, res) => {
   const { key, label, productType, imageUrl, isActive, sort } = req.body || {};
@@ -97,41 +105,84 @@ export const updateCategory = asyncHandler(async (req, res) => {
   const category = await Category.findById(req.params.id);
   if (!category) {
     res.status(404);
-    throw new Error("Category not found");
+    throw new Error("Category not found.");
   }
 
-  if (typeof key !== "undefined") category.key = String(key).trim();
-  if (typeof label !== "undefined") category.label = String(label).trim();
-  if (typeof productType !== "undefined") category.productType = productType;
-  if (typeof imageUrl !== "undefined") category.imageUrl = imageUrl?.trim();
-  if (typeof isActive !== "undefined") category.isActive = !!isActive;
-  if (typeof sort !== "undefined") category.sort = Number(sort) || 0;
+  const changes = {};
+
+  if (typeof key !== "undefined" && key.trim() !== category.key) {
+    changes.key = { from: category.key, to: key.trim() };
+    category.key = key.trim();
+  }
+  if (typeof label !== "undefined" && label.trim() !== category.label) {
+    changes.label = { from: category.label, to: label.trim() };
+    category.label = label.trim();
+  }
+  if (typeof productType !== "undefined" && productType !== category.productType) {
+    changes.productType = { from: category.productType, to: productType };
+    category.productType = productType;
+  }
+  if (typeof imageUrl !== "undefined" && imageUrl !== category.imageUrl) {
+    changes.imageUrl = { from: category.imageUrl, to: imageUrl };
+    category.imageUrl = imageUrl?.trim();
+  }
+  if (typeof isActive !== "undefined" && isActive !== category.isActive) {
+    changes.isActive = { from: category.isActive, to: !!isActive };
+    category.isActive = !!isActive;
+  }
+  if (typeof sort !== "undefined" && Number(sort) !== category.sort) {
+    changes.sort = { from: category.sort, to: Number(sort) };
+    category.sort = Number(sort);
+  }
 
   const updated = await category.save();
-  res.status(200).json(updated);
+
+  const changedKeys = Object.keys(changes);
+  const message = changedKeys.length
+    ? `Category updated successfully (${changedKeys.join(", ")}).`
+    : "Category saved (no changes detected).";
+
+  res.status(200).json({
+    success: true,
+    message,
+    changed: changes,
+    data: updated,
+  });
 });
 
 /* =========================
    DELETE /api/categories/:id
-   Private/Admin (guarded in routes)
+   Private/Admin
+   Deletes a specific category
    ========================= */
 export const deleteCategory = asyncHandler(async (req, res) => {
   const category = await Category.findById(req.params.id);
   if (!category) {
     res.status(404);
-    throw new Error("Category not found");
+    throw new Error("Category not found.");
   }
 
   await category.deleteOne();
-  res.status(204).end();
+
+  res.status(200).json({
+    success: true,
+    message: `Category '${category.label}' deleted successfully.`,
+    categoryId: category._id,
+  });
 });
 
 /* =========================
    DELETE /api/categories
-   Private/Admin (guarded in routes)
-   Danger: deletes ALL categories
+   Private/Admin
+   Danger: Deletes ALL categories
    ========================= */
 export const deleteAllCategories = asyncHandler(async (_req, res) => {
-  await Category.deleteMany({});
-  res.status(204).end();
+  const result = await Category.deleteMany({});
+  const deletedCount = result.deletedCount || 0;
+
+  res.status(200).json({
+    success: true,
+    message: `All categories deleted successfully. (${deletedCount} removed.)`,
+    deletedCount,
+  });
 });

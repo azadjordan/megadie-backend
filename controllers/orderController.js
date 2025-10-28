@@ -6,7 +6,7 @@ import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
 
 /* =========================
-   Helpers
+   Helpers (pagination)
    ========================= */
 const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
@@ -16,51 +16,65 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
 };
 
 /* =========================
-   Delete (Admin) — only if Cancelled
    DELETE /api/orders/:id
+   Private/Admin
+   Delete order only if status === "Cancelled".
+   Cascades: delete invoice + its payments (if exist).
    ========================= */
 export const deleteOrder = asyncHandler(async (req, res) => {
-  const order = await Order.findById(req.params.id);
+  const order = await Order.findById(req.params.id).select("_id status invoice");
   if (!order) {
     res.status(404);
     throw new Error("Order not found.");
   }
 
-  // ❌ Block deletion if still Delivered (you must flip to Cancelled first)
   if (order.status === "Delivered") {
     res.status(400);
     throw new Error("Delivered orders cannot be deleted. Change status to 'Cancelled' first, then delete.");
   }
 
-  // ✅ Require explicit Cancelled before deletion (your confirm step)
   if (order.status !== "Cancelled") {
     res.status(409);
     throw new Error("Only 'Cancelled' orders can be deleted. Update status to 'Cancelled' first.");
   }
 
-  // 🔥 Cascade delete: payments → invoice → order (single transaction)
+  let paymentsDeleted = 0;
+  let invoiceDeleted = false;
+
   const session = await mongoose.startSession();
   try {
     await session.withTransaction(async () => {
       if (order.invoice) {
         const inv = await Invoice.findById(order.invoice).session(session);
         if (inv) {
-          await Payment.deleteMany({ invoice: inv._id }, { session });
+          const payDel = await Payment.deleteMany({ invoice: inv._id }, { session });
+          paymentsDeleted = payDel.deletedCount || 0;
           await inv.deleteOne({ session });
+          invoiceDeleted = true;
         }
       }
       await order.deleteOne({ session });
     });
 
-    res.status(204).end();
+    res.status(200).json({
+      success: true,
+      message:
+        invoiceDeleted
+          ? `Order deleted successfully. Associated invoice deleted and ${paymentsDeleted} payment(s) removed.`
+          : "Order deleted successfully.",
+      orderId: order._id,
+      invoiceDeleted,
+      paymentsDeleted,
+    });
   } finally {
     session.endSession();
   }
 });
 
 /* =========================
-   Get by ID (User or Admin)
    GET /api/orders/:id
+   Private (Owner) or Admin
+   Returns a single order by ID
    ========================= */
 export const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id)
@@ -69,22 +83,27 @@ export const getOrderById = asyncHandler(async (req, res) => {
 
   if (!order) {
     res.status(404);
-    throw new Error("Order not found");
+    throw new Error("Order not found.");
   }
 
   const isAdmin = !!req.user?.isAdmin;
   const isOwner = String(order.user?._id || order.user) === String(req.user._id);
   if (!isAdmin && !isOwner) {
     res.status(403);
-    throw new Error("Not authorized to view this order");
+    throw new Error("Not authorized to view this order.");
   }
 
-  res.json(order);
+  res.status(200).json({
+    success: true,
+    message: "Order retrieved successfully.",
+    data: order,
+  });
 });
 
 /* =========================
-   Get my orders (User)
    GET /api/orders/my
+   Private (Owner)
+   Paginated list of the authenticated user's orders
    ========================= */
 export const getMyOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, { defaultLimit: 20, maxLimit: 100 });
@@ -101,7 +120,9 @@ export const getMyOrders = asyncHandler(async (req, res) => {
       .lean(),
   ]);
 
-  res.json({
+  res.status(200).json({
+    success: true,
+    message: "Orders retrieved successfully.",
     data: orders,
     pagination: {
       page,
@@ -115,8 +136,10 @@ export const getMyOrders = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   Get all orders (Admin)
    GET /api/orders
+   Private/Admin
+   Paginated list of orders with optional filters
+   Query: status, user
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, { defaultLimit: 20, maxLimit: 200 });
@@ -126,7 +149,7 @@ export const getOrders = asyncHandler(async (req, res) => {
   if (req.query.user) {
     if (!mongoose.isValidObjectId(req.query.user)) {
       res.status(400);
-      throw new Error("Invalid user id");
+      throw new Error("Invalid user id.");
     }
     filter.user = req.query.user;
   }
@@ -143,7 +166,9 @@ export const getOrders = asyncHandler(async (req, res) => {
       .lean(),
   ]);
 
-  res.json({
+  res.status(200).json({
+    success: true,
+    message: "Orders retrieved successfully.",
     data: orders,
     pagination: {
       page,
@@ -157,14 +182,15 @@ export const getOrders = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   Create order from quote (Admin)
    POST /api/orders/from-quote/:quoteId
+   Private/Admin
+   Create an order from a Confirmed quote, then remove the quote
    ========================= */
 export const createOrderFromQuote = asyncHandler(async (req, res) => {
   const { quoteId } = req.params;
   if (!mongoose.isValidObjectId(quoteId)) {
     res.status(400);
-    throw new Error("Invalid quote id");
+    throw new Error("Invalid quote id.");
   }
 
   const session = await mongoose.startSession();
@@ -181,7 +207,6 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         throw new Error("Quote not found.");
       }
 
-      // ✅ Only from Confirmed quotes
       if (quote.status !== "Confirmed") {
         res.status(409);
         throw new Error("Quote must be Confirmed before creating an order.");
@@ -226,19 +251,26 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
       const [order] = await Order.create([orderPayload], { session });
       createdOrder = order;
 
-      // Replace quote with order
       await Quote.deleteOne({ _id: quote._id }).session(session);
     });
 
-    res.status(201).json(createdOrder);
+    // Best-practice header
+    res.setHeader("Location", `/api/orders/${createdOrder._id}`);
+
+    res.status(201).json({
+      success: true,
+      message: "Order created from quote successfully.",
+      data: createdOrder,
+    });
   } finally {
     session.endSession();
   }
 });
 
 /* =========================
-   Update order (Admin)
    PUT /api/orders/:id
+   Private/Admin
+   Update allowed top-level fields; orderItems are immutable
    ========================= */
 export const updateOrder = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id);
@@ -247,7 +279,6 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  // ❌ Keep items immutable after creation
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {
     res.status(400);
     throw new Error("Order items are immutable after creation and cannot be modified.");
@@ -256,14 +287,14 @@ export const updateOrder = asyncHandler(async (req, res) => {
   const prevStatus = order.status;
   const nextStatus = req.body.status;
 
-  // ✅ When marking Delivered, stamp deliveredAt once
+  // Delivered stamp (first time)
   if (nextStatus === "Delivered" && !order.deliveredAt) {
     order.deliveredAt = new Date();
   }
 
-  // ✅ Allow Delivered → Cancelled (your reversal step); clear stamp (optional)
+  // Delivered → Cancelled : clear stamp (optional)
   if (prevStatus === "Delivered" && nextStatus === "Cancelled") {
-    order.deliveredAt = null; // optional cleanup
+    order.deliveredAt = null;
   }
 
   const allowedTopLevel = new Set([
@@ -278,15 +309,57 @@ export const updateOrder = asyncHandler(async (req, res) => {
     "stockUpdated",
   ]);
 
-  Object.keys(req.body || {}).forEach((k) => {
-    if (!allowedTopLevel.has(k)) return;
-    if ((k === "deliveryCharge" || k === "extraFee") && typeof req.body[k] === "number") {
-      order[k] = Math.max(0, req.body[k]);
-    } else {
-      order[k] = req.body[k];
+  const changes = {};
+  for (const k of Object.keys(req.body || {})) {
+    if (!allowedTopLevel.has(k)) continue;
+
+    let newVal = req.body[k];
+    if ((k === "deliveryCharge" || k === "extraFee") && typeof newVal === "number") {
+      newVal = Math.max(0, newVal);
     }
-  });
+
+    // record diff if changed
+    const oldVal = order[k];
+    const different =
+      (oldVal instanceof Date && newVal instanceof Date && oldVal.getTime() !== newVal.getTime()) ||
+      (!(oldVal instanceof Date) && oldVal !== newVal);
+
+    if (different) {
+      changes[k] = { from: oldVal ?? null, to: newVal ?? null };
+      order[k] = newVal;
+    }
+  }
+
+  // Also reflect deliveredAt change in diff (from status logic)
+  if (prevStatus !== nextStatus) {
+    changes.status = { from: prevStatus, to: nextStatus };
+    // add deliveredAt to diff only if changed by logic above
+    // compare timestamps or nulls
+    const before = order.isModified("deliveredAt") ? order.get("deliveredAt") : undefined;
+    // We can't access pre-modified easily here; we’ll compute after save via boolean flag:
+  }
+
+  const didTouchDeliveredAt = order.isModified("deliveredAt");
 
   const updated = await order.save();
-  res.json(updated);
+
+  if (didTouchDeliveredAt) {
+    const beforeVal = changes?.deliveredAt?.from ?? null; // might not exist
+    const afterVal = updated.deliveredAt ?? null;
+    if ((beforeVal && !afterVal) || (!beforeVal && afterVal) || (beforeVal && afterVal && +beforeVal !== +afterVal)) {
+      changes.deliveredAt = { from: beforeVal, to: afterVal };
+    }
+  }
+
+  const changedKeys = Object.keys(changes);
+  const message = changedKeys.length
+    ? `Order updated successfully (${changedKeys.join(", ")}).`
+    : "Order saved (no changes detected).";
+
+  res.status(200).json({
+    success: true,
+    message,
+    changed: changes,
+    data: updated,
+  });
 });

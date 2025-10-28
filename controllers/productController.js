@@ -43,19 +43,26 @@ const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
 
 /* =========================
    POST /api/products
-   Private/Admin (guarded in routes)
+   Private/Admin
    Create a new product
    ========================= */
 export const createProduct = asyncHandler(async (req, res) => {
   const product = new Product(req.body);
-  const created = await product.save(); // Mongoose validations + hooks
-  res.status(201).json(created);
+  const created = await product.save(); // validations + hooks
+
+  res.setHeader("Location", `/api/products/${created._id}`);
+
+  res.status(201).json({
+    success: true,
+    message: "Product created successfully.",
+    data: created,
+  });
 });
 
 /* =========================
    GET /api/products
    Public
-   Get filtered products (public-facing shop view) with pagination
+   Filtered products (shop view) with pagination
    ========================= */
 export const getProducts = asyncHandler(async (req, res) => {
   const { productType } = req.query;
@@ -118,7 +125,9 @@ export const getProducts = asyncHandler(async (req, res) => {
 
   const totalPages = Math.max(Math.ceil(total / limit), 1);
 
-  res.json({
+  res.status(200).json({
+    success: true,
+    message: "Products retrieved successfully.",
     data: products,
     pagination: {
       page,
@@ -131,6 +140,7 @@ export const getProducts = asyncHandler(async (req, res) => {
   });
 });
 
+
 /* =========================
    GET /api/products/:id
    Public
@@ -139,24 +149,28 @@ export const getProducts = asyncHandler(async (req, res) => {
 export const getProductById = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id)
     .populate("category", "name displayName productType key")
-    .lean(); // return ALL fields (no .select)
+    .lean(); // return ALL fields
 
   if (!product) {
     res.status(404);
-    throw new Error("Product not found");
+    throw new Error("Product not found.");
   }
 
   // Normalize _id → id for frontend consistency (lean() bypasses toJSON())
   product.id = product._id;
   delete product._id;
 
-  res.json(product);
+  res.status(200).json({
+    success: true,
+    message: "Product retrieved successfully.",
+    data: product,
+  });
 });
 
 /* =========================
    GET /api/products/admin
-   Private/Admin (guarded in routes)
-   Get filtered products for admin view (optional pagination)
+   Private/Admin
+   Filtered products for admin view (optional pagination)
    ========================= */
 export const getProductsAdmin = asyncHandler(async (req, res) => {
   const { productType } = req.query;
@@ -194,7 +208,9 @@ export const getProductsAdmin = asyncHandler(async (req, res) => {
 
     const totalPages = Math.max(Math.ceil(total / limit), 1);
 
-    return res.json({
+    return res.status(200).json({
+      success: true,
+      message: "Products (admin) retrieved successfully.",
       data: products,
       pagination: {
         page,
@@ -212,42 +228,84 @@ export const getProductsAdmin = asyncHandler(async (req, res) => {
     .sort(Object.keys(sort).length ? sort : { createdAt: -1, _id: 1 })
     .lean();
 
-  res.json(products);
+  res.status(200).json({
+    success: true,
+    message: "Products (admin) retrieved successfully.",
+    data: products,
+  });
 });
 
 /* =========================
    PUT /api/products/:id
-   Private/Admin (guarded in routes)
-   Update product
+   Private/Admin
+   Update product (records a small diff)
    ========================= */
 export const updateProduct = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id); // CastError → error middleware
   if (!product) {
     res.status(404);
-    throw new Error("Product not found");
+    throw new Error("Product not found.");
   }
 
-  // Assign only provided keys (null/undefined handled by ??)
-  Object.keys(req.body).forEach((key) => {
-    product[key] = req.body[key] ?? product[key];
+  const changes = {};
+  const incoming = req.body || {};
+
+  Object.keys(incoming).forEach((key) => {
+    // Skip immutable Mongo fields
+    if (key === "_id" || key === "id") return;
+
+    const before = product[key];
+    const after  = incoming[key] ?? before;
+
+    // Only record/apply if actually different
+    const changed =
+      (before instanceof Date && after instanceof Date && +before !== +after) ||
+      (!(before instanceof Date) && before !== after);
+
+    if (changed) {
+      changes[key] = { from: before ?? null, to: after ?? null };
+      product[key] = after;
+    }
   });
 
   const updated = await product.save(); // validations + hooks
-  res.json(updated);
+
+  const changedKeys = Object.keys(changes);
+  const message = changedKeys.length
+    ? `Product updated successfully (${changedKeys.join(", ")}).`
+    : "Product saved (no changes detected).";
+
+  res.status(200).json({
+    success: true,
+    message,
+    changed: changes,
+    data: updated,
+  });
 });
 
 /* =========================
    DELETE /api/products/:id
-   Private/Admin (guarded in routes)
+   Private/Admin
    Delete product
    ========================= */
 export const deleteProduct = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id); // CastError → error middleware
   if (!product) {
     res.status(404);
-    throw new Error("Product not found");
+    throw new Error("Product not found.");
   }
 
+  const snapshot = {
+    productId: product._id,
+    name: product.name,
+    sku: product.sku,
+  };
+
   await product.deleteOne();
-  res.status(204).end();
+
+  res.status(200).json({
+    success: true,
+    message: "Product deleted successfully.",
+    ...snapshot,
+  });
 });

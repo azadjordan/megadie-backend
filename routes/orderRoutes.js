@@ -8,14 +8,9 @@ import {
   deleteOrder,
   updateOrder,
 } from "../controllers/orderController.js";
-import { createInvoice } from "../controllers/invoiceController.js"; // ✅ add invoice creation here
 import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
-
-// ✅ Create an invoice for a specific order (admin)
-// POST /api/orders/:orderId/invoice
-router.post("/:orderId/invoice", protect, admin, createInvoice);
 
 // ✅ Get all orders (admin)
 router.get("/", protect, admin, getOrders);
