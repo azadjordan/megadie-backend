@@ -2,21 +2,22 @@
 import mongoose from "mongoose";
 import crypto from "crypto";
 
+/* ========== Subschemas ========== */
 const OrderItemSchema = new mongoose.Schema(
   {
-    product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
-    sku: { type: String, required: true, trim: true },
-    qty: { type: Number, required: true, min: 1 },
+    product:   { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    sku:       { type: String, required: true, trim: true },
+    qty:       { type: Number, required: true, min: 1 },
     unitPrice: { type: Number, required: true, min: 0 },
     lineTotal: { type: Number, default: 0, min: 0 },
   },
   { _id: false }
 );
 
+/* ========== Main schema ========== */
 const orderSchema = new mongoose.Schema(
   {
-    user: { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User", index: true },
-
+    user:        { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User", index: true },
     orderNumber: { type: String, required: true, unique: true, index: true },
 
     // One-to-one optional link to Invoice
@@ -31,47 +32,60 @@ const orderSchema = new mongoose.Schema(
       required: true,
     },
 
-    totalPrice: { type: Number, required: true, default: 0, min: 0 },
+    totalPrice:     { type: Number, required: true, default: 0, min: 0 },
     deliveryCharge: { type: Number, required: true, default: 0, min: 0 },
-    extraFee: { type: Number, required: true, default: 0, min: 0 },
+    extraFee:       { type: Number, required: true, default: 0, min: 0 },
 
     deliveredBy: { type: String },
     deliveredAt: { type: Date },
 
-    status: {
-      type: String,
-      enum: ["Processing", "Delivered", "Cancelled"],
-      default: "Processing",
-      index: true,
-    },
+    status: { type: String, enum: ["Processing", "Delivered", "Cancelled"], default: "Processing", index: true },
 
     clientToAdminNote: { type: String },
-    adminToAdminNote: { type: String },
+    adminToAdminNote:  { type: String },
     adminToClientNote: { type: String },
 
-    stockUpdated: { type: Boolean, default: false },
+    /* ---- Stock deduction state (single source of truth) ---- */
+    stockDeducted: { type: Boolean, default: false }, // true => stock currently deducted
+
+    /* ---- Applied picks snapshot (used for exact reversal) ---- */
+    deliveredPicks: [
+      {
+        product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+        sku:     { type: String, required: true }, // snapshot for audit/UX even if product.sku changes
+        slot:    { type: mongoose.Schema.Types.ObjectId, ref: "Slot", required: true },
+        qty:     { type: Number, required: true, min: 1 },
+        at:      { type: Date, default: Date.now },
+      },
+    ],
+
+    /* ---- Optional audit timestamps ---- */
+    appliedAt:  { type: Date },
+    reversedAt: { type: Date },
   },
   { timestamps: true }
 );
 
-/* ------------ Virtuals ------------ */
+/* ========== Virtuals ========== */
 orderSchema.virtual("isDelivered").get(function () {
   return this.status === "Delivered";
 });
-
-// Backward-compatible virtual
+// Backward-compat: expose old name if any legacy code reads it
+orderSchema.virtual("stockUpdated").get(function () {
+  return this.stockDeducted;
+});
 orderSchema.virtual("invoiceGenerated").get(function () {
   return !!this.invoice;
 });
 
-/* ------------ Validators & Business Rules ------------ */
-// ✅ Allow invoice link while Delivered **or** Cancelled (so you can flip status first, then delete)
+/* ========== Validators & Business Rules ========== */
+// Allow invoice link while Delivered or Cancelled (so you can flip status first, then delete)
 orderSchema.path("invoice").validate(function (val) {
   if (!val) return true;
   return this.status === "Delivered" || this.status === "Cancelled";
 }, "Invoice can only be attached after the order is delivered (or while cancelled).");
 
-/* ------------ Hooks ------------ */
+/* ========== Hooks ========== */
 // Generate order number & compute totals; stamp deliveredAt when first delivered
 orderSchema.pre("validate", function (next) {
   try {
@@ -89,7 +103,7 @@ orderSchema.pre("validate", function (next) {
     let itemsSum = 0;
     this.orderItems = (this.orderItems || []).map((it) => {
       const unit = typeof it.unitPrice === "number" ? it.unitPrice : 0;
-      const qty = typeof it.qty === "number" ? it.qty : 0;
+      const qty  = typeof it.qty === "number" ? it.qty : 0;
       const lineTotal = Math.max(0, unit * qty);
       itemsSum += lineTotal;
 
@@ -98,7 +112,7 @@ orderSchema.pre("validate", function (next) {
     });
 
     const delivery = this.deliveryCharge || 0;
-    const extra = this.extraFee || 0;
+    const extra    = this.extraFee || 0;
     this.totalPrice = Math.max(0, itemsSum + delivery + extra);
 
     // Stamp deliveredAt once when moving to Delivered
@@ -112,7 +126,7 @@ orderSchema.pre("validate", function (next) {
   }
 });
 
-/* ------------ Serialization ------------ */
+/* ========== Serialization ========== */
 orderSchema.set("toJSON", {
   virtuals: true,
   versionKey: false,
@@ -122,10 +136,8 @@ orderSchema.set("toJSON", {
   },
 });
 
-/* ------------ Indexes ------------ */
+/* ========== Indexes ========== */
 orderSchema.index({ user: 1, createdAt: -1 });
-
-// Ensure one invoice cannot be linked to multiple orders
 orderSchema.index(
   { invoice: 1 },
   { unique: true, partialFilterExpression: { invoice: { $exists: true, $ne: null } } }
