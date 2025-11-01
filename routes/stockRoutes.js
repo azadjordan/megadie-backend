@@ -1,15 +1,11 @@
-// routes/stockRoutes.js
 import express from "express";
-import {
-  getOrderPicklist,
-  applyDeliveryPicks,
-  reverseDeliveryToSlots,
-} from "../controllers/stockController.js";
+import { protect, admin } from "../middleware/authMiddleware.js";
+import { autosuggestPicks, applyPicks, reversePicks } from "../controllers/stockController.js";
 
 const router = express.Router();
 
-router.get("/orders/:orderId/picklist", getOrderPicklist);
-router.post("/orders/:orderId/deliver-apply", applyDeliveryPicks);
-router.post("/orders/:orderId/deliver-reverse", reverseDeliveryToSlots);
+router.get("/:orderId/autosuggest",  protect, admin, autosuggestPicks);
+router.post("/:orderId/apply",       protect, admin, applyPicks);
+router.post("/:orderId/reverse",     protect, admin, reversePicks);
 
 export default router;
