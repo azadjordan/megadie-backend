@@ -1,19 +1,22 @@
 // models/slotModel.js
 import mongoose from "mongoose";
 
-const slotSchema = new mongoose.Schema(
-  {
-    store:    { type: String, required: true, trim: true },
-    unit:     { type: String, required: true, trim: true },  // e.g. "A"
-    position: { type: Number, required: true, min: 1, max: 16 },
-    label:    { type: String, required: true, trim: true },  // e.g. "A1"
-
-    cbm:      { type: Number, required: true, min: 0 },      // slot capacity in m³
-    isActive: { type: Boolean, default: true },
-    notes:    { type: String, trim: true },
+// models/slotModel.js
+const slotSchema = new mongoose.Schema({
+  store: {
+    type: String,
+    required: true,
+    trim: true,
+    enum: ["ALAIN-MWJ", ], // add new ones when you open new stores
   },
-  { timestamps: true }
-);
+  unit:     { type: String, required: true, trim: true },
+  position: { type: Number, required: true, min: 1, max: 16 },
+  label:    { type: String, required: true, trim: true },
+  cbm:      { type: Number, required: true, min: 0 },
+  isActive: { type: Boolean, default: true },
+  notes:    { type: String, trim: true },
+}, { timestamps: true });
+
 
 // Unique within a store
 slotSchema.index({ store: 1, unit: 1, position: 1 }, { unique: true });

@@ -25,9 +25,9 @@ import quoteRoutes from "./routes/quoteRoutes.js";
 import invoiceRoutes from "./routes/invoiceRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
 import filterConfigRoutes from "./routes/filterConfigRoutes.js";
-import stockRoutes from "./routes/stockRoutes.js";
 import slotRoutes from "./routes/slotRoutes.js";
 import slotItemRoutes from "./routes/slotItemRoutes.js";
+import inventoryRoutes from "./routes/inventoryRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 // ✅ Initialize and connect to DB
@@ -82,9 +82,9 @@ app.use("/api/quotes", quoteRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/contact", contactRoutes);
 app.use("/api/filter-configs", filterConfigRoutes);
-app.use("/api/stock", stockRoutes);
 app.use("/api/slots", slotRoutes);
 app.use("/api/slot-items", slotItemRoutes);
+app.use("/api/inventory", inventoryRoutes);
 
 // ✅ Error Handling
 app.use(notFound);
