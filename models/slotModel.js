@@ -1,3 +1,4 @@
+// models/slotModel.js
 import mongoose from "mongoose";
 
 const slotSchema = new mongoose.Schema(
@@ -17,11 +18,11 @@ const slotSchema = new mongoose.Schema(
 // Unique within a store
 slotSchema.index({ store: 1, unit: 1, position: 1 }, { unique: true });
 
-// Optional helper to auto-generate label like “A1”
+// Auto-generate label like “A1”
 slotSchema.pre("validate", function (next) {
   if (this.unit && this.position != null) this.label = `${this.unit}${this.position}`;
   next();
 });
 
-const Slot = mongoose.model("Slot", slotSchema);
+const Slot = mongoose.models.Slot || mongoose.model("Slot", slotSchema);
 export default Slot;

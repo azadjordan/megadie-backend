@@ -1,7 +1,6 @@
 // controllers/slotController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import Slot from "../models/slotModel.js";
-import SlotItem from "../models/slotItemModel.js";
 
 /* =========================
    GET /api/slots
@@ -141,31 +140,4 @@ export const deleteSlot = asyncHandler(async (req, res) => {
   res.status(200).json({ success: true, message: `Slot '${slot.label}' deleted successfully.`, slotId: slot._id });
 });
 
-/* =========================
-   GET /api/slots/:id/utilization
-   Private/Admin
-   Returns { occupiedCbm, cbm, utilization }
-   ========================= */
-export const getSlotUtilization = asyncHandler(async (req, res) => {
-  const slot = await Slot.findById(req.params.id);
-  if (!slot) {
-    res.status(404);
-    throw new Error("Slot not found.");
-  }
 
-  const usage = await SlotItem.aggregate([
-    { $match: { slot: slot._id } },
-    { $lookup: { from: "products", localField: "product", foreignField: "_id", as: "p" } },
-    { $unwind: "$p" },
-    { $group: { _id: null, occupiedCbm: { $sum: { $multiply: ["$qty", "$p.cbm"] } } } }
-  ]);
-
-  const occupiedCbm = usage[0]?.occupiedCbm ?? 0;
-  const utilization = slot.cbm > 0 ? (occupiedCbm / slot.cbm) : 0;
-
-  res.status(200).json({
-    success: true,
-    message: "Slot utilization calculated successfully.",
-    data: { slotId: slot._id, label: slot.label, cbm: slot.cbm, occupiedCbm, utilization },
-  });
-});
