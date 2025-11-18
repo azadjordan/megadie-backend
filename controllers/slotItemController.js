@@ -136,3 +136,32 @@ export const deleteSlotItem = asyncHandler(async (req, res) => {
     slotItemId: item._id,
   });
 });
+
+/* =========================
+   PUT /api/slot-items/:id
+   Body: qty (>=0)
+   ========================= */
+export const updateSlotItemQty = asyncHandler(async (req, res) => {
+  const { qty } = req.body || {};
+  if (typeof qty === "undefined" || isNaN(qty) || qty < 0) {
+    res.status(400);
+    throw new Error("Valid qty is required.");
+  }
+
+  const item = await SlotItem.findById(req.params.id);
+  if (!item) {
+    res.status(404);
+    throw new Error("Slot item not found.");
+  }
+
+  const oldQty = item.qty;
+  item.qty = Number(qty);
+  const saved = await item.save();
+
+  res.status(200).json({
+    success: true,
+    message: `Slot item quantity updated from ${oldQty} to ${saved.qty}.`,
+    data: saved,
+  });
+});
+
