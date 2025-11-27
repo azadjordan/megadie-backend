@@ -84,7 +84,6 @@ quoteSchema.pre("save", function (next) {
   next();
 });
 
-// ⚠️ No delete guard here anymore — controller handles it.
 
 const Quote = mongoose.model("Quote", quoteSchema);
 export default Quote;

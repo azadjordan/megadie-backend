@@ -7,7 +7,6 @@ import {
   createCategory,
   updateCategory,
   deleteCategory,
-  deleteAllCategories, // 👈 import it
 } from "../controllers/categoryController.js";
 
 import { protect, admin } from "../middleware/authMiddleware.js";
@@ -23,7 +22,6 @@ router
   .put(protect, admin, updateCategory)
   .delete(protect, admin, deleteCategory);
 
-// ✅ Delete all categories
-router.delete("/", protect, admin, deleteAllCategories);
+
 
 export default router;

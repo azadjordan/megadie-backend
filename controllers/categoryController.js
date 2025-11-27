@@ -67,8 +67,8 @@ export const getCategoryById = asyncHandler(async (req, res) => {
      - label (string, required)
      - productType (string, required; must match enum)
      - imageUrl (string, optional)
-     - isActive (boolean, optional)
-     - sort (number, optional)
+     - isActive (boolean|string, optional)
+     - sort (number|string, optional)
    ========================= */
 export const createCategory = asyncHandler(async (req, res) => {
   const { key, label, productType, imageUrl, isActive, sort } = req.body || {};
@@ -78,13 +78,32 @@ export const createCategory = asyncHandler(async (req, res) => {
     throw new Error("key, label, and productType are required.");
   }
 
+  const trimmedKey = String(key).trim();
+  const trimmedLabel = String(label).trim();
+
+  // Normalise isActive (supports boolean or "true"/"false" strings)
+  let isActiveValue = true;
+  if (typeof isActive !== "undefined") {
+    isActiveValue =
+      typeof isActive === "boolean"
+        ? isActive
+        : String(isActive).toLowerCase() === "true";
+  }
+
+  // Normalise sort (supports numbers or numeric strings)
+  let sortValue = 0;
+  if (typeof sort !== "undefined") {
+    const num = Number(sort);
+    sortValue = Number.isFinite(num) ? num : 0;
+  }
+
   const category = await Category.create({
-    key: String(key).trim(),
-    label: String(label).trim(),
+    key: trimmedKey,
+    label: trimmedLabel,
     productType,
     imageUrl: typeof imageUrl === "string" ? imageUrl.trim() : undefined,
-    isActive: typeof isActive === "boolean" ? isActive : true,
-    sort: typeof sort === "number" ? sort : 0,
+    isActive: isActiveValue,
+    sort: sortValue,
   });
 
   res.status(201).json({
@@ -110,29 +129,61 @@ export const updateCategory = asyncHandler(async (req, res) => {
 
   const changes = {};
 
-  if (typeof key !== "undefined" && key.trim() !== category.key) {
-    changes.key = { from: category.key, to: key.trim() };
-    category.key = key.trim();
+  // Safe key update (String + trim)
+  if (typeof key !== "undefined") {
+    const nextKey = String(key).trim();
+    if (nextKey !== category.key) {
+      changes.key = { from: category.key, to: nextKey };
+      category.key = nextKey;
+    }
   }
-  if (typeof label !== "undefined" && label.trim() !== category.label) {
-    changes.label = { from: category.label, to: label.trim() };
-    category.label = label.trim();
+
+  // Safe label update (String + trim)
+  if (typeof label !== "undefined") {
+    const nextLabel = String(label).trim();
+    if (nextLabel !== category.label) {
+      changes.label = { from: category.label, to: nextLabel };
+      category.label = nextLabel;
+    }
   }
+
+  // productType (assumed string / enum handled by schema)
   if (typeof productType !== "undefined" && productType !== category.productType) {
     changes.productType = { from: category.productType, to: productType };
     category.productType = productType;
   }
-  if (typeof imageUrl !== "undefined" && imageUrl !== category.imageUrl) {
-    changes.imageUrl = { from: category.imageUrl, to: imageUrl };
-    category.imageUrl = imageUrl?.trim();
+
+  // Safe imageUrl update
+  if (typeof imageUrl !== "undefined") {
+    const nextImageUrl =
+      typeof imageUrl === "string" ? imageUrl.trim() : undefined;
+
+    if (nextImageUrl !== category.imageUrl) {
+      changes.imageUrl = { from: category.imageUrl, to: nextImageUrl };
+      category.imageUrl = nextImageUrl;
+    }
   }
-  if (typeof isActive !== "undefined" && isActive !== category.isActive) {
-    changes.isActive = { from: category.isActive, to: !!isActive };
-    category.isActive = !!isActive;
+
+  // Normalised isActive update (boolean or "true"/"false" string)
+  if (typeof isActive !== "undefined") {
+    const nextIsActive =
+      typeof isActive === "boolean"
+        ? isActive
+        : String(isActive).toLowerCase() === "true";
+
+    if (nextIsActive !== category.isActive) {
+      changes.isActive = { from: category.isActive, to: nextIsActive };
+      category.isActive = nextIsActive;
+    }
   }
-  if (typeof sort !== "undefined" && Number(sort) !== category.sort) {
-    changes.sort = { from: category.sort, to: Number(sort) };
-    category.sort = Number(sort);
+
+  // Safe sort update (number or numeric string)
+  if (typeof sort !== "undefined") {
+    const nextSort = Number(sort);
+    if (Number.isFinite(nextSort) && nextSort !== category.sort) {
+      changes.sort = { from: category.sort, to: nextSort };
+      category.sort = nextSort;
+    }
   }
 
   const updated = await category.save();
@@ -168,21 +219,5 @@ export const deleteCategory = asyncHandler(async (req, res) => {
     success: true,
     message: `Category '${category.label}' deleted successfully.`,
     categoryId: category._id,
-  });
-});
-
-/* =========================
-   DELETE /api/categories
-   Private/Admin
-   Danger: Deletes ALL categories
-   ========================= */
-export const deleteAllCategories = asyncHandler(async (_req, res) => {
-  const result = await Category.deleteMany({});
-  const deletedCount = result.deletedCount || 0;
-
-  res.status(200).json({
-    success: true,
-    message: `All categories deleted successfully. (${deletedCount} removed.)`,
-    deletedCount,
   });
 });

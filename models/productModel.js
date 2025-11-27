@@ -6,6 +6,7 @@ import {
   SIZES,
   GRADES,
   VARIANTS,
+  PRICE_RULES,
 } from "../constants.js";
 
 /** Uppercase, trim, and normalize tokens. Keep A–Z, 0–9, dot, and slash. */
@@ -21,7 +22,11 @@ function sanitizeToken(value) {
 
 /** Pretty helpers for human-facing strings */
 const titleCase = (s) =>
-  !s ? "" : String(s).toLowerCase().replace(/\b\w/g, (m) => m.toUpperCase());
+  !s
+    ? ""
+    : String(s)
+        .toLowerCase()
+        .replace(/\b\w/g, (m) => m.toUpperCase());
 
 const prettySize = (size) => {
   if (!size) return "";
@@ -58,7 +63,6 @@ async function buildSkuForDoc(doc) {
     sanitizeToken(doc.catalogCode),
     sanitizeToken(doc.variant),
     sanitizeToken(doc.grade),
-    sanitizeToken(doc.source),      // included in SKU but NOT in displaySpecs/name
     sanitizeToken(doc.packingUnit),
   ].filter(Boolean);
 
@@ -79,7 +83,7 @@ async function buildSkuForDoc(doc) {
   const unitPretty = doc.packingUnit ? titleCase(doc.packingUnit) : "";
   const catalogPretty = doc.catalogCode || "";
 
-  // displaySpecs: includes everything except source
+  // displaySpecs: human-facing specs (no priceRule/parentColor/etc.)
   const displaySpecsParts = [
     productTypePretty,
     categoryName,
@@ -91,7 +95,7 @@ async function buildSkuForDoc(doc) {
     catalogPretty && `Catalog: ${catalogPretty}`,
   ].filter(Boolean);
 
-  // name: same as displaySpecs but without packingUnit & catalogCode (and source already excluded)
+  // name: same as displaySpecs but without packingUnit & catalogCode
   const nameParts = [
     productTypePretty,
     categoryName,
@@ -122,6 +126,14 @@ const productSchema = new mongoose.Schema(
     },
     size: { type: String, enum: SIZES, required: true },
 
+    // Assign a pricing group so many SKUs can share the same rule
+    priceRule: {
+      type: String,
+      enum: PRICE_RULES,
+      required: [true, "priceRule is required"],
+      index: true,
+    },
+
     color: { type: String, trim: true },
     catalogCode: { type: String, trim: true },
     parentColor: {
@@ -136,14 +148,13 @@ const productSchema = new mongoose.Schema(
     // Numbers can be integers or decimals
     cbm: { type: Number, min: 0, default: 0 },
     grade: { type: String, enum: GRADES },
-    source: { type: String, trim: true },
+    // source removed completely
     packingUnit: { type: String, trim: true },
 
     sku: { type: String, required: true, unique: true, trim: true }, // unique index via field option
 
     moq: { type: Number, default: 1, min: 1 },
     isAvailable: { type: Boolean, default: true },
-    price: { type: Number, default: 0, min: 0 },
 
     // Basic URL guard on images (length + simple scheme/path check)
     images: {
@@ -189,7 +200,6 @@ productSchema.pre("validate", async function (next) {
       "catalogCode",
       "variant",
       "grade",
-      "source",
       "packingUnit",
       // NOTE: parentColor is intentionally NOT included; it's for filtering only
     ];

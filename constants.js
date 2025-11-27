@@ -18,3 +18,10 @@ export const VARIANTS = ["100-yd","150-yd","35-yd","50-m","50-pcs"];
 
 export const FILTER_FIELD_TYPES = ["enum","boolean","range","text"];
 export const FILTER_UI_TYPES    = ["chips","select","checkbox","slider","search"];
+
+export const PRICE_RULES = [
+  "RIBBON_25MM",
+  "RIBBON_50MM",
+  "VELVET_25MM",
+  "VELVET_50MM",
+];
