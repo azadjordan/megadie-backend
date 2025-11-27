@@ -1,11 +1,11 @@
-// models/clientPriceModel.js
+// models/userPriceModel.js
 import mongoose from "mongoose";
 
-const clientPriceSchema = new mongoose.Schema(
+const userPriceSchema = new mongoose.Schema(
   {
-    client: {
+    user: {
       type: mongoose.Schema.Types.ObjectId,
-      ref: "User",       // your user model
+      ref: "User",
       required: true,
     },
 
@@ -25,11 +25,11 @@ const clientPriceSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// One price per (client, rule)
-clientPriceSchema.index(
-  { client: 1, priceRule: 1 },
+// One price per (user, priceRule)
+userPriceSchema.index(
+  { user: 1, priceRule: 1 },
   { unique: true }
 );
 
-const ClientPrice = mongoose.model("ClientPrice", clientPriceSchema);
-export default ClientPrice;
+const UserPrice = mongoose.model("UserPrice", userPriceSchema);
+export default UserPrice;
