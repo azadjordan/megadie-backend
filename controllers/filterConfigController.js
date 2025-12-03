@@ -9,19 +9,27 @@ import FilterConfig from "../models/filterConfigModel.js";
 const toStringTrim = (v) => (typeof v === "string" ? v.trim() : v);
 
 /** Normalize one field entry */
-function normalizeField(raw) {
-  const key = toStringTrim(raw.key);
+function normalizeField(raw = {}) {
+  // normalize key as lowercase for consistent uniqueness & lookups
+  const keyRaw = toStringTrim(raw.key);
+  const key = typeof keyRaw === "string" ? keyRaw.toLowerCase() : keyRaw;
+
   const label = toStringTrim(raw.label);
   const type = toStringTrim(raw.type);
   const ui = toStringTrim(raw.ui);
 
+  // stricter allowedValues handling:
+  // - drop null/undefined
+  // - trim
+  // - drop empty strings
+  // - keep first occurrence order (via Set)
   const allowedValues = Array.isArray(raw.allowedValues)
     ? Array.from(
         new Set(
           raw.allowedValues
-            .map((x) => String(x))
-            .map((s) => s.trim())
-            .filter(Boolean)
+            .filter((v) => v !== null && v !== undefined)
+            .map((x) => String(x).trim())
+            .filter((s) => s.length > 0)
         )
       )
     : [];
@@ -42,7 +50,11 @@ function normalizeField(raw) {
 
 /** Normalize the whole fields array and ensure unique keys */
 function normalizeAndValidateFields(fields) {
-  if (!Array.isArray(fields)) return [];
+  if (!Array.isArray(fields)) {
+    const err = new Error("`fields` must be an array.");
+    err.statusCode = 400;
+    throw err;
+  }
 
   const normalized = fields.map(normalizeField);
 
@@ -62,7 +74,7 @@ function normalizeAndValidateFields(fields) {
     }
   }
 
-  // Ensure unique keys
+  // Ensure unique keys (now case-insensitive because we lowered them)
   const keyCounts = normalized.reduce((acc, f) => {
     acc[f.key] = (acc[f.key] || 0) + 1;
     return acc;
@@ -91,7 +103,8 @@ function normalizeAndValidateFields(fields) {
    Returns all filter configurations (sorted)
    ========================= */
 export const getFilterConfigs = asyncHandler(async (_req, res) => {
-  const configs = await FilterConfig.find({}).sort({ productType: 1 });
+  const configs = await FilterConfig.find({}).sort({ productType: 1 }).lean();
+
   res.status(200).json({
     success: true,
     message: "Filter configurations retrieved successfully.",
@@ -108,7 +121,7 @@ export const getFilterConfigs = asyncHandler(async (_req, res) => {
 export const getFilterConfig = asyncHandler(async (req, res) => {
   const { productType } = req.params;
 
-  const config = await FilterConfig.findOne({ productType });
+  const config = await FilterConfig.findOne({ productType }).lean();
 
   if (!config) {
     res.status(404);
@@ -135,7 +148,9 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
   const existing = await FilterConfig.findOne({ productType });
   if (existing) {
     res.status(409);
-    throw new Error(`Filter configuration for "${productType}" already exists.`);
+    throw new Error(
+      `Filter configuration for "${productType}" already exists.`
+    );
   }
 
   const normalizedFields = normalizeAndValidateFields(fields);
@@ -146,7 +161,10 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
   });
 
   // Nice REST touch
-  res.setHeader("Location", `/api/filter-configs/${encodeURIComponent(productType)}`);
+  res.setHeader(
+    "Location",
+    `/api/filter-configs/${encodeURIComponent(productType)}`
+  );
 
   res.status(201).json({
     success: true,
@@ -182,7 +200,11 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
     const added = [...afterKeys].filter((k) => !beforeKeys.has(k));
     const removed = [...beforeKeys].filter((k) => !afterKeys.has(k));
 
-    if (added.length || removed.length || (config.fields?.length || 0) !== normalizedFields.length) {
+    if (
+      added.length ||
+      removed.length ||
+      (config.fields?.length || 0) !== normalizedFields.length
+    ) {
       changes.fields = {
         fromLength: config.fields?.length || 0,
         toLength: normalizedFields.length,

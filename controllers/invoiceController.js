@@ -53,31 +53,81 @@ const buildInvoiceMatch = (req) => {
 /* =========================
    GET /api/invoices/:id/pdf
    Private/Admin
+   Generate PDF for invoice with correct totals/status
    ========================= */
 export const getInvoicePDF = asyncHandler(async (req, res) => {
   const invoice = await Invoice.findById(req.params.id)
     .populate("user", "name email")
     .populate({
       path: "order",
-      select: "orderNumber totalPrice status orderItems deliveredAt",
+      // include charges + items so PDF can break down totals
+      select:
+        "orderNumber totalPrice status orderItems deliveredAt deliveryCharge extraFee",
       populate: { path: "orderItems.product", select: "name" },
     })
-    .populate("payments");
+    .populate("payments"); // full payments; we'll filter in code
 
   if (!invoice) {
     res.status(404);
     throw new Error("Invoice not found.");
   }
 
+  // --- Compute totalPaid, balanceDue, and derived status ---
+  const paymentsArray = Array.isArray(invoice.payments)
+    ? invoice.payments
+    : [];
+
+  // Match getInvoices: only status === "Received" counts as paid
+  const totalPaid = paymentsArray
+    .filter((p) => p && p.status === "Received")
+    .reduce((sum, p) => sum + (p.amount || 0), 0);
+
+  const amount = typeof invoice.amount === "number" ? invoice.amount : 0;
+  const balanceDue = Math.max(amount - totalPaid, 0);
+
+  const now = new Date();
+  let computedStatus = "Unpaid";
+
+  if (totalPaid >= amount && amount > 0) {
+    computedStatus = "Paid";
+  } else if (
+    invoice.dueDate &&
+    now > invoice.dueDate &&
+    totalPaid < amount
+  ) {
+    computedStatus = totalPaid > 0 ? "Overdue" : "Overdue";
+  } else if (totalPaid > 0 && totalPaid < amount) {
+    computedStatus = "Partially Paid";
+  } else {
+    computedStatus = "Unpaid";
+  }
+
+  // Attach computed values to the document so InvoicePDF can use them
+  // (they don't need to exist in the schema, we just pass them through)
+  invoice.totalPaid = totalPaid;
+  invoice.balanceDue = balanceDue;
+  invoice.status = computedStatus;
+
+  // --- PDF response headers ---
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
     "Content-Disposition",
     `inline; filename=invoice-${invoice.invoiceNumber || invoice._id}.pdf`
   );
 
+  // You can optionally pass a company object if you want branding tweaks
+  const company = {
+    name: "Megadie",
+    short: "Megadie",
+    display: "Megadie.com",
+    sub: "",
+    footer: "Read T&C at www.megadie.com",
+  };
+
   const pdfStream = await renderToStream(
-    createElement(InvoicePDF, { invoice, order: invoice.order })
+    createElement(InvoicePDF, { invoice, order: invoice.order, company })
   );
+
   pdfStream.pipe(res);
 });
 
@@ -361,9 +411,19 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
    ========================= */
 export const getMyInvoices = asyncHandler(async (req, res) => {
   const invoices = await Invoice.find({ user: req.user._id })
-    .populate("order", "orderNumber totalPrice status")
+    .populate("order", "orderNumber") // 👈 only load orderNumber
     .populate("payments")
     .sort({ createdAt: -1 });
 
-  res.json(invoices);
+  // Strip everything except orderNumber from the populated order
+  const sanitized = invoices.map((inv) => {
+    const obj = inv.toObject();
+    if (obj.order && typeof obj.order === "object") {
+      obj.order = { orderNumber: obj.order.orderNumber };
+    }
+    return obj;
+  });
+
+  res.json(sanitized);
 });
+

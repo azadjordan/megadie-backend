@@ -84,6 +84,7 @@ quoteSchema.pre("save", function (next) {
   next();
 });
 
+quoteSchema.index({ user: 1, createdAt: -1 });
 
 const Quote = mongoose.model("Quote", quoteSchema);
 export default Quote;

@@ -243,10 +243,11 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         orderItems,
         deliveryCharge: Math.max(0, quote.deliveryCharge || 0),
         extraFee: Math.max(0, quote.extraFee || 0),
-        totalPrice: 0, // computed in model
-        clientToAdminNote: quote.clientToAdminNote,
-        adminToAdminNote: quote.adminToAdminNote,
-        adminToClientNote: quote.adminToClientNote,
+        totalPrice: 0, // computed in Order model
+        // 🚫 Do not carry over any notes from the quote:
+        // clientToAdminNote: undefined,
+        // adminToAdminNote: undefined,
+        // adminToClientNote: undefined,
         status: "Processing",
       };
 
@@ -289,13 +290,41 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
+  // ❌ Order items are never editable after creation
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {
     res.status(400);
     throw new Error("Order items are immutable after creation and cannot be modified.");
   }
 
+  const hasInvoice = !!order.invoice;
+
+  // 🔒 If an invoice exists, lock financial fields and user
+  if (hasInvoice) {
+    const forbiddenIfInvoiced = [
+      "deliveryCharge",
+      "extraFee",
+      "totalPrice",
+      "user",
+    ];
+
+    const triedForbidden = Object.keys(req.body || {}).filter((k) =>
+      forbiddenIfInvoiced.includes(k)
+    );
+
+    if (triedForbidden.length > 0) {
+      res.status(400);
+      throw new Error(
+        `Cannot modify ${triedForbidden.join(
+          ", "
+        )} because an invoice already exists for this order. ` +
+        `If you truly need to change pricing or customer, first delete the linked invoice ` +
+        `(/api/invoices/:id), which will also delete its payments, then update the order and recreate the invoice.`
+      );
+    }
+  }
+
   const prevStatus = order.status;
-  const nextStatus = req.body.status;
+  const nextStatus = req.body.status ?? prevStatus;
 
   // Delivered stamp (first time)
   if (nextStatus === "Delivered" && !order.deliveredAt) {
@@ -308,10 +337,10 @@ export const updateOrder = asyncHandler(async (req, res) => {
   }
 
   const allowedTopLevel = new Set([
-    "user",
+    "user",                 // allowed unless invoice exists (guarded above)
     "status",
-    "deliveryCharge",
-    "extraFee",
+    "deliveryCharge",       // allowed unless invoice exists (guarded above)
+    "extraFee",             // allowed unless invoice exists (guarded above)
     "deliveredBy",
     "clientToAdminNote",
     "adminToAdminNote",
@@ -324,11 +353,11 @@ export const updateOrder = asyncHandler(async (req, res) => {
     if (!allowedTopLevel.has(k)) continue;
 
     let newVal = req.body[k];
+
     if ((k === "deliveryCharge" || k === "extraFee") && typeof newVal === "number") {
       newVal = Math.max(0, newVal);
     }
 
-    // record diff if changed
     const oldVal = order[k];
     const different =
       (oldVal instanceof Date && newVal instanceof Date && oldVal.getTime() !== newVal.getTime()) ||
@@ -340,25 +369,16 @@ export const updateOrder = asyncHandler(async (req, res) => {
     }
   }
 
-  // Also reflect deliveredAt change in diff (from status logic)
   if (prevStatus !== nextStatus) {
     changes.status = { from: prevStatus, to: nextStatus };
-    // add deliveredAt to diff only if changed by logic above
-    // compare timestamps or nulls
-    const before = order.isModified("deliveredAt") ? order.get("deliveredAt") : undefined;
-    // We can't access pre-modified easily here; we’ll compute after save via boolean flag:
   }
 
   const didTouchDeliveredAt = order.isModified("deliveredAt");
-
   const updated = await order.save();
 
   if (didTouchDeliveredAt) {
-    const beforeVal = changes?.deliveredAt?.from ?? null; // might not exist
     const afterVal = updated.deliveredAt ?? null;
-    if ((beforeVal && !afterVal) || (!beforeVal && afterVal) || (beforeVal && afterVal && +beforeVal !== +afterVal)) {
-      changes.deliveredAt = { from: beforeVal, to: afterVal };
-    }
+    changes.deliveredAt = { from: null, to: afterVal };
   }
 
   const changedKeys = Object.keys(changes);

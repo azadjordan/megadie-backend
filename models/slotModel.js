@@ -1,29 +1,62 @@
 // models/slotModel.js
 import mongoose from "mongoose";
+import {
+  SLOT_STORES,
+  SLOT_UNITS,
+  SLOT_POSITIONS,
+} from "../constants.js";
 
-// models/slotModel.js
-const slotSchema = new mongoose.Schema({
-  store: {
-    type: String,
-    required: true,
-    trim: true,
-    enum: ["ALAIN-MWJ", ], // add new ones when you open new stores
+const slotSchema = new mongoose.Schema(
+  {
+    store: {
+      type: String,
+      required: true,
+      trim: true,
+      enum: SLOT_STORES, // "ALAIN-MWJ", etc.
+    },
+    unit: {
+      type: String,
+      required: true,
+      trim: true,
+      enum: SLOT_UNITS,  // "A"–"N"
+    },
+    position: {
+      type: Number,
+      required: true,
+      enum: SLOT_POSITIONS, // 1–16
+      min: 1,
+      max: 16,
+    },
+    label: {
+      type: String,
+      required: true,
+      trim: true,
+    },
+    cbm: {
+      type: Number,
+      required: true,
+      min: 0,
+    },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+    notes: {
+      type: String,
+      trim: true,
+    },
   },
-  unit:     { type: String, required: true, trim: true },
-  position: { type: Number, required: true, min: 1, max: 16 },
-  label:    { type: String, required: true, trim: true },
-  cbm:      { type: Number, required: true, min: 0 },
-  isActive: { type: Boolean, default: true },
-  notes:    { type: String, trim: true },
-}, { timestamps: true });
-
+  { timestamps: true }
+);
 
 // Unique within a store
 slotSchema.index({ store: 1, unit: 1, position: 1 }, { unique: true });
 
 // Auto-generate label like “A1”
 slotSchema.pre("validate", function (next) {
-  if (this.unit && this.position != null) this.label = `${this.unit}${this.position}`;
+  if (this.unit && this.position != null) {
+    this.label = `${this.unit}${this.position}`;
+  }
   next();
 });
 

@@ -81,7 +81,7 @@ const styles = StyleSheet.create({
   fBrand: { fontWeight: "bold", color: "#4B0082" },
 });
 
-// Helpers
+// === Helpers ===
 const asNumber = (v) => {
   if (typeof v === "number" && !Number.isNaN(v)) return v;
   const n = parseFloat(v);
@@ -92,11 +92,11 @@ const safe = (v) => (v === 0 ? "0" : v ? String(v) : "—");
 const money = (n) => asNumber(n).toFixed(2);
 
 const InvoicePDF = ({ invoice, order, company }) => {
-  // Charges live on the order (invoice amount == order.totalPrice)
+  // Charges live on the order; invoice.amount is the official total
   const deliveryCharge = asNumber(order?.deliveryCharge ?? 0);
   const extraFee = asNumber(order?.extraFee ?? 0);
 
-  // Subtotal from order items
+  // Subtotal from order items (qty * unitPrice)
   const subtotal = Array.isArray(order?.orderItems)
     ? order.orderItems.reduce(
         (sum, it) => sum + asNumber(it.unitPrice) * asNumber(it.qty),
@@ -104,12 +104,28 @@ const InvoicePDF = ({ invoice, order, company }) => {
       )
     : 0;
 
-  // Model-aligned amounts
+  // Prefer the single source of truth from the Invoice model.
+  // Fallback: derive from subtotal + charges if amount is missing.
   const invoiceAmount = asNumber(
-    // Prefer the single source of truth from the Invoice model
-    invoice?.amount ?? subtotal + deliveryCharge + extraFee
+    typeof invoice?.amount === "number"
+      ? invoice.amount
+      : subtotal + deliveryCharge + extraFee
   );
-  const amountPaid = asNumber(invoice?.totalPaid ?? 0);
+
+  // Payments: if controller precomputed totalPaid/balanceDue use them,
+  // otherwise derive from payments (Received) as a fallback.
+  const paymentsArray = Array.isArray(invoice?.payments)
+    ? invoice.payments
+    : [];
+
+  const receivedPaymentsTotal = paymentsArray
+    .filter((p) => p && (p.status === "Received" || typeof p.status === "undefined"))
+    .reduce((sum, p) => sum + asNumber(p.amount), 0);
+
+  const amountPaid = asNumber(
+    typeof invoice?.totalPaid === "number" ? invoice.totalPaid : receivedPaymentsTotal
+  );
+
   const balanceDue =
     typeof invoice?.balanceDue === "number"
       ? asNumber(invoice.balanceDue)
@@ -119,7 +135,7 @@ const InvoicePDF = ({ invoice, order, company }) => {
     (invoice?.createdAt && new Date(invoice.createdAt).getFullYear()) ||
     new Date().getFullYear();
 
-  // Table rows
+  // Table rows from order items
   const itemRows = (order?.orderItems ?? []).map((item, idx) =>
     React.createElement(View, { key: `item-${idx}`, style: styles.tableRow }, [
       React.createElement(
@@ -143,7 +159,8 @@ const InvoicePDF = ({ invoice, order, company }) => {
       // === Header ===
       React.createElement(View, { style: styles.header, key: "header" }, [
         React.createElement(Text, { style: styles.title }, "Invoice"),
-        React.createElement(Text, { style: styles.brand }, "Megadie"),
+        React.createElement(Text, { style: styles.brand }, company?.name || "Megadie"),
+        company?.sub && React.createElement(Text, { style: styles.brandSub }, company.sub),
       ]),
 
       // === Meta (two columns) ===
@@ -175,7 +192,11 @@ const InvoicePDF = ({ invoice, order, company }) => {
                 [
                   React.createElement(Text, { style: styles.label }, "Invoiced By"),
                   React.createElement(Text, { style: styles.colon }, ":"),
-                  React.createElement(Text, { style: styles.value }, "Megadie.com"),
+                  React.createElement(
+                    Text,
+                    { style: styles.value },
+                    company?.display || "Megadie.com"
+                  ),
                 ]
               ),
               // Date
@@ -225,7 +246,11 @@ const InvoicePDF = ({ invoice, order, company }) => {
                 [
                   React.createElement(Text, { style: styles.label }, "Client"),
                   React.createElement(Text, { style: styles.colon }, ":"),
-                  React.createElement(Text, { style: styles.value }, safe(invoice.user?.name)),
+                  React.createElement(
+                    Text,
+                    { style: styles.value },
+                    safe(invoice.user?.name)
+                  ),
                 ]
               ),
               // Email
@@ -235,7 +260,11 @@ const InvoicePDF = ({ invoice, order, company }) => {
                 [
                   React.createElement(Text, { style: styles.label }, "Email"),
                   React.createElement(Text, { style: styles.colon }, ":"),
-                  React.createElement(Text, { style: styles.value }, safe(invoice.user?.email)),
+                  React.createElement(
+                    Text,
+                    { style: styles.value },
+                    safe(invoice.user?.email)
+                  ),
                 ]
               ),
               // Order #
@@ -252,14 +281,18 @@ const InvoicePDF = ({ invoice, order, company }) => {
                   ),
                 ]
               ),
-              // Invoice Status (virtual)
+              // Invoice Status (computed in controller if provided)
               React.createElement(
                 View,
                 { style: styles.metaRow, key: "m-status" },
                 [
                   React.createElement(Text, { style: styles.label }, "Status"),
                   React.createElement(Text, { style: styles.colon }, ":"),
-                  React.createElement(Text, { style: styles.value }, safe(invoice.status)),
+                  React.createElement(
+                    Text,
+                    { style: styles.value },
+                    safe(invoice.status || "Unpaid")
+                  ),
                 ]
               ),
             ]
@@ -277,7 +310,7 @@ const InvoicePDF = ({ invoice, order, company }) => {
       // === Table Rows ===
       ...itemRows,
 
-      // === Totals (always show charges) ===
+      // === Totals ===
       React.createElement(View, { style: styles.section, key: "totals" }, [
         React.createElement(View, { style: styles.totalLine, key: "subtotal" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Subtotal:"),
@@ -316,18 +349,19 @@ const InvoicePDF = ({ invoice, order, company }) => {
           React.createElement(
             Text,
             { style: [styles.fCol, styles.fLeft], key: "f-left" },
-            React.createElement(Text, { style: styles.fBrand }, "Megadie")
+            React.createElement(Text, { style: styles.fBrand }, company?.short || "Megadie")
           ),
           React.createElement(
             Text,
             { style: [styles.fCol, styles.fCenter], key: "f-center" },
-            "Read T&C at www.megadie.com"
+            company?.footer || "Read T&C at www.megadie.com"
           ),
           React.createElement(Text, { style: [styles.fCol, styles.fRight], key: "f-right" }, [
-            `© ${year} Megadie — All rights reserved • `,
+            `© ${year} ${company?.short || "Megadie"} — All rights reserved • `,
             React.createElement(Text, {
               key: "page-count",
-              render: ({ pageNumber, totalPages }) => `Page ${pageNumber} of ${totalPages}`,
+              render: ({ pageNumber, totalPages }) =>
+                `Page ${pageNumber} of ${totalPages}`,
             }),
           ]),
         ]),

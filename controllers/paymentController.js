@@ -16,25 +16,16 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
 };
 
 const parseFilters = (req) => {
-  const {
-    status,
-    method,
-    user,
-    invoiceNumber,
-    reference,
-    dateFrom,
-    dateTo,
-    min,
-    max,
-  } = req.query || {};
+  const { status, method, user, invoiceNumber, reference, dateFrom, dateTo, min, max } = req.query || {};
 
   const q = {};
-  if (status) q.status = status;                 // e.g. "Received"
-  if (method) q.paymentMethod = method;          // e.g. "Cash" | "Bank Transfer"
+  if (status) q.status = status;
+  if (method) q.paymentMethod = method;
   if (user) q.user = new mongoose.Types.ObjectId(user);
   if (reference) q.reference = { $regex: reference, $options: "i" };
 
-  if (invoiceNumber) q.invoice = q.invoice || { $in: [] }; // resolved later
+  // invoiceNumber handled separately later
+  if (invoiceNumber) q.invoice = q.invoice || { $in: [] };
 
   if (dateFrom || dateTo) {
     q.paymentDate = {};
@@ -54,86 +45,63 @@ const parseFilters = (req) => {
 /* =========================
    POST /api/payments/from-invoice/:invoiceId
    Private/Admin
-   Record a payment (strict: no overpay)
+   Create a payment (no totals returned — invoice computes them later)
    ========================= */
 export const addPaymentToInvoice = asyncHandler(async (req, res) => {
   const { amount, paymentMethod, note, paymentDate, paidTo, reference } = req.body || {};
   const { invoiceId } = req.params;
 
   const amt = roundToTwo(Number(amount));
-  if (!Number.isFinite(amt) || amt <= 0) {
-    res.status(400);
-    throw new Error("Payment amount must be a positive number.");
-  }
-  if (!paymentMethod) {
-    res.status(400);
-    throw new Error("Payment method is required.");
-  }
-  if (!paidTo || !String(paidTo).trim()) {
-    res.status(400);
-    throw new Error("The 'paidTo' field is required.");
-  }
+  if (!Number.isFinite(amt) || amt <= 0) throw new Error("Payment amount must be a positive number.");
+  if (!paymentMethod) throw new Error("Payment method is required.");
+  if (!paidTo || !String(paidTo).trim()) throw new Error("'paidTo' field is required.");
 
   const session = await mongoose.startSession();
+
   try {
-    let created;
-    let invDoc;
-    let newTotalPaid = 0;
-    let newRemaining = 0;
+    let createdPayment;
 
     await session.withTransaction(async () => {
       const inv = await Invoice.findById(invoiceId).select("user amount").session(session);
-      if (!inv) {
-        res.status(404);
-        throw new Error("Invoice not found.");
-      }
+      if (!inv) throw new Error("Invoice not found.");
 
+      // Ensure we don't exceed the invoice amount
       const paidAgg = await Payment.aggregate([
         { $match: { invoice: inv._id, status: "Received" } },
         { $group: { _id: null, total: { $sum: "$amount" } } },
       ]).session(session);
 
-      const totalPaid = roundToTwo(paidAgg?.[0]?.total || 0);
-      const remaining = roundToTwo(inv.amount - totalPaid);
+      const alreadyPaid = roundToTwo(paidAgg?.[0]?.total || 0);
+      const remaining = roundToTwo(inv.amount - alreadyPaid);
 
       if (amt > remaining) {
-        res.status(400);
         throw new Error(`Payment exceeds remaining balance. Remaining due: ${remaining.toFixed(2)}`);
       }
 
       const [payment] = await Payment.create(
-        [
-          {
-            invoice: inv._id,
-            user: inv.user,
-            amount: amt,
-            paymentMethod,
-            note,
-            paymentDate: paymentDate || Date.now(),
-            paidTo: String(paidTo).trim(),
-            reference: reference?.toString().trim(),
-            status: "Received",
-          },
-        ],
+        [{
+          invoice: inv._id,
+          user: inv.user,
+          amount: amt,
+          paymentMethod,
+          note,
+          paymentDate: paymentDate || Date.now(),
+          paidTo: String(paidTo).trim(),
+          reference: reference?.toString().trim(),
+          status: "Received",
+        }],
         { session }
       );
 
-      invDoc = inv;
-      created = payment;
-      newTotalPaid = roundToTwo(totalPaid + amt);
-      newRemaining = roundToTwo(inv.amount - newTotalPaid);
+      createdPayment = payment;
     });
-
-    // Location header for the new resource
-    res.setHeader("Location", `/api/payments/${created._id}`);
 
     res.status(201).json({
       success: true,
       message: "Payment recorded successfully.",
-      data: created,
-      invoice: { _id: invDoc._id, amount: invDoc.amount },
-      totals: { totalPaid: newTotalPaid, remainingDue: newRemaining },
+      data: createdPayment,
     });
+
   } finally {
     session.endSession();
   }
@@ -149,10 +117,7 @@ export const updatePaymentMeta = asyncHandler(async (req, res) => {
   const { paymentDate, note, reference, paidTo, paymentMethod } = req.body || {};
 
   const payment = await Payment.findById(id);
-  if (!payment) {
-    res.status(404);
-    throw new Error("Payment not found.");
-  }
+  if (!payment) throw new Error("Payment not found.");
 
   const changes = {};
 
@@ -182,14 +147,11 @@ export const updatePaymentMeta = asyncHandler(async (req, res) => {
 
   const updated = await payment.save();
 
-  const changedKeys = Object.keys(changes);
-  const message = changedKeys.length
-    ? `Payment updated successfully (${changedKeys.join(", ")}).`
-    : "Payment saved (no changes detected).";
-
   res.status(200).json({
     success: true,
-    message,
+    message: Object.keys(changes).length
+      ? `Payment updated successfully (${Object.keys(changes).join(", ")}).`
+      : "Payment saved (no changes detected).",
     changed: changes,
     data: updated,
   });
@@ -198,82 +160,30 @@ export const updatePaymentMeta = asyncHandler(async (req, res) => {
 /* =========================
    DELETE /api/payments/:id
    Private/Admin
-   Hard delete + return invoice context & new totals
+   Delete payment (no invoice recalculation needed)
    ========================= */
 export const deletePayment = asyncHandler(async (req, res) => {
-  const session = await mongoose.startSession();
-  try {
-    let snapshot, invId, invNumber = null, newTotalPaid = 0, newRemaining = 0;
+  const payment = await Payment.findById(req.params.id)
+    .select("_id amount paymentMethod reference invoice user");
 
-    await session.withTransaction(async () => {
-      // 1) Find the payment with minimal fields + invoice reference
-      const payment = await Payment.findById(req.params.id)
-        .select("_id amount paymentMethod reference invoice user status")
-        .session(session);
+  if (!payment) throw new Error("Payment not found.");
 
-      if (!payment) {
-        res.status(404);
-        throw new Error("Payment not found.");
-      }
+  const snapshot = {
+    paymentId: payment._id,
+    amount: payment.amount,
+    paymentMethod: payment.paymentMethod,
+    reference: payment.reference ?? null,
+    invoice: payment.invoice,
+    user: payment.user,
+  };
 
-      // 2) Keep a snapshot for response
-      snapshot = {
-        paymentId: payment._id,
-        amount: payment.amount,
-        paymentMethod: payment.paymentMethod,
-        reference: payment.reference ?? null,
-        user: payment.user ?? null,
-      };
+  await payment.deleteOne();
 
-      // 3) Resolve invoice context (optional but useful for UI)
-      invId = payment.invoice || null;
-
-      // Try to fetch invoice basic data for response & totals math
-      let invDoc = null;
-      if (invId) {
-        invDoc = await Invoice.findById(invId)
-          .select("_id amount invoiceNumber")
-          .session(session);
-
-        if (invDoc) {
-          invNumber = invDoc.invoiceNumber ?? null;
-        }
-      }
-
-      // 4) Delete the payment
-      await payment.deleteOne({ session });
-
-      // 5) If there is an invoice, recalc totals after deletion
-      if (invId && invDoc) {
-        // Sum only "Received" payments (same rule used on creation)
-        const paidAgg = await Payment.aggregate([
-          { $match: { invoice: invDoc._id, status: "Received" } },
-          { $group: { _id: null, total: { $sum: "$amount" } } },
-        ]).session(session);
-
-        newTotalPaid = roundToTwo(paidAgg?.[0]?.total || 0);
-        newRemaining = roundToTwo(invDoc.amount - newTotalPaid);
-      }
-    });
-
-    const message = invId
-      ? "Payment deleted and invoice totals recalculated."
-      : "Payment deleted.";
-
-    res.status(200).json({
-      success: true,
-      message,
-      ...snapshot,
-      invoice: invId
-        ? { _id: invId, invoiceNumber: invNumber }
-        : null,
-      totals: invId
-        ? { totalPaid: newTotalPaid, remainingDue: newRemaining }
-        : null,
-    });
-  } finally {
-    session.endSession();
-  }
+  res.status(200).json({
+    success: true,
+    message: "Payment deleted successfully.",
+    ...snapshot,
+  });
 });
 
 /* =========================
@@ -282,10 +192,9 @@ export const deletePayment = asyncHandler(async (req, res) => {
    ========================= */
 export const getPaymentsByInvoice = asyncHandler(async (req, res) => {
   const { invoice } = req.query;
-  if (!invoice) {
-    res.status(400);
-    throw new Error("Invoice ID is required.");
-  }
+
+  if (!invoice) throw new Error("Invoice ID is required.");
+
   const payments = await Payment.find({ invoice })
     .populate("user", "name email")
     .sort({ paymentDate: 1 });
@@ -304,6 +213,7 @@ export const getPaymentsByInvoice = asyncHandler(async (req, res) => {
    ========================= */
 export const getMyPayments = asyncHandler(async (req, res) => {
   const { limit, skip, page } = parsePagination(req);
+
   const [items, total] = await Promise.all([
     Payment.find({ user: req.user._id })
       .populate("invoice", "invoiceNumber amount")
@@ -326,13 +236,12 @@ export const getMyPayments = asyncHandler(async (req, res) => {
    GET /api/payments
    Private/Admin
    All payments with filters + pagination
-   Query: status, method, user, invoiceNumber, reference, dateFrom, dateTo, min, max
    ========================= */
 export const getAllPayments = asyncHandler(async (req, res) => {
   const { limit, skip, page } = parsePagination(req);
   const filters = parseFilters(req);
 
-  // Resolve invoiceNumber to ObjectIds if provided
+  // Resolve invoiceNumber → invoice _id[]
   if (filters.invoice && "$in" in filters.invoice) {
     const invs = await Invoice.find(
       { invoiceNumber: { $regex: req.query.invoiceNumber, $options: "i" } },
@@ -377,10 +286,9 @@ export const getPaymentById = asyncHandler(async (req, res) => {
   const payment = await Payment.findById(req.params.id)
     .populate("user", "name email")
     .populate("invoice", "invoiceNumber amount");
-  if (!payment) {
-    res.status(404);
-    throw new Error("Payment not found.");
-  }
+
+  if (!payment) throw new Error("Payment not found.");
+
   res.status(200).json({
     success: true,
     message: "Payment retrieved successfully.",

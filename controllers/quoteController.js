@@ -1,8 +1,10 @@
 import React from "react";
+import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
 import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
+import User from "../models/userModel.js";
 
 /* =========================
    POST /api/quotes
@@ -32,7 +34,7 @@ export const createQuote = asyncHandler(async (req, res) => {
 
   const populated = await quote.populate({
     path: "requestedItems.product",
-    select: "name code size",
+    select: "sku",
   });
 
   res.setHeader("Location", `/api/quotes/${quote._id}`);
@@ -47,16 +49,20 @@ export const createQuote = asyncHandler(async (req, res) => {
 /* =========================
    GET /api/quotes/my
    Private
-   Get logged-in user's quotes (hide prices for Requested)
+   Get logged-in user's quotes (hide prices for Processing)
    ========================= */
 export const getMyQuotes = asyncHandler(async (req, res) => {
   const quotes = await Quote.find({ user: req.user._id })
-    .populate("requestedItems.product", "name code size")
+    .populate("requestedItems.product", "name") // 👈 only name now
     .sort({ createdAt: -1 });
 
   const sanitized = quotes.map((q) => {
     const obj = q.toObject();
-    if (q.status === "Requested") {
+
+    // ⚠️ Your status enum is: Processing, Quoted, Confirmed, Rejected, Cancelled
+    // There is NO "Requested" anymore, so this check never runs.
+    // You probably want "Processing" here instead:
+    if (q.status === "Processing") {
       obj.requestedItems = obj.requestedItems.map((it) => ({
         product: it.product,
         qty: it.qty,
@@ -65,6 +71,7 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
       delete obj.extraFee;
       delete obj.totalPrice;
     }
+
     return obj;
   });
 
@@ -83,7 +90,7 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
 export const getQuotes = asyncHandler(async (_req, res) => {
   const quotes = await Quote.find({})
     .populate("user", "name email")
-    .populate("requestedItems.product", "name code size")
+    .populate("requestedItems.product", "sku") // 👈 sku for admin
     .sort({ createdAt: -1 });
 
   res.status(200).json({
@@ -101,7 +108,7 @@ export const getQuotes = asyncHandler(async (_req, res) => {
 export const getQuoteById = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
     .populate("user", "name email")
-    .populate("requestedItems.product", "name code size");
+    .populate("requestedItems.product", "name");
 
   if (!quote) {
     res.status(404);
@@ -163,7 +170,7 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
 /* =========================
    PUT /api/quotes/:id
    Private/Admin
-   Update quote (product IDs immutable)
+   Update quote (product IDs immutable, user re-assign allowed)
    ========================= */
 export const updateQuote = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id);
@@ -172,14 +179,23 @@ export const updateQuote = asyncHandler(async (req, res) => {
     throw new Error("Quote not found.");
   }
 
+  // Extra safety: ensure only admins can update quotes
+  if (!req.user?.isAdmin) {
+    res.status(403);
+    throw new Error("Only admins can update quotes.");
+  }
+
   const changes = {};
 
-  // If requestedItems provided, ensure product IDs are immutable
+  /* ---------------------------------------
+   * requestedItems (qty / unitPrice only)
+   * ------------------------------------- */
   if (Array.isArray(req.body.requestedItems)) {
     const current = quote.requestedItems || [];
     const currentIds = current.map((it) => String(it.product));
     const incoming = req.body.requestedItems;
 
+    // Validate shape
     for (const it of incoming) {
       if (!it || !it.product) {
         res.status(400);
@@ -189,14 +205,22 @@ export const updateQuote = asyncHandler(async (req, res) => {
 
     const incomingIds = incoming.map((it) => String(it.product));
 
+    // Same number of items?
     if (incomingIds.length !== currentIds.length) {
       res.status(400);
       throw new Error("You cannot add or remove items from the quote.");
     }
 
-    const count = (arr) => arr.reduce((m, id) => ((m[id] = (m[id] || 0) + 1), m), {});
+    // Same multiset of product IDs? (no product changes)
+    const count = (arr) =>
+      arr.reduce((m, id) => {
+        m[id] = (m[id] || 0) + 1;
+        return m;
+      }, {});
+
     const a = count(currentIds);
     const b = count(incomingIds);
+
     const sameSet =
       Object.keys(a).length === Object.keys(b).length &&
       Object.keys(a).every((k) => a[k] === b[k]);
@@ -206,15 +230,22 @@ export const updateQuote = asyncHandler(async (req, res) => {
       throw new Error("You cannot change product IDs in quote items.");
     }
 
-    const incomingByProduct = new Map(incoming.map((it) => [String(it.product), it]));
+    const incomingByProduct = new Map(
+      incoming.map((it) => [String(it.product), it])
+    );
 
     let changedItems = 0;
+
     quote.requestedItems = current.map((existing) => {
       const key = String(existing.product);
       const inc = incomingByProduct.get(key);
 
-      const nextQty = inc?.qty !== undefined ? Number(inc.qty) : existing.qty;
-      const nextUnit = inc?.unitPrice !== undefined ? Number(inc.unitPrice) : existing.unitPrice;
+      const nextQty =
+        inc?.qty !== undefined ? Number(inc.qty) : existing.qty;
+      const nextUnit =
+        inc?.unitPrice !== undefined
+          ? Number(inc.unitPrice)
+          : existing.unitPrice;
 
       if (!Number.isFinite(nextQty) || nextQty <= 0) {
         res.status(400);
@@ -225,9 +256,15 @@ export const updateQuote = asyncHandler(async (req, res) => {
         throw new Error(`Invalid unitPrice for product ${key}`);
       }
 
-      if (nextQty !== existing.qty || nextUnit !== existing.unitPrice) changedItems += 1;
+      if (nextQty !== existing.qty || nextUnit !== existing.unitPrice) {
+        changedItems += 1;
+      }
 
-      return { product: existing.product, qty: nextQty, unitPrice: nextUnit };
+      return {
+        product: existing.product,
+        qty: nextQty,
+        unitPrice: nextUnit,
+      };
     });
 
     if (changedItems > 0) {
@@ -235,8 +272,11 @@ export const updateQuote = asyncHandler(async (req, res) => {
     }
   }
 
-  // Whitelist simple fields
+  /* ---------------------------------------
+   * Simple fields (including user)
+   * ------------------------------------- */
   const allowed = new Set([
+    "user",
     "status",
     "deliveryCharge",
     "extraFee",
@@ -247,6 +287,33 @@ export const updateQuote = asyncHandler(async (req, res) => {
   for (const k of Object.keys(req.body || {})) {
     if (!allowed.has(k)) continue;
 
+    // Special handling: reassign user (admin-only)
+    if (k === "user") {
+      const newUserId = req.body.user;
+
+      if (!mongoose.isValidObjectId(newUserId)) {
+        res.status(400);
+        throw new Error("Invalid user id.");
+      }
+
+      const newUser = await User.findById(newUserId).select("_id");
+      if (!newUser) {
+        res.status(400);
+        throw new Error("User not found.");
+      }
+
+      if (String(quote.user) !== String(newUserId)) {
+        changes.user = {
+          from: String(quote.user),
+          to: String(newUserId),
+        };
+        quote.user = newUserId;
+      }
+
+      continue; // skip generic handling for this key
+    }
+
+    // Numeric fields with validation
     if (k === "deliveryCharge" || k === "extraFee") {
       const v = Number(req.body[k]);
       if (!Number.isFinite(v) || v < 0) {
@@ -258,6 +325,7 @@ export const updateQuote = asyncHandler(async (req, res) => {
         quote[k] = v;
       }
     } else {
+      // status, adminToAdminNote, adminToClientNote
       const v = req.body[k];
       if (quote[k] !== v) {
         changes[k] = { from: quote[k] ?? null, to: v ?? null };
@@ -266,7 +334,7 @@ export const updateQuote = asyncHandler(async (req, res) => {
     }
   }
 
-  const updated = await quote.save();
+  const updated = await quote.save(); // pre('save') will recompute totals
 
   const changedKeys = Object.keys(changes);
   const message = changedKeys.length
