@@ -28,6 +28,7 @@ import filterConfigRoutes from "./routes/filterConfigRoutes.js";
 import slotRoutes from "./routes/slotRoutes.js";
 import slotItemRoutes from "./routes/slotItemRoutes.js";
 import inventoryRoutes from "./routes/inventoryRoutes.js";
+import userPriceRoutes from "./routes/userPriceRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 // ✅ Initialize and connect to DB
@@ -85,6 +86,7 @@ app.use("/api/filter-configs", filterConfigRoutes);
 app.use("/api/slots", slotRoutes);
 app.use("/api/slot-items", slotItemRoutes);
 app.use("/api/inventory", inventoryRoutes);
+app.use("/api/user-prices", userPriceRoutes);
 
 // ✅ Error Handling
 app.use(notFound);

@@ -3,7 +3,7 @@ import { PRODUCT_TYPES, FILTER_FIELD_TYPES, FILTER_UI_TYPES } from "../constants
 
 const filterFieldSchema = new mongoose.Schema(
   {
-    key:           { type: String, required: true },                 // "categoryKey","size","catalogCode","parentColor"
+    key:           { type: String, required: true },
     label:         { type: String, required: true },
     type:          { type: String, enum: FILTER_FIELD_TYPES, required: true },
     allowedValues: { type: [String], default: [] },

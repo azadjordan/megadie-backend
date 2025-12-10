@@ -1,114 +1,85 @@
 // controllers/filterConfigController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import FilterConfig from "../models/filterConfigModel.js";
+import {
+  PRODUCT_TYPES,
+  FILTER_FIELD_TYPES,
+  FILTER_UI_TYPES,
+} from "../constants.js";
 
 /* =========================
-   Helpers (sanitize/validate)
+   Helpers
    ========================= */
 
-const toStringTrim = (v) => (typeof v === "string" ? v.trim() : v);
+const normalizeProductType = (raw) => String(raw || "").trim();
 
-/** Normalize one field entry */
-function normalizeField(raw = {}) {
-  // normalize key as lowercase for consistent uniqueness & lookups
-  const keyRaw = toStringTrim(raw.key);
-  const key = typeof keyRaw === "string" ? keyRaw.toLowerCase() : keyRaw;
+/**
+ * Validate that a given productType is one of the allowed PRODUCT_TYPES
+ */
+const assertValidProductType = (productType) => {
+  if (!PRODUCT_TYPES.includes(productType)) {
+    throw new Error(
+      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(
+        ", "
+      )}`
+    );
+  }
+};
 
-  const label = toStringTrim(raw.label);
-  const type = toStringTrim(raw.type);
-  const ui = toStringTrim(raw.ui);
-
-  // stricter allowedValues handling:
-  // - drop null/undefined
-  // - trim
-  // - drop empty strings
-  // - keep first occurrence order (via Set)
-  const allowedValues = Array.isArray(raw.allowedValues)
-    ? Array.from(
-        new Set(
-          raw.allowedValues
-            .filter((v) => v !== null && v !== undefined)
-            .map((x) => String(x).trim())
-            .filter((s) => s.length > 0)
-        )
-      )
-    : [];
-
-  return {
-    key,
-    label,
-    type,
-    allowedValues,
-    multi: typeof raw.multi === "boolean" ? raw.multi : true,
-    ui: ui || "chips",
-    sort:
-      typeof raw.sort === "number" && Number.isFinite(raw.sort)
-        ? raw.sort
-        : 0,
-  };
-}
-
-/** Normalize the whole fields array and ensure unique keys */
-function normalizeAndValidateFields(fields) {
+/**
+ * Validate fields array (optional but keeps data clean)
+ */
+const validateFields = (fields) => {
   if (!Array.isArray(fields)) {
-    const err = new Error("`fields` must be an array.");
-    err.statusCode = 400;
-    throw err;
+    throw new Error("fields must be an array.");
   }
 
-  const normalized = fields.map(normalizeField);
+  for (const field of fields) {
+    if (!field.key || !field.label) {
+      throw new Error("Each field must have 'key' and 'label'.");
+    }
 
-  // Validate required properties
-  for (const f of normalized) {
-    if (!f.key || !f.label || !f.type) {
-      const missing = [
-        !f.key ? "key" : null,
-        !f.label ? "label" : null,
-        !f.type ? "type" : null,
-      ]
-        .filter(Boolean)
-        .join(", ");
-      const err = new Error(`Each field requires: ${missing}`);
-      err.statusCode = 400;
-      throw err;
+    if (!FILTER_FIELD_TYPES.includes(field.type)) {
+      throw new Error(
+        `Invalid field.type "${field.type}" for key "${field.key}". Allowed types: ${FILTER_FIELD_TYPES.join(
+          ", "
+        )}`
+      );
+    }
+
+    if (field.ui && !FILTER_UI_TYPES.includes(field.ui)) {
+      throw new Error(
+        `Invalid field.ui "${field.ui}" for key "${field.key}". Allowed ui: ${FILTER_UI_TYPES.join(
+          ", "
+        )}`
+      );
+    }
+
+    if (
+      field.type === "enum" &&
+      field.allowedValues &&
+      !Array.isArray(field.allowedValues)
+    ) {
+      throw new Error(
+        `Field "${field.key}" is enum, so allowedValues must be an array.`
+      );
     }
   }
-
-  // Ensure unique keys (now case-insensitive because we lowered them)
-  const keyCounts = normalized.reduce((acc, f) => {
-    acc[f.key] = (acc[f.key] || 0) + 1;
-    return acc;
-  }, {});
-  const dupKeys = Object.keys(keyCounts).filter((k) => keyCounts[k] > 1);
-  if (dupKeys.length) {
-    const err = new Error(
-      `Duplicate field keys not allowed: ${dupKeys.join(", ")}`
-    );
-    err.statusCode = 400;
-    throw err;
-  }
-
-  // Optional: sort fields by "sort" then "label" for consistency
-  normalized.sort((a, b) => {
-    if (a.sort !== b.sort) return a.sort - b.sort;
-    return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
-  });
-
-  return normalized;
-}
+};
 
 /* =========================
    GET /api/filter-configs
    Public
-   Returns all filter configurations (sorted)
+   List all filter configs
    ========================= */
 export const getFilterConfigs = asyncHandler(async (_req, res) => {
-  const configs = await FilterConfig.find({}).sort({ productType: 1 }).lean();
+  const configs = await FilterConfig.find({})
+    .sort({ productType: 1 })
+    .lean();
 
   res.status(200).json({
     success: true,
     message: "Filter configurations retrieved successfully.",
-    total: configs.length,
     data: configs,
   });
 });
@@ -116,117 +87,111 @@ export const getFilterConfigs = asyncHandler(async (_req, res) => {
 /* =========================
    GET /api/filter-configs/:productType
    Public
-   Returns a single filter configuration by product type
+   Get filter config for a single productType
    ========================= */
 export const getFilterConfig = asyncHandler(async (req, res) => {
-  const { productType } = req.params;
+  const productType = normalizeProductType(req.params.productType);
+
+  if (!productType) {
+    res.status(400);
+    throw new Error("productType is required.");
+  }
+
+  // Optional: enforce known product types
+  if (!PRODUCT_TYPES.includes(productType)) {
+    res.status(400);
+    throw new Error(
+      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(
+        ", "
+      )}`
+    );
+  }
 
   const config = await FilterConfig.findOne({ productType }).lean();
-
-  if (!config) {
-    res.status(404);
-    throw new Error(`Filter configuration not found for "${productType}".`);
-  }
 
   res.status(200).json({
     success: true,
     message: "Filter configuration retrieved successfully.",
-    data: config,
+    data: config || { productType, fields: [] },
   });
 });
 
 /* =========================
    POST /api/filter-configs/:productType
    Private/Admin
-   Body: { fields: Array<FilterField> }
-   Creates a new filter configuration for a product type
+   Create filter config for a productType
+   (409 if already exists)
+   Body: { fields: [...] }
    ========================= */
 export const createFilterConfig = asyncHandler(async (req, res) => {
-  const { productType } = req.params;
-  const { fields = [] } = req.body || {};
+  const productType = normalizeProductType(req.params.productType);
 
-  const existing = await FilterConfig.findOne({ productType });
+  if (!productType) {
+    res.status(400);
+    throw new Error("productType is required.");
+  }
+
+  // Validate productType
+  assertValidProductType(productType);
+
+  const existing = await FilterConfig.findOne({ productType }).lean();
   if (existing) {
     res.status(409);
     throw new Error(
-      `Filter configuration for "${productType}" already exists.`
+      `Filter configuration already exists for productType "${productType}".`
     );
   }
 
-  const normalizedFields = normalizeAndValidateFields(fields);
+  const { fields = [] } = req.body || {};
+  validateFields(fields);
 
-  const doc = await FilterConfig.create({
+  const created = await FilterConfig.create({
     productType,
-    fields: normalizedFields,
+    fields,
   });
-
-  // Nice REST touch
-  res.setHeader(
-    "Location",
-    `/api/filter-configs/${encodeURIComponent(productType)}`
-  );
 
   res.status(201).json({
     success: true,
-    message: `Filter configuration for "${productType}" created successfully.`,
-    data: doc,
+    message: "Filter configuration created successfully.",
+    data: created,
   });
 });
 
 /* =========================
    PUT /api/filter-configs/:productType
    Private/Admin
-   Body: { fields: Array<FilterField> }
-   Replaces the fields array for an existing configuration
+   Update filter config for a productType
+   (404 if missing)
+   Body: { fields: [...] }
    ========================= */
 export const updateFilterConfig = asyncHandler(async (req, res) => {
-  const { productType } = req.params;
-  const { fields } = req.body || {};
+  const productType = normalizeProductType(req.params.productType);
 
-  const config = await FilterConfig.findOne({ productType });
-  if (!config) {
+  if (!productType) {
+    res.status(400);
+    throw new Error("productType is required.");
+  }
+
+  assertValidProductType(productType);
+
+  const { fields = [] } = req.body || {};
+  validateFields(fields);
+
+  const existing = await FilterConfig.findOne({ productType });
+  if (!existing) {
     res.status(404);
-    throw new Error(`Filter configuration not found for "${productType}".`);
+    throw new Error(
+      `Filter configuration not found for productType "${productType}".`
+    );
   }
 
-  const changes = {};
-  if (typeof fields !== "undefined") {
-    const normalizedFields = normalizeAndValidateFields(fields);
+  existing.fields = fields;
 
-    // produce a tiny diff summary (length + keys changed) to keep payload small
-    const beforeKeys = new Set((config.fields || []).map((f) => f.key));
-    const afterKeys = new Set(normalizedFields.map((f) => f.key));
-
-    const added = [...afterKeys].filter((k) => !beforeKeys.has(k));
-    const removed = [...beforeKeys].filter((k) => !afterKeys.has(k));
-
-    if (
-      added.length ||
-      removed.length ||
-      (config.fields?.length || 0) !== normalizedFields.length
-    ) {
-      changes.fields = {
-        fromLength: config.fields?.length || 0,
-        toLength: normalizedFields.length,
-        addedKeys: added,
-        removedKeys: removed,
-      };
-    }
-
-    config.fields = normalizedFields;
-  }
-
-  const updated = await config.save();
-
-  const changedKeys = Object.keys(changes);
-  const message = changedKeys.length
-    ? `Filter configuration updated successfully (${changedKeys.join(", ")}).`
-    : "Filter configuration saved (no changes detected).";
+  const updated = await existing.save();
 
   res.status(200).json({
     success: true,
-    message,
-    changed: changes,
+    message: "Filter configuration updated successfully.",
     data: updated,
   });
 });
@@ -234,23 +199,30 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
 /* =========================
    DELETE /api/filter-configs/:productType
    Private/Admin
-   Deletes a specific filter configuration
+   Delete filter config for a productType
    ========================= */
 export const deleteFilterConfig = asyncHandler(async (req, res) => {
-  const { productType } = req.params;
+  const productType = normalizeProductType(req.params.productType);
 
-  const config = await FilterConfig.findOne({ productType });
-  if (!config) {
-    res.status(404);
-    throw new Error(`Filter configuration not found for "${productType}".`);
+  if (!productType) {
+    res.status(400);
+    throw new Error("productType is required.");
   }
 
-  await config.deleteOne();
+  assertValidProductType(productType);
+
+  const deleted = await FilterConfig.findOneAndDelete({ productType }).lean();
+
+  if (!deleted) {
+    res.status(404);
+    throw new Error(
+      `Filter configuration not found for productType "${productType}".`
+    );
+  }
 
   res.status(200).json({
     success: true,
-    message: `Filter configuration for "${productType}" deleted successfully.`,
-    productType,
-    configId: config._id,
+    message: "Filter configuration deleted successfully.",
+    data: deleted,
   });
 });

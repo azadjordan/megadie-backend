@@ -1,44 +1,181 @@
+// controllers/productController.js
 import mongoose from "mongoose";
 import Product from "../models/productModel.js";
+import FilterConfig from "../models/filterConfigModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 
 /* =========================
-   Helpers
+   Helper utilities
    ========================= */
-const ALLOWED_ATTRS = new Set([
-  "size", "parentColor", "variant", "grade", "source", "packingUnit",
-  "catalogCode", "color", "isAvailable",
-]);
 
+/**
+ * Parse a comma-separated list or array into string[] (trimmed, non-empty)
+ */
+const parseStringList = (value) => {
+  if (!value) return [];
+  const raw = Array.isArray(value) ? value : String(value).split(",");
+  return raw
+    .map((v) => (v == null ? "" : String(v)))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+};
+
+/**
+ * Parse a comma-separated list or array of IDs into ObjectId[]
+ */
 const parseIds = (input) => {
   if (!input) return [];
   const raw = Array.isArray(input) ? input : String(input).split(",");
   return raw
     .map((s) => s?.trim())
     .filter(Boolean)
-    .map((s) => (mongoose.isValidObjectId(s) ? new mongoose.Types.ObjectId(s) : null))
+    .map((s) =>
+      mongoose.isValidObjectId(s) ? new mongoose.Types.ObjectId(s) : null
+    )
     .filter(Boolean);
 };
 
-const applyAttributesFilter = (filter, attributesObj) => {
-  if (!attributesObj || typeof attributesObj !== "object") return;
-  for (const key of Object.keys(attributesObj)) {
-    if (!ALLOWED_ATTRS.has(key)) continue;
-    const v = attributesObj[key];
-    const values = Array.isArray(v) ? v : [v];
-    const clean = values
-      .map((x) => (x === undefined || x === null ? "" : String(x)))
-      .map((s) => s.trim())
-      .filter((s) => s.length > 0);
-    if (clean.length) filter[key] = { $in: clean };
-  }
+/**
+ * Pagination helper
+ */
+const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(
+    Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1),
+    maxLimit
+  );
+  const skip = (page - 1) * limit;
+  return { page, limit, skip };
 };
 
-const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
-  const page  = Math.max(parseInt(req.query.page, 10) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1), maxLimit);
-  const skip  = (page - 1) * limit;
-  return { page, limit, skip };
+/**
+ * Build a sort object:
+ * - Ribbons: curated "sort" field first
+ * - Others: newest first
+ */
+const buildSort = (productType) => {
+  if (productType === "Ribbon") {
+    return { sort: 1, createdAt: -1, _id: 1 };
+  }
+  return { createdAt: -1, _id: 1 };
+};
+
+/**
+ * Build attribute-level filters based on FilterConfig for a given productType.
+ *
+ * For each field:
+ * - field.key is usually a Product field (size, color, grade, finish, tags, isAvailable, catalogCode, ...)
+ * - some keys can be "virtual" (like categoryKeys) that are handled elsewhere and must be skipped here
+ * - field.type: "enum", "boolean", "range", "text"
+ * - field.multi: whether multiple values are allowed (for enum/text)
+ */
+const buildAttributeFilterFromConfig = (query, filterConfigDoc) => {
+  const filter = {};
+  if (!filterConfigDoc || !Array.isArray(filterConfigDoc.fields)) {
+    return filter;
+  }
+
+  for (const field of filterConfigDoc.fields) {
+    const key = field.key;
+    const type = field.type;
+    const multi = field.multi ?? true;
+
+    // ❗ Skip virtual keys that are not real Product fields
+    // (we already translate categoryKeys/categoryIds → category ObjectIds in buildProductFilter)
+    if (key === "categoryKeys" || key === "categoryIds") {
+      continue;
+    }
+
+    // Convention: accept both ?size=25 mm,13 mm and ?sizes=25 mm,13 mm
+    const rawValue = query[key] ?? query[`${key}s`];
+    if (rawValue === undefined) continue;
+
+    // BOOLEAN filter
+    if (type === "boolean") {
+      const v = String(rawValue).toLowerCase();
+      if (v === "true" || v === "1") filter[key] = true;
+      else if (v === "false" || v === "0") filter[key] = false;
+      continue;
+    }
+
+    // ENUM / TEXT → equality / $in
+    if (type === "enum" || type === "text") {
+      const values = parseStringList(rawValue);
+      if (!values.length) continue;
+
+      if (key === "tags") {
+        // Any of the requested tags
+        filter.tags = { $in: values };
+      } else if (multi) {
+        filter[key] = { $in: values };
+      } else {
+        filter[key] = values[0];
+      }
+      continue;
+    }
+
+    // RANGE filters can be added later for numeric fields like cbm or price.
+  }
+
+  return filter;
+};
+
+/**
+ * Build the full Mongo filter for listing products (public or admin).
+ * - Handles productType, categoryIds, categoryKeys
+ * - Applies dynamic filters based on FilterConfig for the productType
+ */
+const buildProductFilter = async (req, { forAdmin = false } = {}) => {
+  const { productType } = req.query;
+  const filter = {};
+
+  // Public listing must only show active products
+  if (!forAdmin) {
+    filter.isActive = true;
+  }
+
+  if (productType) {
+    filter.productType = productType;
+  }
+
+  // Category IDs (?categoryIds=..., ?categoryId=...)
+  const categoryIds = parseIds(req.query.categoryIds || req.query.categoryId);
+
+  // Category keys → IDs (?categoryKeys=grosgrain,satin)
+  let idsFromKeys = [];
+  if (req.query.categoryKeys) {
+    const keys = parseStringList(req.query.categoryKeys);
+    if (keys.length) {
+      const Category = mongoose.model("Category");
+      const cats = await Category.find({
+        key: { $in: keys },
+        ...(productType ? { productType } : {}),
+      })
+        .select("_id")
+        .lean();
+      idsFromKeys = cats.map((c) => c._id);
+    }
+  }
+
+  const allCategoryIds = [...categoryIds, ...idsFromKeys];
+  if (allCategoryIds.length) {
+    filter.category = { $in: allCategoryIds };
+  }
+
+  // Load FilterConfig for this productType (if any)
+  let filterConfigDoc = null;
+  if (productType) {
+    filterConfigDoc = await FilterConfig.findOne({ productType }).lean();
+  }
+
+  // Apply config-driven filters (size, color, grade, finish, tags, isAvailable, catalogCode, etc.)
+  const attributeFilter = buildAttributeFilterFromConfig(
+    req.query,
+    filterConfigDoc
+  );
+  Object.assign(filter, attributeFilter);
+
+  return filter;
 };
 
 /* =========================
@@ -47,8 +184,8 @@ const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
    Create a new product
    ========================= */
 export const createProduct = asyncHandler(async (req, res) => {
-  const product = new Product(req.body);
-  const created = await product.save(); // validations + hooks
+  const product = new Product(req.body); // model handles validation + sku + name
+  const created = await product.save();
 
   res.setHeader("Location", `/api/products/${created._id}`);
 
@@ -66,58 +203,21 @@ export const createProduct = asyncHandler(async (req, res) => {
    ========================= */
 export const getProducts = asyncHandler(async (req, res) => {
   const { productType } = req.query;
-  const { page, limit, skip } = parsePagination(req, { defaultLimit: 48, maxLimit: 100 });
+  const { page, limit, skip } = parsePagination(req, {
+    defaultLimit: 48,
+    maxLimit: 100,
+  });
 
-  // Only active products on the public shop
-  const filter = { isActive: true };
-  const sort = {};
-
-  if (productType) {
-    filter.productType = productType;
-    // Curated ordering for Ribbons, otherwise newest first
-    if (productType === "Ribbon") sort.sort = 1;
-    else sort.createdAt = -1;
-  } else {
-    sort.createdAt = -1;
-  }
-
-  // Category filter: by ids
-  const categoryIds = parseIds(req.query.categoryIds);
-
-  // Category filter: by keys (map to ids)
-  let idsFromKeys = [];
-  if (req.query.categoryKeys) {
-    const keys = Array.isArray(req.query.categoryKeys)
-      ? req.query.categoryKeys
-      : String(req.query.categoryKeys)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-
-    if (keys.length) {
-      const Category = mongoose.model("Category");
-      const cats = await Category.find({
-        key: { $in: keys },
-        ...(productType ? { productType } : {}),
-      })
-        .select("_id")
-        .lean();
-      idsFromKeys = cats.map((c) => c._id);
-    }
-  }
-
-  const allCategoryIds = [...categoryIds, ...idsFromKeys];
-  if (allCategoryIds.length) filter.category = { $in: allCategoryIds };
-
-  // Attributes filter (size, parentColor, variant, etc.)
-  applyAttributesFilter(filter, req.query.attributes);
+  const filter = await buildProductFilter(req, { forAdmin: false });
+  const sort = buildSort(productType);
 
   const [total, products] = await Promise.all([
     Product.countDocuments(filter),
     Product.find(filter)
-      // Lean card payload for shop listing
-      .select("name displaySpecs moq images price sku isAvailable")
-      .sort(Object.keys(sort).length ? sort : { createdAt: -1, _id: 1 })
+      .select(
+        "name productType category size color variant grade finish packingUnit moq images sku isAvailable priceRule sort"
+      )
+      .sort(sort)
       .skip(skip)
       .limit(limit)
       .lean(),
@@ -128,7 +228,6 @@ export const getProducts = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Products retrieved successfully.",
-    data: products,
     pagination: {
       page,
       limit,
@@ -137,6 +236,7 @@ export const getProducts = asyncHandler(async (req, res) => {
       hasPrev: page > 1,
       hasNext: page < totalPages,
     },
+    data: products,
   });
 });
 
@@ -148,14 +248,14 @@ export const getProducts = asyncHandler(async (req, res) => {
 export const getProductById = asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id)
     .populate("category", "name displayName productType key")
-    .lean(); // return ALL fields
+    .lean();
 
   if (!product) {
     res.status(404);
     throw new Error("Product not found.");
   }
 
-  // Normalize _id → id for frontend consistency (lean() bypasses toJSON())
+  // Normalize _id → id
   product.id = product._id;
   delete product._id;
 
@@ -174,32 +274,21 @@ export const getProductById = asyncHandler(async (req, res) => {
 export const getProductsAdmin = asyncHandler(async (req, res) => {
   const { productType } = req.query;
 
-  // optional pagination; pass ?page and ?limit to use it
   const hasPaging = !!(req.query.page || req.query.limit);
-  const { page, limit, skip } = parsePagination(req, { defaultLimit: 50, maxLimit: 200 });
+  const { page, limit, skip } = parsePagination(req, {
+    defaultLimit: 50,
+    maxLimit: 200,
+  });
 
-  const filter = {};
-  const sort = {};
-
-  if (productType) {
-    filter.productType = productType;
-    if (productType === "Ribbon") sort.sort = 1;
-    else sort.createdAt = -1;
-  } else {
-    sort.createdAt = -1;
-  }
-
-  const categoryIds = parseIds(req.query.categoryIds);
-  if (categoryIds.length) filter.category = { $in: categoryIds };
-
-  applyAttributesFilter(filter, req.query.attributes);
+  const filter = await buildProductFilter(req, { forAdmin: true });
+  const sort = buildSort(productType);
 
   if (hasPaging) {
     const [total, products] = await Promise.all([
       Product.countDocuments(filter),
       Product.find(filter)
         .populate("category", "name displayName productType key")
-        .sort(Object.keys(sort).length ? sort : { createdAt: -1, _id: 1 })
+        .sort(sort)
         .skip(skip)
         .limit(limit)
         .lean(),
@@ -210,7 +299,6 @@ export const getProductsAdmin = asyncHandler(async (req, res) => {
     return res.status(200).json({
       success: true,
       message: "Products (admin) retrieved successfully.",
-      data: products,
       pagination: {
         page,
         limit,
@@ -219,12 +307,13 @@ export const getProductsAdmin = asyncHandler(async (req, res) => {
         hasPrev: page > 1,
         hasNext: page < totalPages,
       },
+      data: products,
     });
   }
 
   const products = await Product.find(filter)
     .populate("category", "name displayName productType key")
-    .sort(Object.keys(sort).length ? sort : { createdAt: -1, _id: 1 })
+    .sort(sort)
     .lean();
 
   res.status(200).json({
@@ -237,28 +326,29 @@ export const getProductsAdmin = asyncHandler(async (req, res) => {
 /* =========================
    PUT /api/products/:id
    Private/Admin
-   Update product (records a small diff)
+   Update product (auto-rebuilds sku & name via model hook)
    ========================= */
 export const updateProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id); // CastError → error middleware
+  const product = await Product.findById(req.params.id);
   if (!product) {
     res.status(404);
     throw new Error("Product not found.");
   }
 
-  const changes = {};
   const incoming = req.body || {};
+  const changes = {};
 
   Object.keys(incoming).forEach((key) => {
-    // Skip immutable Mongo fields
-    if (key === "_id" || key === "id") return;
+    // Skip immutable / derived fields
+    if (key === "_id" || key === "id" || key === "sku") return;
 
     const before = product[key];
-    const after  = incoming[key] ?? before;
+    const after = incoming[key] ?? before;
 
-    // Only record/apply if actually different
     const changed =
-      (before instanceof Date && after instanceof Date && +before !== +after) ||
+      (before instanceof Date &&
+        after instanceof Date &&
+        +before !== +after) ||
       (!(before instanceof Date) && before !== after);
 
     if (changed) {
@@ -267,7 +357,7 @@ export const updateProduct = asyncHandler(async (req, res) => {
     }
   });
 
-  const updated = await product.save(); // validations + hooks
+  const updated = await product.save(); // triggers validation + pre('validate') → sku + name
 
   const changedKeys = Object.keys(changes);
   const message = changedKeys.length
@@ -288,7 +378,7 @@ export const updateProduct = asyncHandler(async (req, res) => {
    Delete product
    ========================= */
 export const deleteProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id); // CastError → error middleware
+  const product = await Product.findById(req.params.id);
   if (!product) {
     res.status(404);
     throw new Error("Product not found.");
@@ -305,6 +395,6 @@ export const deleteProduct = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Product deleted successfully.",
-    ...snapshot,
+    data: snapshot,
   });
 });
