@@ -20,6 +20,53 @@ function sanitizeToken(value) {
     .replace(/^-+|-+$/g, "");
 }
 
+/**
+ * Mapping from verbose values → short SKU codes
+ * Only affects the `sku` field, NOT the human-facing `name`.
+ */
+const SKU_MAP = {
+  productType: {
+    Ribbon: "RIB",
+    "Creasing Matrix": "CRM",
+    "Double Face Tape": "DFT",
+  },
+  categoryKey: {
+    grosgrain: "GRO",
+    satin: "SAT",
+    // add more if you add categories
+  },
+  grade: {
+    Premium: "PREM",
+    Standard: "STD",
+    Economy: "ECO",
+  },
+  variant: {
+    "100 Yards": "100-YD",
+    "150 Yards": "150-YD",
+    "35 Yards":  "35-YD",
+    "50 Meters": "50-M",
+    "50 Pieces": "50-PC",
+  },
+  finish: {
+    "Single Face": "SF",
+    "Double Face": "DF",
+  },
+  // optional: packing units if you ever want them shorter
+  packingUnit: {
+    Roll: "ROLL",
+    // "Box": "BOX",
+    // ...
+  },
+};
+
+/** Helper: get a short code for a field, then sanitize it for SKU */
+function skuToken(field, value) {
+  if (!value) return "";
+  const map = SKU_MAP[field];
+  const raw = map?.[value] || value;
+  return sanitizeToken(raw);
+}
+
 /** Build SKU + Name */
 async function buildSkuForDoc(doc) {
   const Category = doc.model("Category");
@@ -29,30 +76,33 @@ async function buildSkuForDoc(doc) {
 
   if (!cat) throw new Error("Invalid category");
 
+  // mirror productType from Category
   doc.productType = cat.productType;
 
+  // ---------- SKU PARTS (short codes) ----------
   const parts = [
-    sanitizeToken(doc.productType),
-    sanitizeToken(cat.key),
-    sanitizeToken(doc.size),
-    sanitizeToken(doc.color),
-    sanitizeToken(doc.catalogCode),
-    sanitizeToken(doc.variant),
-    sanitizeToken(doc.grade),
-    sanitizeToken(doc.finish),
-    sanitizeToken(doc.packingUnit),
+    skuToken("productType", doc.productType), // RIB
+    skuToken("categoryKey", cat.key),         // SAT / GRO
+    sanitizeToken(doc.size),                  // 25-MM
+    sanitizeToken(doc.color),                 // OFFWHITE
+    sanitizeToken(doc.catalogCode),           // 000
+    skuToken("variant", doc.variant),         // 100-YD
+    skuToken("grade", doc.grade),             // PREM
+    skuToken("finish", doc.finish),           // SF / DF
+    skuToken("packingUnit", doc.packingUnit), // ROLL
   ].filter(Boolean);
 
   const sku = parts.join("|") || "SKU";
 
+  // ---------- Human-facing name (full words) ----------
   const nameParts = [
-    doc.productType,
-    cat.label || cat.key,
-    doc.size,
-    doc.color,
-    doc.finish,
-    doc.variant,
-    doc.grade,
+    doc.productType,           // Ribbon
+    cat.label || cat.key,      // Satin / Grosgrain
+    doc.size,                  // 25 mm
+    doc.color,                 // OffWhite
+    doc.finish,                // Single Face
+    doc.variant,               // 100 Yards
+    doc.grade,                 // Premium
   ].filter(Boolean);
 
   doc.name = nameParts.join(" ");
@@ -88,9 +138,11 @@ const productSchema = new mongoose.Schema(
       type: [String],
       default: [],
       validate: {
-        validator: (arr) => arr.every(t => TAGS.includes(t)),
+        validator: (arr) => arr.every((t) => TAGS.includes(t)),
         message: (props) =>
-          `Invalid tag(s): ${props.value.filter(t => !TAGS.includes(t)).join(", ")}`,
+          `Invalid tag(s): ${props.value
+            .filter((t) => !TAGS.includes(t))
+            .join(", ")}`,
       },
       index: true,
     },

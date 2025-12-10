@@ -12,7 +12,7 @@ const slotSchema = new mongoose.Schema(
       type: String,
       required: true,
       trim: true,
-      enum: SLOT_STORES, // "ALAIN-MWJ", etc.
+      enum: SLOT_STORES, // "AE1", etc.
     },
     unit: {
       type: String,
