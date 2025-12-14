@@ -53,6 +53,7 @@ invoiceSchema.pre("validate", async function (next) {
           break;
         }
       }
+
       if (!this.invoiceNumber) {
         return next(new Error("Failed to generate a unique invoice number."));
       }
@@ -62,8 +63,18 @@ invoiceSchema.pre("validate", async function (next) {
     const Order = mongoose.model("Order");
     const ord = await Order.findById(this.order).select("status totalPrice user").lean();
     if (!ord) return next(new Error("Order not found."));
-    if (ord.status !== "Delivered") {
-      return next(new Error("Invoice can only be created for a Delivered order."));
+
+    // ✅ Allowed statuses must match controller logic
+    const allowedStatuses = ["Processing", "Delivered"];
+
+    if (!allowedStatuses.includes(ord.status)) {
+      return next(
+        new Error(
+          `Invoice can only be created for orders in status: ${allowedStatuses.join(
+            " or "
+          )}.`
+        )
+      );
     }
 
     // Default amount from order.totalPrice if not provided or invalid

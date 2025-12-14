@@ -1,3 +1,4 @@
+// models/filterConfigModel.js
 import mongoose from "mongoose";
 import { PRODUCT_TYPES, FILTER_FIELD_TYPES, FILTER_UI_TYPES } from "../constants.js";
 
@@ -17,7 +18,11 @@ const filterFieldSchema = new mongoose.Schema(
 const filterConfigSchema = new mongoose.Schema(
   {
     productType: { type: String, enum: PRODUCT_TYPES, required: true, unique: true },
-    fields:      { type: [filterFieldSchema], default: [] },
+
+    // ✅ NEW: controls product type order on the client (e.g., switcher order)
+    sort: { type: Number, default: 0, index: true },
+
+    fields: { type: [filterFieldSchema], default: [] },
   },
   { timestamps: true }
 );

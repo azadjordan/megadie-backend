@@ -19,11 +19,18 @@ const normalizeProductType = (raw) => String(raw || "").trim();
 const assertValidProductType = (productType) => {
   if (!PRODUCT_TYPES.includes(productType)) {
     throw new Error(
-      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(
-        ", "
-      )}`
+      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(", ")}`
     );
   }
+};
+
+/**
+ * Normalize sort (supports numbers or numeric strings)
+ */
+const normalizeSort = (raw, fallback = 0) => {
+  if (typeof raw === "undefined" || raw === null) return fallback;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : fallback;
 };
 
 /**
@@ -74,7 +81,8 @@ const validateFields = (fields) => {
    ========================= */
 export const getFilterConfigs = asyncHandler(async (_req, res) => {
   const configs = await FilterConfig.find({})
-    .sort({ productType: 1 })
+    // ✅ NEW: sort order controlled by config.sort; fallback by productType
+    .sort({ sort: 1, productType: 1 })
     .lean();
 
   res.status(200).json({
@@ -101,9 +109,7 @@ export const getFilterConfig = asyncHandler(async (req, res) => {
   if (!PRODUCT_TYPES.includes(productType)) {
     res.status(400);
     throw new Error(
-      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(
-        ", "
-      )}`
+      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(", ")}`
     );
   }
 
@@ -112,7 +118,7 @@ export const getFilterConfig = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Filter configuration retrieved successfully.",
-    data: config || { productType, fields: [] },
+    data: config || { productType, sort: 0, fields: [] },
   });
 });
 
@@ -121,7 +127,7 @@ export const getFilterConfig = asyncHandler(async (req, res) => {
    Private/Admin
    Create filter config for a productType
    (409 if already exists)
-   Body: { fields: [...] }
+   Body: { fields?: [...], sort?: number }
    ========================= */
 export const createFilterConfig = asyncHandler(async (req, res) => {
   const productType = normalizeProductType(req.params.productType);
@@ -142,11 +148,14 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
     );
   }
 
-  const { fields = [] } = req.body || {};
+  const { fields = [], sort } = req.body || {};
+
+  // Validate fields if provided (on create we default fields to [])
   validateFields(fields);
 
   const created = await FilterConfig.create({
     productType,
+    sort: normalizeSort(sort, 0),
     fields,
   });
 
@@ -162,7 +171,9 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
    Private/Admin
    Update filter config for a productType
    (404 if missing)
-   Body: { fields: [...] }
+   Body: { fields?: [...], sort?: number }
+   Notes:
+   - Supports partial updates (you can update sort without sending fields)
    ========================= */
 export const updateFilterConfig = asyncHandler(async (req, res) => {
   const productType = normalizeProductType(req.params.productType);
@@ -174,8 +185,7 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
 
   assertValidProductType(productType);
 
-  const { fields = [] } = req.body || {};
-  validateFields(fields);
+  const { fields, sort } = req.body || {};
 
   const existing = await FilterConfig.findOne({ productType });
   if (!existing) {
@@ -185,13 +195,31 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
     );
   }
 
-  existing.fields = fields;
+  const changes = [];
+
+  // ✅ Only update fields if provided
+  if (typeof fields !== "undefined") {
+    validateFields(fields);
+    existing.fields = fields;
+    changes.push("fields");
+  }
+
+  // ✅ Only update sort if provided
+  if (typeof sort !== "undefined") {
+    existing.sort = normalizeSort(sort, existing.sort ?? 0);
+    changes.push("sort");
+  }
+
+  if (changes.length === 0) {
+    res.status(400);
+    throw new Error("No updates provided. Send 'fields' and/or 'sort'.");
+  }
 
   const updated = await existing.save();
 
   res.status(200).json({
     success: true,
-    message: "Filter configuration updated successfully.",
+    message: `Filter configuration updated successfully (${changes.join(", ")}).`,
     data: updated,
   });
 });

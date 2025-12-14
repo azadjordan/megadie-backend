@@ -202,28 +202,28 @@ export const createProduct = asyncHandler(async (req, res) => {
    Filtered products (shop view) with pagination
    ========================= */
 export const getProducts = asyncHandler(async (req, res) => {
-  const { productType } = req.query;
+  const { productType } = req.query
   const { page, limit, skip } = parsePagination(req, {
     defaultLimit: 48,
     maxLimit: 100,
-  });
+  })
 
-  const filter = await buildProductFilter(req, { forAdmin: false });
-  const sort = buildSort(productType);
+  const filter = await buildProductFilter(req, { forAdmin: false })
+  const sort = buildSort(productType)
 
   const [total, products] = await Promise.all([
     Product.countDocuments(filter),
     Product.find(filter)
       .select(
-        "name productType category size color variant grade finish packingUnit moq images sku isAvailable priceRule sort"
+        "name productType category size color catalogCode variant grade finish packingUnit images sku priceRule sort"
       )
       .sort(sort)
       .skip(skip)
       .limit(limit)
       .lean(),
-  ]);
+  ])
 
-  const totalPages = Math.max(Math.ceil(total / limit), 1);
+  const totalPages = Math.max(Math.ceil(total / limit), 1)
 
   res.status(200).json({
     success: true,
@@ -237,8 +237,8 @@ export const getProducts = asyncHandler(async (req, res) => {
       hasNext: page < totalPages,
     },
     data: products,
-  });
-});
+  })
+})
 
 /* =========================
    GET /api/products/:id

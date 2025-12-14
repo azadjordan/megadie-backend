@@ -277,17 +277,39 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
    Private/Admin
    Body: { dueDate?, adminNote? }
    amount derived from order.totalPrice
+
+   Business rule:
+   - Invoice can be created when order.status is "Processing" or "Delivered"
+   - One invoice per order
    ========================= */
 export const createInvoiceForOrder = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
   const { dueDate, adminNote } = req.body || {};
 
-  const orderDoc = await Order.findById(orderId).select("status totalPrice user invoice orderNumber");
-  if (!orderDoc) { res.status(404); throw new Error("Order not found."); }
-  if (orderDoc.invoice) { res.status(400); throw new Error("Invoice already exists for this order."); }
-  if (orderDoc.status !== "Delivered") {
+  const orderDoc = await Order.findById(orderId).select(
+    "status totalPrice user invoice orderNumber"
+  );
+
+  if (!orderDoc) {
+    res.status(404);
+    throw new Error("Order not found.");
+  }
+
+  if (orderDoc.invoice) {
     res.status(400);
-    throw new Error("Invoice can only be created for a Delivered order.");
+    throw new Error("Invoice already exists for this order.");
+  }
+
+  // ✅ Allowed statuses for invoice creation
+  const allowedStatuses = ["Processing", "Delivered"];
+
+  if (!allowedStatuses.includes(orderDoc.status)) {
+    res.status(400);
+    throw new Error(
+      `Invoice can only be created for orders in status: ${allowedStatuses.join(
+        " or "
+      )}.`
+    );
   }
 
   const derivedAmount = roundToTwo(Math.max(0, orderDoc.totalPrice || 0));
@@ -300,8 +322,16 @@ export const createInvoiceForOrder = asyncHandler(async (req, res) => {
     adminNote,
   });
 
-  await Order.findByIdAndUpdate(orderDoc._id, { $set: { invoice: invoice._id } }, { runValidators: false });
-  await invoice.populate(["payments", { path: "order", select: "orderNumber totalPrice status" }]);
+  await Order.findByIdAndUpdate(
+    orderDoc._id,
+    { $set: { invoice: invoice._id } },
+    { runValidators: false }
+  );
+
+  await invoice.populate([
+    "payments",
+    { path: "order", select: "orderNumber totalPrice status" },
+  ]);
 
   // Optional but nice for REST: Location header
   res.setHeader("Location", `/api/invoices/${invoice._id}`);

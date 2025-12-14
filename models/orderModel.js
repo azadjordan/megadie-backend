@@ -79,11 +79,13 @@ orderSchema.virtual("invoiceGenerated").get(function () {
 });
 
 /* ========== Validators & Business Rules ========== */
-// Allow invoice link while Delivered or Cancelled (so you can flip status first, then delete)
+// Allow invoice link while Processing, Delivered, or Cancelled
+// - Processing / Delivered: normal business flow (you can create an invoice)
+// - Cancelled: keep existing invoice link valid, or allow cleanup workflows
 orderSchema.path("invoice").validate(function (val) {
   if (!val) return true;
-  return this.status === "Delivered" || this.status === "Cancelled";
-}, "Invoice can only be attached after the order is delivered (or while cancelled).");
+  return ["Processing", "Delivered", "Cancelled"].includes(this.status);
+}, "Invoice can only be attached for Processing, Delivered, or Cancelled orders.");
 
 /* ========== Hooks ========== */
 // Generate order number & compute totals; stamp deliveredAt when first delivered
