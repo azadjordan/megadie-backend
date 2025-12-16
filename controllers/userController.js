@@ -37,10 +37,12 @@ export const authUser = asyncHandler(async (req, res) => {
    Public — Logout user
    ========================= */
 export const logoutUser = asyncHandler(async (req, res) => {
+  const isProd = process.env.NODE_ENV === "production";
+
   res.clearCookie("jwt", {
     httpOnly: true,
+    secure: isProd,
     sameSite: "lax",
-    secure: process.env.NODE_ENV === "production",
     path: "/",
   });
 
