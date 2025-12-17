@@ -6,6 +6,143 @@ import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
 import User from "../models/userModel.js";
 
+// ✅ Helper: sanitize quote for OWNER views based on status
+const sanitizeQuoteForOwner = (quoteDoc) => {
+  const obj = quoteDoc.toObject ? quoteDoc.toObject() : { ...quoteDoc };
+
+  const status = obj.status;
+
+  const stripAllPricing = () => {
+    // remove unit prices from items
+    obj.requestedItems = (obj.requestedItems || []).map((it) => ({
+      product: it.product,
+      qty: it.qty,
+    }));
+    delete obj.deliveryCharge;
+    delete obj.extraFee;
+    delete obj.totalPrice;
+  };
+
+  const keepOnlyTotal = () => {
+    // keep items but remove unit pricing and fees; keep totalPrice only
+    obj.requestedItems = (obj.requestedItems || []).map((it) => ({
+      product: it.product,
+      qty: it.qty,
+    }));
+    delete obj.deliveryCharge;
+    delete obj.extraFee;
+    // totalPrice stays
+  };
+
+  if (status === "Processing") {
+    stripAllPricing();
+    return obj;
+  }
+
+  if (status === "Quoted") {
+    // show full pricing
+    return obj;
+  }
+
+  if (status === "Confirmed") {
+    keepOnlyTotal();
+    return obj;
+  }
+
+  if (status === "Cancelled") {
+    stripAllPricing();
+    return obj;
+  }
+
+  // default fallback: be conservative
+  stripAllPricing();
+  return obj;
+};
+
+/* =========================
+   PUT /api/quotes/:id/cancel
+   Private (Owner)
+   Cancel a quote (allowed in Processing or Quoted)
+   ========================= */
+export const cancelQuoteByUser = asyncHandler(async (req, res) => {
+  const quote = await Quote.findById(req.params.id);
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  // Owner check
+  const isOwner = String(quote.user) === String(req.user._id);
+  if (!isOwner) {
+    res.status(403);
+    throw new Error("Not authorized to cancel this quote.");
+  }
+
+  // Allowed states
+  if (!["Processing", "Quoted"].includes(quote.status)) {
+    res.status(409);
+    throw new Error("Only Processing or Quoted quotes can be cancelled.");
+  }
+
+  if (quote.status !== "Cancelled") {
+    quote.status = "Cancelled";
+  }
+
+  const updated = await quote.save();
+
+  res.status(200).json({
+    success: true,
+    message: "Quote cancelled successfully.",
+    data: updated,
+  });
+});
+
+/* =========================
+   PUT /api/quotes/:id/confirm
+   Private (Owner)
+   Confirm a quote (allowed only in Quoted)
+   ========================= */
+export const confirmQuoteByUser = asyncHandler(async (req, res) => {
+  const quote = await Quote.findById(req.params.id);
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  // Owner check
+  const isOwner = String(quote.user) === String(req.user._id);
+  if (!isOwner) {
+    res.status(403);
+    throw new Error("Not authorized to confirm this quote.");
+  }
+
+  // Allowed state
+  if (quote.status !== "Quoted") {
+    res.status(409);
+    throw new Error("Only Quoted quotes can be confirmed.");
+  }
+
+  // ✅ Recommended: ensure pricing exists before confirming
+  const items = quote.requestedItems || [];
+  const hasAnyPrice = items.some((it) => Number(it.unitPrice) > 0);
+  if (!hasAnyPrice) {
+    res.status(400);
+    throw new Error("Quote cannot be confirmed until pricing is assigned.");
+  }
+
+  quote.status = "Confirmed";
+  const updated = await quote.save();
+
+  res.status(200).json({
+    success: true,
+    message: "Quote confirmed successfully.",
+    data: updated,
+  });
+});
+
+
 /* =========================
    POST /api/quotes
    Private
@@ -49,31 +186,14 @@ export const createQuote = asyncHandler(async (req, res) => {
 /* =========================
    GET /api/quotes/my
    Private
-   Get logged-in user's quotes (hide prices for Processing)
+   Get logged-in user's quotes (sanitized by status)
    ========================= */
 export const getMyQuotes = asyncHandler(async (req, res) => {
   const quotes = await Quote.find({ user: req.user._id })
-    .populate("requestedItems.product", "name") // 👈 only name now
+    .populate("requestedItems.product", "name")
     .sort({ createdAt: -1 });
 
-  const sanitized = quotes.map((q) => {
-    const obj = q.toObject();
-
-    // ⚠️ Your status enum is: Processing, Quoted, Confirmed, Rejected, Cancelled
-    // There is NO "Requested" anymore, so this check never runs.
-    // You probably want "Processing" here instead:
-    if (q.status === "Processing") {
-      obj.requestedItems = obj.requestedItems.map((it) => ({
-        product: it.product,
-        qty: it.qty,
-      }));
-      delete obj.deliveryCharge;
-      delete obj.extraFee;
-      delete obj.totalPrice;
-    }
-
-    return obj;
-  });
+  const sanitized = quotes.map((q) => sanitizeQuoteForOwner(q));
 
   res.status(200).json({
     success: true,
@@ -103,7 +223,7 @@ export const getQuotes = asyncHandler(async (_req, res) => {
 /* =========================
    GET /api/quotes/:id
    Private (owner) or Admin
-   Get quote by ID (hide prices for owners if Requested)
+   Get quote by ID (sanitized for owner by status)
    ========================= */
 export const getQuoteById = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
@@ -117,32 +237,28 @@ export const getQuoteById = asyncHandler(async (req, res) => {
 
   const isAdmin = !!req.user?.isAdmin;
   const isOwner = String(quote.user?._id || quote.user) === String(req.user._id);
+
   if (!isAdmin && !isOwner) {
     res.status(403);
     throw new Error("Not authorized to view this quote.");
   }
 
-  if (!isAdmin && quote.status === "Requested") {
-    const obj = quote.toObject();
-    obj.requestedItems = obj.requestedItems.map((it) => ({
-      product: it.product,
-      qty: it.qty,
-    }));
-    delete obj.deliveryCharge;
-    delete obj.extraFee;
-    delete obj.totalPrice;
-
+  // ✅ Admin sees full quote
+  if (isAdmin) {
     return res.status(200).json({
       success: true,
       message: "Quote retrieved successfully.",
-      data: obj,
+      data: quote,
     });
   }
 
-  res.status(200).json({
+  // ✅ Owner sees sanitized view based on status
+  const sanitized = sanitizeQuoteForOwner(quote);
+
+  return res.status(200).json({
     success: true,
     message: "Quote retrieved successfully.",
-    data: quote,
+    data: sanitized,
   });
 });
 
