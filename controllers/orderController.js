@@ -10,9 +10,37 @@ import Payment from "../models/paymentModel.js";
    ========================= */
 const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
   const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1), maxLimit);
+  const limit = Math.min(
+    Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1),
+    maxLimit
+  );
   const skip = (page - 1) * limit;
   return { page, limit, skip };
+};
+
+// Remove all pricing fields for client/owner responses
+const sanitizeOrderForClient = (order) => {
+  if (!order) return order;
+
+  // If it's a mongoose doc, convert safely; if it's already lean, keep as-is
+  const o = typeof order.toObject === "function" ? order.toObject() : order;
+
+  // Strip top-level pricing
+  delete o.totalPrice;
+  delete o.deliveryCharge;
+  delete o.extraFee;
+
+  // Strip item pricing
+  if (Array.isArray(o.orderItems)) {
+    o.orderItems = o.orderItems.map((it) => {
+      const item = { ...(it || {}) };
+      delete item.unitPrice;
+      delete item.lineTotal;
+      return item;
+    });
+  }
+
+  return o;
 };
 
 /* =========================
@@ -22,7 +50,9 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
    Cascades: delete dependent invoice + its dependent payments (if any).
    ========================= */
 export const deleteOrder = asyncHandler(async (req, res) => {
-  const order = await Order.findById(req.params.id).select("_id status invoice");
+  const order = await Order.findById(req.params.id).select(
+    "_id status invoice"
+  );
   if (!order) {
     res.status(404);
     throw new Error("Order not found.");
@@ -30,12 +60,16 @@ export const deleteOrder = asyncHandler(async (req, res) => {
 
   if (order.status === "Delivered") {
     res.status(400);
-    throw new Error("Delivered orders cannot be deleted. Change status to 'Cancelled' first, then delete.");
+    throw new Error(
+      "Delivered orders cannot be deleted. Change status to 'Cancelled' first, then delete."
+    );
   }
 
   if (order.status !== "Cancelled") {
     res.status(409);
-    throw new Error("Only 'Cancelled' orders can be deleted. Update status to 'Cancelled' first.");
+    throw new Error(
+      "Only 'Cancelled' orders can be deleted. Update status to 'Cancelled' first."
+    );
   }
 
   let paymentsDeleted = 0;
@@ -47,7 +81,10 @@ export const deleteOrder = asyncHandler(async (req, res) => {
       if (order.invoice) {
         const inv = await Invoice.findById(order.invoice).session(session);
         if (inv) {
-          const payDel = await Payment.deleteMany({ invoice: inv._id }, { session });
+          const payDel = await Payment.deleteMany(
+            { invoice: inv._id },
+            { session }
+          );
           paymentsDeleted = payDel.deletedCount || 0;
           await inv.deleteOne({ session });
           invoiceDeleted = true;
@@ -58,10 +95,9 @@ export const deleteOrder = asyncHandler(async (req, res) => {
 
     res.status(200).json({
       success: true,
-      message:
-        invoiceDeleted
-          ? `Order deleted successfully. Associated invoice deleted and ${paymentsDeleted} payment(s) removed.`
-          : "Order deleted successfully.",
+      message: invoiceDeleted
+        ? `Order deleted successfully. Associated invoice deleted and ${paymentsDeleted} payment(s) removed.`
+        : "Order deleted successfully.",
       orderId: order._id,
       invoiceDeleted,
       paymentsDeleted,
@@ -79,6 +115,7 @@ export const deleteOrder = asyncHandler(async (req, res) => {
 export const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id)
     .populate("user", "name email")
+    .populate("invoice", "invoiceNumber")
     .populate("orderItems.product", "name sku size");
 
   if (!order) {
@@ -88,15 +125,19 @@ export const getOrderById = asyncHandler(async (req, res) => {
 
   const isAdmin = !!req.user?.isAdmin;
   const isOwner = String(order.user?._id || order.user) === String(req.user._id);
+
   if (!isAdmin && !isOwner) {
     res.status(403);
     throw new Error("Not authorized to view this order.");
   }
 
+  // Admin sees full order (unchanged). Owner sees sanitized order (no pricing).
+  const payload = isAdmin ? order : sanitizeOrderForClient(order);
+
   res.status(200).json({
     success: true,
     message: "Order retrieved successfully.",
-    data: order,
+    data: payload,
   });
 });
 
@@ -106,19 +147,31 @@ export const getOrderById = asyncHandler(async (req, res) => {
    Paginated list of the authenticated user's orders
    ========================= */
 export const getMyOrders = asyncHandler(async (req, res) => {
-  const { page, limit, skip } = parsePagination(req, { defaultLimit: 20, maxLimit: 100 });
+  const { page, limit, skip } = parsePagination(req, {
+    defaultLimit: 20,
+    maxLimit: 100,
+  });
+
   const filter = { user: req.user._id };
   const sort = { createdAt: -1, _id: 1 };
 
-  const [total, orders] = await Promise.all([
+  const [total, ordersRaw] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
+      // Exclude pricing fields entirely from the response payload
+      .select(
+        "-totalPrice -deliveryCharge -extraFee -orderItems.unitPrice -orderItems.lineTotal"
+      )
       .populate("invoice", "invoiceNumber")
+      .populate("orderItems.product", "name sku size")
       .sort(sort)
       .skip(skip)
       .limit(limit)
       .lean(),
   ]);
+
+  // Extra safety: sanitize again at the edge (in case schema changes later)
+  const orders = (ordersRaw || []).map(sanitizeOrderForClient);
 
   res.status(200).json({
     success: true,
@@ -142,7 +195,10 @@ export const getMyOrders = asyncHandler(async (req, res) => {
    Query: status, user
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
-  const { page, limit, skip } = parsePagination(req, { defaultLimit: 20, maxLimit: 200 });
+  const { page, limit, skip } = parsePagination(req, {
+    defaultLimit: 20,
+    maxLimit: 200,
+  });
 
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
@@ -214,7 +270,10 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         throw new Error("Quote must be Confirmed before creating an order.");
       }
 
-      if (!Array.isArray(quote.requestedItems) || quote.requestedItems.length === 0) {
+      if (
+        !Array.isArray(quote.requestedItems) ||
+        quote.requestedItems.length === 0
+      ) {
         res.status(400);
         throw new Error("Quote has no items.");
       }
@@ -228,7 +287,9 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
         }
         if (typeof it.unitPrice !== "number") {
           res.status(400);
-          throw new Error("Each quoted item must have a unitPrice before creating an order.");
+          throw new Error(
+            "Each quoted item must have a unitPrice before creating an order."
+          );
         }
         return {
           product: product?._id || it.product,
@@ -293,7 +354,9 @@ export const updateOrder = asyncHandler(async (req, res) => {
   // ❌ Order items are never editable after creation
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {
     res.status(400);
-    throw new Error("Order items are immutable after creation and cannot be modified.");
+    throw new Error(
+      "Order items are immutable after creation and cannot be modified."
+    );
   }
 
   const hasInvoice = !!order.invoice;
@@ -317,8 +380,8 @@ export const updateOrder = asyncHandler(async (req, res) => {
         `Cannot modify ${triedForbidden.join(
           ", "
         )} because an invoice already exists for this order. ` +
-        `If you truly need to change pricing or customer, first delete the linked invoice ` +
-        `(/api/invoices/:id), which will also delete its payments, then update the order and recreate the invoice.`
+          `If you truly need to change pricing or customer, first delete the linked invoice ` +
+          `(/api/invoices/:id), which will also delete its payments, then update the order and recreate the invoice.`
       );
     }
   }
@@ -337,10 +400,10 @@ export const updateOrder = asyncHandler(async (req, res) => {
   }
 
   const allowedTopLevel = new Set([
-    "user",                 // allowed unless invoice exists (guarded above)
+    "user", // allowed unless invoice exists (guarded above)
     "status",
-    "deliveryCharge",       // allowed unless invoice exists (guarded above)
-    "extraFee",             // allowed unless invoice exists (guarded above)
+    "deliveryCharge", // allowed unless invoice exists (guarded above)
+    "extraFee", // allowed unless invoice exists (guarded above)
     "deliveredBy",
     "clientToAdminNote",
     "adminToAdminNote",
@@ -354,13 +417,18 @@ export const updateOrder = asyncHandler(async (req, res) => {
 
     let newVal = req.body[k];
 
-    if ((k === "deliveryCharge" || k === "extraFee") && typeof newVal === "number") {
+    if (
+      (k === "deliveryCharge" || k === "extraFee") &&
+      typeof newVal === "number"
+    ) {
       newVal = Math.max(0, newVal);
     }
 
     const oldVal = order[k];
     const different =
-      (oldVal instanceof Date && newVal instanceof Date && oldVal.getTime() !== newVal.getTime()) ||
+      (oldVal instanceof Date &&
+        newVal instanceof Date &&
+        oldVal.getTime() !== newVal.getTime()) ||
       (!(oldVal instanceof Date) && oldVal !== newVal);
 
     if (different) {

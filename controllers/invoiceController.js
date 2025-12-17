@@ -60,24 +60,28 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
     .populate("user", "name email")
     .populate({
       path: "order",
-      // include charges + items so PDF can break down totals
       select:
         "orderNumber totalPrice status orderItems deliveredAt deliveryCharge extraFee",
       populate: { path: "orderItems.product", select: "name" },
     })
-    .populate("payments"); // full payments; we'll filter in code
+    .populate("payments");
 
   if (!invoice) {
     res.status(404);
     throw new Error("Invoice not found.");
   }
 
-  // --- Compute totalPaid, balanceDue, and derived status ---
-  const paymentsArray = Array.isArray(invoice.payments)
-    ? invoice.payments
-    : [];
+  const isAdmin = !!req.user?.isAdmin;
+  const isOwner = String(invoice.user?._id || invoice.user) === String(req.user?._id);
 
-  // Match getInvoices: only status === "Received" counts as paid
+  if (!isAdmin && !isOwner) {
+    res.status(403);
+    throw new Error("Not authorized to view this invoice PDF.");
+  }
+
+  // --- Compute totalPaid, balanceDue, and derived status ---
+  const paymentsArray = Array.isArray(invoice.payments) ? invoice.payments : [];
+
   const totalPaid = paymentsArray
     .filter((p) => p && p.status === "Received")
     .reduce((sum, p) => sum + (p.amount || 0), 0);
@@ -90,32 +94,24 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
 
   if (totalPaid >= amount && amount > 0) {
     computedStatus = "Paid";
-  } else if (
-    invoice.dueDate &&
-    now > invoice.dueDate &&
-    totalPaid < amount
-  ) {
-    computedStatus = totalPaid > 0 ? "Overdue" : "Overdue";
+  } else if (invoice.dueDate && now > invoice.dueDate && totalPaid < amount) {
+    computedStatus = "Overdue";
   } else if (totalPaid > 0 && totalPaid < amount) {
     computedStatus = "Partially Paid";
   } else {
     computedStatus = "Unpaid";
   }
 
-  // Attach computed values to the document so InvoicePDF can use them
-  // (they don't need to exist in the schema, we just pass them through)
   invoice.totalPaid = totalPaid;
   invoice.balanceDue = balanceDue;
   invoice.status = computedStatus;
 
-  // --- PDF response headers ---
   res.setHeader("Content-Type", "application/pdf");
   res.setHeader(
     "Content-Disposition",
     `inline; filename=invoice-${invoice.invoiceNumber || invoice._id}.pdf`
   );
 
-  // You can optionally pass a company object if you want branding tweaks
   const company = {
     name: "Megadie",
     short: "Megadie",
@@ -251,6 +247,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
    GET /api/invoices/:id
    Private/Admin or Owner
    (Detail view)
+   Returns invoice + payments
    ========================= */
 export const getInvoiceById = asyncHandler(async (req, res) => {
   const invoice = await Invoice.findById(req.params.id)
@@ -263,13 +260,20 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
     throw new Error("Invoice not found.");
   }
 
-  const isOwner = req.user && invoice.user && req.user._id.equals(invoice.user._id);
-  if (!(req.user?.isAdmin || isOwner)) {
+  const isAdmin = !!req.user?.isAdmin;
+  const isOwner =
+    String(invoice.user?._id || invoice.user) === String(req.user?._id);
+
+  if (!isAdmin && !isOwner) {
     res.status(403);
     throw new Error("Not authorized to view this invoice.");
   }
 
-  res.json(invoice);
+  res.status(200).json({
+    success: true,
+    message: "Invoice retrieved successfully.",
+    data: invoice,
+  });
 });
 
 /* =========================
@@ -438,22 +442,134 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
 /* =========================
    GET /api/invoices/my
    Private (owner)
+   List view (lightweight): computed totals/status, NO payments array
    ========================= */
 export const getMyInvoices = asyncHandler(async (req, res) => {
-  const invoices = await Invoice.find({ user: req.user._id })
-    .populate("order", "orderNumber") // 👈 only load orderNumber
-    .populate("payments")
-    .sort({ createdAt: -1 });
+  const now = new Date();
 
-  // Strip everything except orderNumber from the populated order
-  const sanitized = invoices.map((inv) => {
-    const obj = inv.toObject();
-    if (obj.order && typeof obj.order === "object") {
-      obj.order = { orderNumber: obj.order.orderNumber };
-    }
-    return obj;
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 100);
+  const skip = (page - 1) * limit;
+
+  // ✅ Safest: always cast via String first
+  const userIdStr = String(req.user?._id || "");
+  if (!mongoose.isValidObjectId(userIdStr)) {
+    res.status(401);
+    throw new Error("Not authorized (invalid user id).");
+  }
+  const userId = new mongoose.Types.ObjectId(userIdStr);
+
+  const facet = await Invoice.aggregate([
+    { $match: { user: userId } },
+
+    {
+      $lookup: {
+        from: "orders",
+        localField: "order",
+        foreignField: "_id",
+        as: "orderDoc",
+        pipeline: [{ $project: { orderNumber: 1 } }],
+      },
+    },
+    { $unwind: { path: "$orderDoc", preserveNullAndEmptyArrays: true } },
+
+    {
+      $lookup: {
+        from: "payments",
+        localField: "_id",
+        foreignField: "invoice",
+        as: "paymentsAgg",
+        pipeline: [
+          { $match: { status: "Received" } },
+          { $project: { amount: 1 } },
+        ],
+      },
+    },
+
+    { $addFields: { totalPaid: { $ifNull: [{ $sum: "$paymentsAgg.amount" }, 0] } } },
+    { $addFields: { balanceDue: { $max: [{ $subtract: ["$amount", "$totalPaid"] }, 0] } } },
+
+    {
+      $addFields: {
+        status: {
+          $switch: {
+            branches: [
+              { case: { $gte: ["$totalPaid", "$amount"] }, then: "Paid" },
+              {
+                case: {
+                  $and: [
+                    { $ne: ["$dueDate", null] },
+                    { $gt: [now, "$dueDate"] },
+                    { $lt: ["$totalPaid", "$amount"] },
+                  ],
+                },
+                then: "Overdue",
+              },
+              {
+                case: {
+                  $and: [
+                    { $gt: ["$totalPaid", 0] },
+                    { $lt: ["$totalPaid", "$amount"] },
+                  ],
+                },
+                then: "Partially Paid",
+              },
+            ],
+            default: "Unpaid",
+          },
+        },
+      },
+    },
+
+    { $sort: { createdAt: -1 } },
+
+    {
+      $facet: {
+        items: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              invoiceNumber: 1,
+              amount: 1,
+              dueDate: 1,
+              createdAt: 1,
+              order: 1,
+              orderNumber: "$orderDoc.orderNumber",
+              totalPaid: 1,
+              balanceDue: 1,
+              status: 1,
+            },
+          },
+        ],
+        meta: [{ $count: "total" }],
+      },
+    },
+  ]);
+
+  const itemsRaw = facet?.[0]?.items || [];
+  const total = facet?.[0]?.meta?.[0]?.total || 0;
+
+  const items = itemsRaw.map((x) => ({
+    ...x,
+    totalPaid: roundToTwo(x.totalPaid || 0),
+    balanceDue: roundToTwo(x.balanceDue || 0),
+  }));
+
+  res.status(200).json({
+    success: true,
+    message: "Your invoices retrieved successfully.",
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(Math.ceil(total / limit), 1),
+      hasPrev: page > 1,
+      hasNext: page * limit < total,
+    },
+    items,
   });
-
-  res.json(sanitized);
 });
+
+
 
