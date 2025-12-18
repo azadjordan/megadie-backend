@@ -3,6 +3,10 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import User from "../models/userModel.js";
 import generateToken from "../utils/generateToken.js";
 
+// Forgot password (Resend)
+import crypto from "crypto";
+import sendTransactionalEmail from "../utils/sendTransactionalEmail.js";
+
 /* =========================
    POST /api/users/auth
    Public — Authenticate user
@@ -86,6 +90,114 @@ export const registerUser = asyncHandler(async (req, res) => {
       email: user.email,
       isAdmin: user.isAdmin,
     },
+  });
+});
+
+/* =========================
+   POST /api/users/forgot-password
+   Public — Email reset link
+   ========================= */
+export const forgotPassword = asyncHandler(async (req, res) => {
+  const email = (req.body.email || "").trim().toLowerCase();
+
+  // Always respond the same to avoid revealing if an account exists
+  const genericResponse = {
+    success: true,
+    message:
+      "If you are a registered user, a password reset link has been sent.",
+  };
+
+  if (!email) return res.status(200).json(genericResponse);
+
+  const user = await User.findOne({ email });
+  if (!user) return res.status(200).json(genericResponse);
+
+  // Generate raw token for URL, store only hash in DB
+  const rawToken = crypto.randomBytes(32).toString("hex");
+  const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+
+  user.passwordResetTokenHash = tokenHash;
+  user.passwordResetExpires = new Date(Date.now() + 1000 * 60 * 30); // 30 mins
+  await user.save();
+
+  const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(
+    /\/$/,
+    ""
+  );
+  const resetUrl = `${frontendUrl}/reset-password/${rawToken}`;
+
+  // IMPORTANT:
+  // - Avoid clickable <a href="..."> to reduce Resend click-tracking redirects (resend-clicks.com)
+  // - Use copy/paste URL instead (still works great, fewer Gmail warnings)
+  await sendTransactionalEmail({
+    to: user.email,
+    subject: "Reset your Megadie password",
+    text:
+      `You requested a password reset.\n\n` +
+      `Copy/paste this link into your browser:\n${resetUrl}\n\n` +
+      `This link expires in 30 minutes.\n\n` +
+      `If you didn't request this, you can ignore this email.`,
+    html: `
+      <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+        <p>You requested a password reset.</p>
+        <p><strong>Copy/paste this link into your browser:</strong></p>
+        <p style="word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
+          ${resetUrl}
+        </p>
+        <p style="color:#666;">This link expires in 30 minutes.</p>
+        <p style="color:#666;">If you didn’t request this, you can ignore this email.</p>
+      </div>
+    `,
+  });
+
+  return res.status(200).json(genericResponse);
+});
+
+/* =========================
+   POST /api/users/reset-password/:token
+   Public — Reset password
+   ========================= */
+export const resetPassword = asyncHandler(async (req, res) => {
+  const { token } = req.params;
+  const { password } = req.body;
+
+  if (!token) {
+    res.status(400);
+    throw new Error("Reset token is required.");
+  }
+
+  if (!password || String(password).length < 6) {
+    res.status(400);
+    throw new Error("Password must be at least 6 characters.");
+  }
+
+  const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+
+  const user = await User.findOne({
+    passwordResetTokenHash: tokenHash,
+    passwordResetExpires: { $gt: new Date() },
+  });
+
+  if (!user) {
+    res.status(400);
+    throw new Error("Reset token is invalid or expired.");
+  }
+
+  // Update password (pre-save hook hashes it)
+  user.password = password;
+
+  // Clear reset fields
+  user.passwordResetTokenHash = undefined;
+  user.passwordResetExpires = undefined;
+
+  await user.save();
+
+  // Optional: auto-login after reset
+  generateToken(res, user._id);
+
+  return res.status(200).json({
+    success: true,
+    message: "Password reset successful.",
   });
 });
 

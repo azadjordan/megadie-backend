@@ -1,14 +1,21 @@
+// routes/invoiceRoutes.js
 import express from "express";
-import {
-  getInvoices,            // admin list (filters + pagination + computed totals)
-  getInvoiceById,         // admin or owner
-  updateInvoice,          // admin
-  deleteInvoice,          // admin
-  getMyInvoices,          // owner (list, computed totals/status)
-  getInvoicePDF,          // owner or admin (PDF)
-  createInvoiceForOrder,  // admin: create from order
-} from "../controllers/invoiceController.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
+
+// Owner + shared (admin OR owner) endpoints
+import {
+  getMyInvoices,
+  getInvoiceById,
+  getInvoicePDF,
+} from "../controllers/invoiceUserController.js";
+
+// Admin-only endpoints
+import {
+  getInvoices,
+  updateInvoice,
+  deleteInvoice,
+  createInvoiceForOrder,
+} from "../controllers/invoiceAdminController.js";
 
 const router = express.Router();
 

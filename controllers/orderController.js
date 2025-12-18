@@ -148,17 +148,16 @@ export const getOrderById = asyncHandler(async (req, res) => {
    ========================= */
 export const getMyOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
-    defaultLimit: 20,
-    maxLimit: 100,
+    defaultLimit: 5,
+    maxLimit: 5,
   });
 
   const filter = { user: req.user._id };
-  const sort = { createdAt: -1, _id: 1 };
+  const sort = { createdAt: -1, _id: -1 };
 
   const [total, ordersRaw] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
-      // Exclude pricing fields entirely from the response payload
       .select(
         "-totalPrice -deliveryCharge -extraFee -orderItems.unitPrice -orderItems.lineTotal"
       )
@@ -170,7 +169,6 @@ export const getMyOrders = asyncHandler(async (req, res) => {
       .lean(),
   ]);
 
-  // Extra safety: sanitize again at the edge (in case schema changes later)
   const orders = (ordersRaw || []).map(sanitizeOrderForClient);
 
   res.status(200).json({
@@ -210,7 +208,7 @@ export const getOrders = asyncHandler(async (req, res) => {
     filter.user = req.query.user;
   }
 
-  const sort = { createdAt: -1, _id: 1 };
+const sort = { createdAt: -1, _id: -1 };
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),

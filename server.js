@@ -61,12 +61,15 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // ✅ Log requests only in development
-if (process.env.NODE_ENV !== 'production') {
+// ✅ Log requests only in development (full URL)
+if (process.env.NODE_ENV !== "production") {
   app.use((req, res, next) => {
-    console.log(`PATH: [${req.path}]      METHOD: [${req.method}]`);
+    const fullUrl = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+    console.log(`URL: [${fullUrl}]      METHOD: [${req.method}]`);
     next();
   });
 }
+
 
 // ✅ Root endpoint
 app.get("/", (req, res) => {

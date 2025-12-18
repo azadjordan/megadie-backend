@@ -60,8 +60,8 @@ const quoteSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["Processing", "Quoted", "Confirmed", "Rejected", "Cancelled"], // ← includes Cancelled
-      default: "Processing", // ← replaces Requested
+      enum: ["Processing", "Quoted", "Confirmed", "Cancelled"],
+      default: "Processing",
       index: true,
     },
 

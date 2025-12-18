@@ -1,9 +1,25 @@
+// megadie-backend/models/invoiceModel.js
 import mongoose from "mongoose";
 import crypto from "crypto";
 
+/**
+ * Invoice (currency-agnostic, integer minor units)
+ *
+ * Key decisions:
+ * - Money is stored in integer minor units (amountMinor, paidTotalMinor, balanceDueMinor)
+ * - Optional currency metadata is stored (currency, minorUnitFactor) for future multi-currency support
+ * - Cached paid/status fields live on Invoice for fast "unpaid" queries and list pages
+ * - Only Cancelled invoices can be deleted; deleting a Cancelled invoice deletes linked payments
+ */
+
 const invoiceSchema = new mongoose.Schema(
   {
-    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    user: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
 
     // One-to-one with Order
     order: {
@@ -14,15 +30,71 @@ const invoiceSchema = new mongoose.Schema(
       index: true,
     },
 
-// Single monetary source of truth
-amount: { type: Number, required: true, min: 0, immutable: true },
+    /**
+     * Monetary source of truth: integer minor units.
+     * Examples (if factor=100): 10.50 -> 1050
+     */
+    amountMinor: {
+      type: Number,
+      required: true,
+      min: 0,
+      immutable: true,
+    },
 
+    /**
+     * Optional currency metadata (safe to add now; doesn’t force AED naming)
+     * - currency: ISO 4217 code (e.g., "AED", "USD", "EUR", "JPY")
+     * - minorUnitFactor: how many minor units in 1 major unit (100 for cents/fils, 1 for JPY, etc.)
+     *
+     * If you don’t want currency yet, you can keep defaults and ignore at UI level.
+     */
+    currency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      default: "AED", // you can change global default later
+      index: true,
+    },
+    minorUnitFactor: {
+      type: Number,
+      default: 100,
+      min: 1,
+    },
 
-    // Simple human-friendly number like the order number
-    invoiceNumber: { type: String, required: true, unique: true, index: true },
+    invoiceNumber: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
 
-    dueDate: { type: Date },
-    adminNote: { type: String },
+    status: {
+      type: String,
+      enum: ["Issued", "Cancelled"],
+      default: "Issued",
+      index: true,
+    },
+
+    dueDate: { type: Date, index: true },
+
+    // Admin-editable metadata (controller controls allowed edits)
+    adminNote: { type: String, trim: true },
+
+    cancelledAt: { type: Date },
+    cancelReason: { type: String, trim: true },
+
+    /**
+     * Cached summary fields for fast list filtering:
+     * - updated by Payment hooks
+     */
+    paidTotalMinor: { type: Number, default: 0, min: 0 },
+    balanceDueMinor: { type: Number, default: 0, min: 0 },
+    paymentStatus: {
+      type: String,
+      enum: ["Unpaid", "PartiallyPaid", "Paid"],
+      default: "Unpaid",
+      index: true,
+    },
   },
   {
     timestamps: true,
@@ -32,22 +104,48 @@ amount: { type: Number, required: true, min: 0, immutable: true },
 );
 
 /* ---------------------------------
-   Number gen + business validations
-   --------------------------------- */
-// Format: INV-YYMMDD-XXXXXX (no extra models)
+   Helpers
+---------------------------------- */
+function computePaymentStatus(amountMinor, paidTotalMinor) {
+  const a = Math.max(0, Number(amountMinor) || 0);
+  const p = Math.max(0, Number(paidTotalMinor) || 0);
+
+  if (p <= 0) return "Unpaid";
+  if (p >= a) return "Paid";
+  return "PartiallyPaid";
+}
+
+invoiceSchema.methods.recomputeCaches = function recomputeCaches() {
+  const amountMinor = Math.max(0, Number(this.amountMinor) || 0);
+  const paidMinor = Math.max(0, Number(this.paidTotalMinor) || 0);
+
+  this.balanceDueMinor = Math.max(0, amountMinor - paidMinor);
+  this.paymentStatus = computePaymentStatus(amountMinor, paidMinor);
+};
+
+/* ---------------------------------
+   Invoice number generation
+---------------------------------- */
 invoiceSchema.pre("validate", async function (next) {
   try {
-    // Generate a simple unique invoice number if missing
+    // Basic sanity for minorUnitFactor (keep it integer-ish)
+    if (this.minorUnitFactor && !Number.isInteger(this.minorUnitFactor)) {
+      return next(new Error("minorUnitFactor must be an integer."));
+    }
+
+    // Generate invoiceNumber if missing
     if (!this.invoiceNumber) {
       const now = new Date();
       const yy = String(now.getFullYear()).slice(-2);
       const mm = String(now.getMonth() + 1).padStart(2, "0");
       const dd = String(now.getDate()).padStart(2, "0");
 
-      for (let i = 0; i < 3; i++) {
+      for (let i = 0; i < 5; i++) {
         const rand = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6 chars
         const candidate = `INV-${yy}${mm}${dd}-${rand}`;
-        const exists = await mongoose.models.Invoice.exists({ invoiceNumber: candidate });
+        const exists = await this.constructor.exists({
+          invoiceNumber: candidate,
+        });
         if (!exists) {
           this.invoiceNumber = candidate;
           break;
@@ -59,32 +157,15 @@ invoiceSchema.pre("validate", async function (next) {
       }
     }
 
-    // Validate order state + default amount from order.totalPrice
-    const Order = mongoose.model("Order");
-    const ord = await Order.findById(this.order).select("status totalPrice user").lean();
-    if (!ord) return next(new Error("Order not found."));
-
-    // ✅ Allowed statuses must match controller logic
-    const allowedStatuses = ["Processing", "Delivered"];
-
-    if (!allowedStatuses.includes(ord.status)) {
-      return next(
-        new Error(
-          `Invoice can only be created for orders in status: ${allowedStatuses.join(
-            " or "
-          )}.`
-        )
-      );
+    // Ensure caches are correct at creation
+    if (this.isNew) {
+      if (typeof this.paidTotalMinor !== "number") this.paidTotalMinor = 0;
+      this.recomputeCaches();
     }
 
-    // Default amount from order.totalPrice if not provided or invalid
-    if (!(this.amount >= 0)) {
-      this.amount = Math.max(0, ord.totalPrice || 0);
-    }
-
-    // Ensure invoice.user matches order.user
-    if (String(this.user) !== String(ord.user)) {
-      return next(new Error("Invoice user must match the order user."));
+    // If Cancelled, ensure cancelledAt is set
+    if (this.status === "Cancelled" && !this.cancelledAt) {
+      this.cancelledAt = new Date();
     }
 
     next();
@@ -93,46 +174,84 @@ invoiceSchema.pre("validate", async function (next) {
   }
 });
 
-/* ------------------------------
-   Virtuals (computed properties)
-   ------------------------------ */
+/* ---------------------------------
+   Keep caches consistent on save
+---------------------------------- */
+invoiceSchema.pre("save", function (next) {
+  try {
+    if (this.isModified("paidTotalMinor")) {
+      this.recomputeCaches();
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
 
-// Virtual populate: get all payments linked to this invoice
+/* ---------------------------------
+   Virtual populate: payments
+---------------------------------- */
 invoiceSchema.virtual("payments", {
   ref: "Payment",
   localField: "_id",
   foreignField: "invoice",
 });
 
-// totalPaid/balanceDue/status are computed when payments are populated
-invoiceSchema.virtual("totalPaid").get(function () {
-  if (!this.populated("payments") || !Array.isArray(this.payments)) return undefined;
-  return this.payments
-    .filter((p) => p.status === "Received")
-    .reduce((sum, p) => sum + (p.amount || 0), 0);
+/* ---------------------------------
+   Deletion rule + cascade payments
+   - Only Cancelled invoices can be deleted
+   - Deleting a Cancelled invoice deletes all linked payments
+---------------------------------- */
+
+// Document deletion: invoiceDoc.deleteOne()
+invoiceSchema.pre(
+  "deleteOne",
+  { document: true, query: false },
+  async function (next) {
+    try {
+      if (this.status !== "Cancelled") {
+        return next(new Error("Only Cancelled invoices can be deleted."));
+      }
+
+      const Payment = mongoose.model("Payment");
+      await Payment.deleteMany({ invoice: this._id }); // ok because invoice is being deleted anyway
+      next();
+    } catch (err) {
+      next(err);
+    }
+  }
+);
+
+// Query deletion: Invoice.findByIdAndDelete / findOneAndDelete
+invoiceSchema.pre("findOneAndDelete", async function (next) {
+  try {
+    const doc = await this.model
+      .findOne(this.getQuery())
+      .select("_id status")
+      .lean();
+    if (!doc) return next();
+
+    if (doc.status !== "Cancelled") {
+      return next(new Error("Only Cancelled invoices can be deleted."));
+    }
+
+    const Payment = mongoose.model("Payment");
+    await Payment.deleteMany({ invoice: doc._id });
+    next();
+  } catch (err) {
+    next(err);
+  }
 });
 
-invoiceSchema.virtual("balanceDue").get(function () {
-  const totalPaid = typeof this.totalPaid === "number" ? this.totalPaid : undefined;
-  return typeof totalPaid === "number" ? Math.max(this.amount - totalPaid, 0) : undefined;
-});
-
-invoiceSchema.virtual("status").get(function () {
-  const totalPaid = this.totalPaid;
-  if (typeof totalPaid !== "number") return undefined;
-
-  const fullyPaid = totalPaid >= this.amount;
-  const hasAnyPayment = totalPaid > 0;
-  const pastDue = !!this.dueDate && new Date() > this.dueDate && !fullyPaid;
-
-  if (fullyPaid) return "Paid";
-  if (pastDue) return "Overdue";
-  if (hasAnyPayment) return "Partially Paid";
-  return "Unpaid";
-});
-
-/* ------------ Indexes ------------ */
+/* ---------------------------------
+   Indexes for lists/filters
+---------------------------------- */
 invoiceSchema.index({ user: 1, createdAt: -1 });
+invoiceSchema.index({ status: 1, createdAt: -1 });
+invoiceSchema.index({ paymentStatus: 1, createdAt: -1 });
+invoiceSchema.index({ user: 1, paymentStatus: 1, createdAt: -1 });
+invoiceSchema.index({ currency: 1, createdAt: -1 });
 
-const Invoice = mongoose.models.Invoice || mongoose.model("Invoice", invoiceSchema);
+const Invoice =
+  mongoose.models.Invoice || mongoose.model("Invoice", invoiceSchema);
 export default Invoice;

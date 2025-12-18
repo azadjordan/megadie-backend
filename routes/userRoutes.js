@@ -2,15 +2,18 @@ import express from "express";
 const router = express.Router();
 
 import {
-  authUser,          // POST /auth  (or POST /login if you prefer)
-  registerUser,      // POST /
-  logoutUser,        // POST /logout
-  getUserProfile,    // GET  /account/profile
-  updateUserProfile, // PUT  /account/profile
-  getUsers,          // GET  /
-  deleteUser,        // DELETE /:id
-  getUserById,       // GET  /:id
-  updateUser,        // PUT  /:id
+  authUser,
+  registerUser,
+  logoutUser,
+  getUserProfile,
+  updateUserProfile,
+  getUsers,
+  deleteUser,
+  getUserById,
+  updateUser,
+
+  forgotPassword,
+  resetPassword,
 } from "../controllers/userController.js";
 
 import { protect, admin } from "../middleware/authMiddleware.js";
@@ -18,19 +21,20 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 // Public
 router.route("/").post(registerUser);
 router.post("/logout", logoutUser);
-// keep your original path name:
-router.post("/auth", authUser); // (optional rename: "/login")
+router.post("/auth", authUser);
 
-// Self profile
+// ✅ Public: forgot/reset password
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password/:token", resetPassword);
+
+// Self profile (protected)
 router
   .route("/account/profile")
   .get(protect, getUserProfile)
   .put(protect, updateUserProfile);
 
-// Admin
-router
-  .route("/")
-  .get(protect, admin, getUsers);
+// Admin (protected)
+router.route("/").get(protect, admin, getUsers);
 
 router
   .route("/:id")

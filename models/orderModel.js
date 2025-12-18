@@ -21,7 +21,7 @@ const orderSchema = new mongoose.Schema(
     orderNumber: { type: String, required: true, unique: true, index: true },
 
     // One-to-one optional link to Invoice
-    invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null, index: true },
+    invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null},
 
     orderItems: {
       type: [OrderItemSchema],
@@ -133,8 +133,19 @@ orderSchema.set("toJSON", {
   virtuals: true,
   versionKey: false,
   transform: (_doc, ret) => {
+    // Keep Mongo canonical id for all clients
+    // Add friendly alias for UI/frameworks that prefer `id`
     ret.id = ret._id;
-    delete ret._id;
+    return ret;
+  },
+});
+
+orderSchema.set("toObject", {
+  virtuals: true,
+  versionKey: false,
+  transform: (_doc, ret) => {
+    ret.id = ret._id;
+    return ret;
   },
 });
 

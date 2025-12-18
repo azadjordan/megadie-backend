@@ -1,3 +1,4 @@
+// controllers/quoteController.js
 import React from "react";
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
@@ -6,10 +7,27 @@ import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
 import User from "../models/userModel.js";
 
-// ✅ Helper: sanitize quote for OWNER views based on status
+/* =========================
+   Constants / Rules
+   ========================= */
+
+// ✅ Keep in sync with quoteModel enum
+const ALLOWED_STATUSES = ["Processing", "Quoted", "Confirmed", "Cancelled"];
+const allowedStatusesSet = new Set(ALLOWED_STATUSES);
+
+// ✅ Basic status transitions (adjust if your business rules change)
+const ALLOWED_TRANSITIONS = {
+  Processing: new Set(["Processing", "Quoted", "Cancelled"]),
+  Quoted: new Set(["Quoted", "Confirmed", "Cancelled"]),
+  Confirmed: new Set(["Confirmed"]), // locked by default
+  Cancelled: new Set(["Cancelled"]), // locked by default
+};
+
+/* =========================
+   Helper: sanitize quote for OWNER views based on status
+   ========================= */
 const sanitizeQuoteForOwner = (quoteDoc) => {
   const obj = quoteDoc.toObject ? quoteDoc.toObject() : { ...quoteDoc };
-
   const status = obj.status;
 
   const stripAllPricing = () => {
@@ -124,7 +142,7 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
     throw new Error("Only Quoted quotes can be confirmed.");
   }
 
-  // ✅ Recommended: ensure pricing exists before confirming
+  // ✅ ensure pricing exists before confirming
   const items = quote.requestedItems || [];
   const hasAnyPrice = items.some((it) => Number(it.unitPrice) > 0);
   if (!hasAnyPrice) {
@@ -141,7 +159,6 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
     data: updated,
   });
 });
-
 
 /* =========================
    POST /api/quotes
@@ -186,19 +203,45 @@ export const createQuote = asyncHandler(async (req, res) => {
 /* =========================
    GET /api/quotes/my
    Private
-   Get logged-in user's quotes (sanitized by status)
+   Paginated: newest -> oldest
+   Limit capped at 5
+   Sanitized by status
    ========================= */
 export const getMyQuotes = asyncHandler(async (req, res) => {
-  const quotes = await Quote.find({ user: req.user._id })
-    .populate("requestedItems.product", "name")
-    .sort({ createdAt: -1 });
+  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
 
-  const sanitized = quotes.map((q) => sanitizeQuoteForOwner(q));
+  // ✅ cap at 5 always
+  const limitRaw = parseInt(req.query.limit, 10);
+  const limit = Math.min(Math.max(limitRaw || 5, 1), 5);
+
+  const skip = (page - 1) * limit;
+
+  const filter = { user: req.user._id };
+  const sort = { createdAt: -1, _id: -1 }; // newest -> oldest, stable
+
+  const [total, quotesRaw] = await Promise.all([
+    Quote.countDocuments(filter),
+    Quote.find(filter)
+      .populate("requestedItems.product", "name")
+      .sort(sort)
+      .skip(skip)
+      .limit(limit),
+  ]);
+
+  const sanitized = (quotesRaw || []).map((q) => sanitizeQuoteForOwner(q));
 
   res.status(200).json({
     success: true,
     message: "Your quotes retrieved successfully.",
     data: sanitized,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages: Math.max(Math.ceil(total / limit), 1),
+      hasPrev: page > 1,
+      hasNext: page * limit < total,
+    },
   });
 });
 
@@ -277,9 +320,14 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     throw new Error("Quote not found.");
   }
 
-  const pdfStream = await renderToStream(React.createElement(QuotePDF, { quote }));
+  const pdfStream = await renderToStream(
+    React.createElement(QuotePDF, { quote })
+  );
   res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename=quote-${quote._id}.pdf`);
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename=quote-${quote._id}.pdf`
+  );
   pdfStream.pipe(res);
 });
 
@@ -356,12 +404,9 @@ export const updateQuote = asyncHandler(async (req, res) => {
       const key = String(existing.product);
       const inc = incomingByProduct.get(key);
 
-      const nextQty =
-        inc?.qty !== undefined ? Number(inc.qty) : existing.qty;
+      const nextQty = inc?.qty !== undefined ? Number(inc.qty) : existing.qty;
       const nextUnit =
-        inc?.unitPrice !== undefined
-          ? Number(inc.unitPrice)
-          : existing.unitPrice;
+        inc?.unitPrice !== undefined ? Number(inc.unitPrice) : existing.unitPrice;
 
       if (!Number.isFinite(nextQty) || nextQty <= 0) {
         res.status(400);
@@ -440,13 +485,33 @@ export const updateQuote = asyncHandler(async (req, res) => {
         changes[k] = { from: quote[k] ?? null, to: v };
         quote[k] = v;
       }
-    } else {
-      // status, adminToAdminNote, adminToClientNote
-      const v = req.body[k];
-      if (quote[k] !== v) {
-        changes[k] = { from: quote[k] ?? null, to: v ?? null };
-        quote[k] = v;
+      continue;
+    }
+
+    // status, adminToAdminNote, adminToClientNote
+    const v = req.body[k];
+
+    // ✅ Status guard: forbid removed statuses like "Rejected"
+    if (k === "status") {
+      if (!allowedStatusesSet.has(v)) {
+        res.status(400);
+        throw new Error(
+          `Invalid status. Allowed: ${ALLOWED_STATUSES.join(", ")}`
+        );
       }
+
+      const from = quote.status;
+      const to = v;
+
+      if (!ALLOWED_TRANSITIONS[from] || !ALLOWED_TRANSITIONS[from].has(to)) {
+        res.status(409);
+        throw new Error(`Invalid status transition from '${from}' to '${to}'.`);
+      }
+    }
+
+    if (quote[k] !== v) {
+      changes[k] = { from: quote[k] ?? null, to: v ?? null };
+      quote[k] = v;
     }
   }
 
@@ -477,6 +542,12 @@ export const deleteQuote = asyncHandler(async (req, res) => {
     throw new Error("Quote not found.");
   }
 
+  // Extra safety: admin-only
+  if (!req.user?.isAdmin) {
+    res.status(403);
+    throw new Error("Only admins can delete quotes.");
+  }
+
   if (quote.status !== "Cancelled") {
     res.status(400);
     throw new Error("Only quotes with status 'Cancelled' can be deleted.");
@@ -491,4 +562,3 @@ export const deleteQuote = asyncHandler(async (req, res) => {
     ...snapshot,
   });
 });
-

@@ -1,3 +1,4 @@
+// models/userModel.js
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 
@@ -16,6 +17,14 @@ const userSchema = new mongoose.Schema(
     isAdmin: { type: Boolean, required: true, default: false },
     phoneNumber: { type: String, trim: true },
     address: { type: String, trim: true },
+
+    /* =========================
+       Forgot Password (Email)
+       =========================
+       We store ONLY a HASH of the reset token (never the raw token),
+       plus an expiration date. */
+    passwordResetTokenHash: { type: String },
+    passwordResetExpires: { type: Date },
   },
   { timestamps: true }
 );
@@ -36,8 +45,13 @@ userSchema.pre("save", async function (next) {
 
 // hide password in responses
 userSchema.set("toJSON", {
-  transform: (doc, ret) => {
+  transform: (_doc, ret) => {
     delete ret.password;
+
+    // also hide reset fields (extra safety)
+    delete ret.passwordResetTokenHash;
+    delete ret.passwordResetExpires;
+
     return ret;
   },
 });
