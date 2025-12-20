@@ -246,48 +246,6 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   GET /api/quotes/:id
-   Private (owner) or Admin
-   Get quote by ID (sanitized for owner by status)
-   ========================= */
-export const getQuoteById = asyncHandler(async (req, res) => {
-  const quote = await Quote.findById(req.params.id)
-    .populate("user", "name email")
-    .populate("requestedItems.product", "name");
-
-  if (!quote) {
-    res.status(404);
-    throw new Error("Quote not found.");
-  }
-
-  const isAdmin = !!req.user?.isAdmin;
-  const isOwner = String(quote.user?._id || quote.user) === String(req.user._id);
-
-  if (!isAdmin && !isOwner) {
-    res.status(403);
-    throw new Error("Not authorized to view this quote.");
-  }
-
-  // ✅ Admin sees full quote
-  if (isAdmin) {
-    return res.status(200).json({
-      success: true,
-      message: "Quote retrieved successfully.",
-      data: quote,
-    });
-  }
-
-  // ✅ Owner sees sanitized view based on status
-  const sanitized = sanitizeQuoteForOwner(quote);
-
-  return res.status(200).json({
-    success: true,
-    message: "Quote retrieved successfully.",
-    data: sanitized,
-  });
-});
-
-/* =========================
    GET /api/quotes/:id/pdf
    Private/Admin
    Generate PDF for quote
@@ -311,205 +269,6 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     `inline; filename=quote-${quote._id}.pdf`
   );
   pdfStream.pipe(res);
-});
-
-/* =========================
-   PUT /api/quotes/:id
-   Private/Admin
-   Update quote (product IDs immutable, user re-assign allowed)
-   ========================= */
-export const updateQuote = asyncHandler(async (req, res) => {
-  const quote = await Quote.findById(req.params.id);
-  if (!quote) {
-    res.status(404);
-    throw new Error("Quote not found.");
-  }
-
-  // Extra safety: ensure only admins can update quotes
-  if (!req.user?.isAdmin) {
-    res.status(403);
-    throw new Error("Only admins can update quotes.");
-  }
-
-  const changes = {};
-
-  /* ---------------------------------------
-   * requestedItems (qty / unitPrice only)
-   * ------------------------------------- */
-  if (Array.isArray(req.body.requestedItems)) {
-    const current = quote.requestedItems || [];
-    const currentIds = current.map((it) => String(it.product));
-    const incoming = req.body.requestedItems;
-
-    // Validate shape
-    for (const it of incoming) {
-      if (!it || !it.product) {
-        res.status(400);
-        throw new Error("Each requested item must include a product id.");
-      }
-    }
-
-    const incomingIds = incoming.map((it) => String(it.product));
-
-    // Same number of items?
-    if (incomingIds.length !== currentIds.length) {
-      res.status(400);
-      throw new Error("You cannot add or remove items from the quote.");
-    }
-
-    // Same multiset of product IDs? (no product changes)
-    const count = (arr) =>
-      arr.reduce((m, id) => {
-        m[id] = (m[id] || 0) + 1;
-        return m;
-      }, {});
-
-    const a = count(currentIds);
-    const b = count(incomingIds);
-
-    const sameSet =
-      Object.keys(a).length === Object.keys(b).length &&
-      Object.keys(a).every((k) => a[k] === b[k]);
-
-    if (!sameSet) {
-      res.status(400);
-      throw new Error("You cannot change product IDs in quote items.");
-    }
-
-    const incomingByProduct = new Map(
-      incoming.map((it) => [String(it.product), it])
-    );
-
-    let changedItems = 0;
-
-    quote.requestedItems = current.map((existing) => {
-      const key = String(existing.product);
-      const inc = incomingByProduct.get(key);
-
-      const nextQty = inc?.qty !== undefined ? Number(inc.qty) : existing.qty;
-      const nextUnit =
-        inc?.unitPrice !== undefined ? Number(inc.unitPrice) : existing.unitPrice;
-
-      if (!Number.isFinite(nextQty) || nextQty <= 0) {
-        res.status(400);
-        throw new Error(`Invalid qty for product ${key}`);
-      }
-      if (!Number.isFinite(nextUnit) || nextUnit < 0) {
-        res.status(400);
-        throw new Error(`Invalid unitPrice for product ${key}`);
-      }
-
-      if (nextQty !== existing.qty || nextUnit !== existing.unitPrice) {
-        changedItems += 1;
-      }
-
-      return {
-        product: existing.product,
-        qty: nextQty,
-        unitPrice: nextUnit,
-      };
-    });
-
-    if (changedItems > 0) {
-      changes.requestedItems = { changedItems };
-    }
-  }
-
-  /* ---------------------------------------
-   * Simple fields (including user)
-   * ------------------------------------- */
-  const allowed = new Set([
-    "user",
-    "status",
-    "deliveryCharge",
-    "extraFee",
-    "adminToAdminNote",
-    "adminToClientNote",
-  ]);
-
-  for (const k of Object.keys(req.body || {})) {
-    if (!allowed.has(k)) continue;
-
-    // Special handling: reassign user (admin-only)
-    if (k === "user") {
-      const newUserId = req.body.user;
-
-      if (!mongoose.isValidObjectId(newUserId)) {
-        res.status(400);
-        throw new Error("Invalid user id.");
-      }
-
-      const newUser = await User.findById(newUserId).select("_id");
-      if (!newUser) {
-        res.status(400);
-        throw new Error("User not found.");
-      }
-
-      if (String(quote.user) !== String(newUserId)) {
-        changes.user = {
-          from: String(quote.user),
-          to: String(newUserId),
-        };
-        quote.user = newUserId;
-      }
-
-      continue; // skip generic handling for this key
-    }
-
-    // Numeric fields with validation
-    if (k === "deliveryCharge" || k === "extraFee") {
-      const v = Number(req.body[k]);
-      if (!Number.isFinite(v) || v < 0) {
-        res.status(400);
-        throw new Error(`${k} must be a non-negative number`);
-      }
-      if (quote[k] !== v) {
-        changes[k] = { from: quote[k] ?? null, to: v };
-        quote[k] = v;
-      }
-      continue;
-    }
-
-    // status, adminToAdminNote, adminToClientNote
-    const v = req.body[k];
-
-    // ✅ Status guard: forbid removed statuses like "Rejected"
-    if (k === "status") {
-      if (!allowedStatusesSet.has(v)) {
-        res.status(400);
-        throw new Error(
-          `Invalid status. Allowed: ${ALLOWED_STATUSES.join(", ")}`
-        );
-      }
-
-      const from = quote.status;
-      const to = v;
-
-      if (!ALLOWED_TRANSITIONS[from] || !ALLOWED_TRANSITIONS[from].has(to)) {
-        res.status(409);
-        throw new Error(`Invalid status transition from '${from}' to '${to}'.`);
-      }
-    }
-
-    if (quote[k] !== v) {
-      changes[k] = { from: quote[k] ?? null, to: v ?? null };
-      quote[k] = v;
-    }
-  }
-
-  const updated = await quote.save(); // pre('save') will recompute totals
-
-  const changedKeys = Object.keys(changes);
-  const message = changedKeys.length
-    ? `Quote updated successfully (${changedKeys.join(", ")}).`
-    : "Quote saved (no changes detected).";
-
-  res.status(200).json({
-    success: true,
-    message,
-    changed: changes,
-    data: updated,
-  });
 });
 
 /* =========================
@@ -552,16 +311,18 @@ export const deleteQuote = asyncHandler(async (req, res) => {
    ========================= */
 export const getQuotes = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20)); // hard cap optional
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
   const skip = (page - 1) * limit;
 
-  const filter = {}; // add status/user filters later if needed
+  const filter = {};
 
   const [total, quotes] = await Promise.all([
     Quote.countDocuments(filter),
     Quote.find(filter)
       .populate("user", "name email")
       .populate("requestedItems.product", "sku")
+      // optional: show order number in admin list
+      .populate("order", "orderNumber status")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -579,3 +340,510 @@ export const getQuotes = asyncHandler(async (req, res) => {
     data: quotes,
   });
 });
+
+/* =========================
+   PUT /api/quotes/:id
+   Private/Admin
+   Update quote (product IDs immutable, user re-assign allowed)
+   HARD LOCK: if order exists, admin must delete order first
+   ========================= */
+export const updateQuote = asyncHandler(async (req, res) => {
+  const quote = await Quote.findById(req.params.id);
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  // Admin-only
+  if (!req.user?.isAdmin) {
+    res.status(403);
+    throw new Error("Only admins can update quotes.");
+  }
+
+  // ✅ HARD LOCK: if an order exists, no editing allowed
+  if (quote.order) {
+    res.status(409);
+    throw new Error(
+      "Order already created for this quote. Delete the order first before editing the quote."
+    );
+  }
+
+  const changes = {};
+
+  /* ---------------------------------------
+   * requestedItems (qty / unitPrice only)
+   * - no add/remove
+   * - no product changes
+   * - supports duplicates safely (by matching counts per product)
+   * ------------------------------------- */
+  if (Array.isArray(req.body.requestedItems)) {
+    const current = quote.requestedItems || [];
+    const incoming = req.body.requestedItems;
+
+    // Validate shape
+    for (const it of incoming) {
+      if (!it || !it.product) {
+        res.status(400);
+        throw new Error("Each requested item must include a product id.");
+      }
+    }
+
+    const currentIds = current.map((it) => String(it.product));
+    const incomingIds = incoming.map((it) => String(it.product));
+
+    // Same number of items?
+    if (incomingIds.length !== currentIds.length) {
+      res.status(400);
+      throw new Error("You cannot add or remove items from the quote.");
+    }
+
+    // Same multiset of product IDs? (no product changes)
+    const count = (arr) =>
+      arr.reduce((m, id) => {
+        m[id] = (m[id] || 0) + 1;
+        return m;
+      }, {});
+
+    const a = count(currentIds);
+    const b = count(incomingIds);
+
+    const sameMultiset =
+      Object.keys(a).length === Object.keys(b).length &&
+      Object.keys(a).every((k) => a[k] === b[k]);
+
+    if (!sameMultiset) {
+      res.status(400);
+      throw new Error("You cannot change product IDs in quote items.");
+    }
+
+    /**
+     * IMPORTANT:
+     * Your schema uses {_id:false} for requestedItems, so items have no stable id.
+     * To support duplicates safely, we:
+     * - bucket incoming items per product id
+     * - for each existing item, consume one incoming entry for that product
+     */
+    const incomingBuckets = incoming.reduce((m, it) => {
+      const key = String(it.product);
+      if (!m[key]) m[key] = [];
+      m[key].push(it);
+      return m;
+    }, {});
+
+    let changedItems = 0;
+
+    quote.requestedItems = current.map((existing) => {
+      const key = String(existing.product);
+      const bucket = incomingBuckets[key] || [];
+      const inc = bucket.shift(); // consume one for this existing item
+
+      // should always exist because multiset matches
+      if (!inc) {
+        res.status(400);
+        throw new Error("Invalid requestedItems payload.");
+      }
+
+      const nextQty = inc.qty !== undefined ? Number(inc.qty) : existing.qty;
+      const nextUnit =
+        inc.unitPrice !== undefined ? Number(inc.unitPrice) : existing.unitPrice;
+
+      if (!Number.isFinite(nextQty) || nextQty <= 0) {
+        res.status(400);
+        throw new Error(`Invalid qty for product ${key}`);
+      }
+      if (!Number.isFinite(nextUnit) || nextUnit < 0) {
+        res.status(400);
+        throw new Error(`Invalid unitPrice for product ${key}`);
+      }
+
+      if (nextQty !== existing.qty || nextUnit !== existing.unitPrice) {
+        changedItems += 1;
+      }
+
+      return {
+        product: existing.product,
+        qty: nextQty,
+        unitPrice: nextUnit,
+      };
+    });
+
+    if (changedItems > 0) {
+      changes.requestedItems = { changedItems };
+    }
+  }
+
+  /* ---------------------------------------
+   * Simple fields (including user)
+   * ------------------------------------- */
+  const allowed = new Set([
+    "user",
+    "status",
+    "deliveryCharge",
+    "extraFee",
+    "adminToAdminNote",
+    "adminToClientNote",
+  ]);
+
+  for (const k of Object.keys(req.body || {})) {
+    if (!allowed.has(k)) continue;
+
+    // Reassign user (admin-only)
+    if (k === "user") {
+      const newUserId = req.body.user;
+
+      if (!mongoose.isValidObjectId(newUserId)) {
+        res.status(400);
+        throw new Error("Invalid user id.");
+      }
+
+      const newUser = await User.findById(newUserId).select("_id");
+      if (!newUser) {
+        res.status(400);
+        throw new Error("User not found.");
+      }
+
+      if (String(quote.user) !== String(newUserId)) {
+        changes.user = { from: String(quote.user), to: String(newUserId) };
+        quote.user = newUserId;
+      }
+      continue;
+    }
+
+    // Numeric fields
+    if (k === "deliveryCharge" || k === "extraFee") {
+      const v = Number(req.body[k]);
+      if (!Number.isFinite(v) || v < 0) {
+        res.status(400);
+        throw new Error(`${k} must be a non-negative number`);
+      }
+      if (quote[k] !== v) {
+        changes[k] = { from: quote[k] ?? null, to: v };
+        quote[k] = v;
+      }
+      continue;
+    }
+
+    // status, adminToAdminNote, adminToClientNote
+    const v = req.body[k];
+
+    if (k === "status") {
+      if (!allowedStatusesSet.has(v)) {
+        res.status(400);
+        throw new Error(`Invalid status. Allowed: ${ALLOWED_STATUSES.join(", ")}`);
+      }
+
+      const from = quote.status;
+      const to = v;
+
+      if (!ALLOWED_TRANSITIONS[from] || !ALLOWED_TRANSITIONS[from].has(to)) {
+        res.status(409);
+        throw new Error(`Invalid status transition from '${from}' to '${to}'.`);
+      }
+
+      // ✅ extra business rule: cannot confirm unless at least one priced item exists
+      // (keeps consistency with confirmQuoteByUser logic)
+      if (to === "Confirmed") {
+        const items = quote.requestedItems || [];
+        const hasAnyPrice = items.some((it) => Number(it.unitPrice) > 0);
+        if (!hasAnyPrice) {
+          res.status(400);
+          throw new Error("Quote cannot be confirmed until pricing is assigned.");
+        }
+      }
+    }
+
+    if (quote[k] !== v) {
+      changes[k] = { from: quote[k] ?? null, to: v ?? null };
+      quote[k] = v;
+    }
+  }
+
+  await quote.save(); // pre('save') recomputes totals
+
+  // ✅ Return populated data for immediate UI usage
+  // Admin should see sku; also keep order populated (though order is null here due to lock)
+  const populated = await Quote.findById(quote._id)
+    .populate("user", "name email")
+    .populate("requestedItems.product", "sku")
+    .populate("order", "orderNumber status");
+
+  const changedKeys = Object.keys(changes);
+  const message = changedKeys.length
+    ? `Quote updated successfully (${changedKeys.join(", ")}).`
+    : "Quote saved (no changes detected).";
+
+  res.status(200).json({
+    success: true,
+    message,
+    changed: changes,
+    data: populated,
+  });
+});
+
+/* =========================
+   GET /api/quotes/:id
+   Private (owner) or Admin
+   Get quote by ID (sanitized for owner by status)
+   ========================= */
+export const getQuoteById = asyncHandler(async (req, res) => {
+  // ✅ Populate both name + sku so:
+  // - Admin UI can show sku
+  // - Owner UI (sanitized) can still show name if needed
+  // ✅ Also populate order so admin can see if order exists + orderNumber/status
+  const quote = await Quote.findById(req.params.id)
+    .populate("user", "name email")
+    .populate("requestedItems.product", "name sku")
+    .populate("order", "orderNumber status");
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  const isAdmin = !!req.user?.isAdmin;
+  const isOwner = String(quote.user?._id || quote.user) === String(req.user._id);
+
+  if (!isAdmin && !isOwner) {
+    res.status(403);
+    throw new Error("Not authorized to view this quote.");
+  }
+
+  // ✅ Admin sees full quote (includes sku + order info)
+  if (isAdmin) {
+    return res.status(200).json({
+      success: true,
+      message: "Quote retrieved successfully.",
+      data: quote,
+    });
+  }
+
+  // ✅ Owner sees sanitized view based on status
+  const sanitized = sanitizeQuoteForOwner(quote);
+
+  return res.status(200).json({
+    success: true,
+    message: "Quote retrieved successfully.",
+    data: sanitized,
+  });
+});
+
+/* =========================
+   PUT /api/quotes/admin/:id
+   Private/Admin
+   Steps UI:
+   1) Update user
+   2) Update qty + unitPrice ONLY (no adding/removing items, no changing products)
+   3) Update notes
+   4) Update status
+   5) Totals auto-recomputed by model pre("save")
+   Rules:
+   - HARD LOCK if quote.order exists (already converted to order)
+   - requestedItems length must match (no add/remove)
+   - product ids must match current (no changing products)
+   - qty/unitPrice/extraFee/deliveryCharge MUST allow 0
+   - qty/unitPrice/extraFee/deliveryCharge MUST reject "" / null (no silent coercion to 0)
+   ========================= */
+export const updateQuoteByAdmin = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  const quote = await Quote.findById(id);
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found");
+  }
+
+  // ✅ HARD LOCK (matches admin UI + business logic)
+  if (quote.order) {
+    res.status(409);
+    throw new Error("Quote is locked because an order already exists for it.");
+  }
+
+  const {
+    user,
+    requestedItems,
+    deliveryCharge,
+    extraFee,
+    adminToAdminNote,
+    adminToClientNote,
+    status,
+  } = req.body || {};
+
+  /* -------------------------
+     Step 1: user (optional update)
+     ------------------------- */
+  if (user !== undefined) {
+    const uid = String(user || "");
+    if (!uid) {
+      res.status(400);
+      throw new Error("User is required");
+    }
+    if (!mongoose.Types.ObjectId.isValid(uid)) {
+      res.status(400);
+      throw new Error("Invalid user id");
+    }
+    quote.user = uid;
+  }
+
+  /* -------------------------
+     Step 2: items (qty + unitPrice only)
+     - No add/remove
+     - No product swap
+     - Allow 0 values
+     - Reject "", null, undefined (avoid Number("") === 0)
+     ------------------------- */
+  if (requestedItems !== undefined) {
+    if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
+      res.status(400);
+      throw new Error("Quote must contain at least one item.");
+    }
+
+    const current = quote.requestedItems || [];
+
+    // ✅ Prevent add/remove from this endpoint (UI is qty/unitPrice only)
+    if (requestedItems.length !== current.length) {
+      res.status(400);
+      throw new Error(
+        "You can only edit qty/unitPrice. Adding/removing items is not allowed."
+      );
+    }
+
+    const nextRequestedItems = requestedItems.map((it, idx) => {
+      const currentProductId = String(current[idx]?.product || "");
+      const incomingProductId = String(it?.product || "");
+
+      if (
+        !incomingProductId ||
+        !mongoose.Types.ObjectId.isValid(incomingProductId)
+      ) {
+        res.status(400);
+        throw new Error(`Invalid product id for item #${idx + 1}`);
+      }
+
+      // ✅ Must match existing product (no changing the item identity)
+      if (incomingProductId !== currentProductId) {
+        res.status(400);
+        throw new Error(
+          `Item #${idx + 1} product cannot be changed. Only qty/unitPrice are editable.`
+        );
+      }
+
+      // ✅ qty: allow 0, reject "", null, undefined
+      const rawQty = it?.qty;
+      if (rawQty === "" || rawQty === null || rawQty === undefined) {
+        res.status(400);
+        throw new Error(`Invalid qty for item #${idx + 1}. Must be >= 0.`);
+      }
+      const qty = Number(rawQty);
+      if (!Number.isFinite(qty) || qty < 0) {
+        res.status(400);
+        throw new Error(`Invalid qty for item #${idx + 1}. Must be >= 0.`);
+      }
+
+      // ✅ unitPrice: allow 0, reject "", null, undefined
+      const rawUnitPrice = it?.unitPrice;
+      if (
+        rawUnitPrice === "" ||
+        rawUnitPrice === null ||
+        rawUnitPrice === undefined
+      ) {
+        res.status(400);
+        throw new Error(
+          `Invalid unitPrice for item #${idx + 1}. Must be >= 0.`
+        );
+      }
+      const unitPrice = Number(rawUnitPrice);
+      if (!Number.isFinite(unitPrice) || unitPrice < 0) {
+        res.status(400);
+        throw new Error(
+          `Invalid unitPrice for item #${idx + 1}. Must be >= 0.`
+        );
+      }
+
+      return {
+        product: incomingProductId,
+        qty,
+        unitPrice,
+      };
+    });
+
+    quote.requestedItems = nextRequestedItems;
+  }
+
+  /* -------------------------
+     Charges (optional update)
+     - Allow 0 values
+     - Reject "", null (avoid Number("") === 0)
+     ------------------------- */
+  if (deliveryCharge !== undefined) {
+    const raw = deliveryCharge;
+
+    if (raw === "" || raw === null) {
+      res.status(400);
+      throw new Error("Invalid deliveryCharge. Must be >= 0.");
+    }
+
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      res.status(400);
+      throw new Error("Invalid deliveryCharge. Must be >= 0.");
+    }
+
+    quote.deliveryCharge = n;
+  }
+
+  if (extraFee !== undefined) {
+    const raw = extraFee;
+
+    if (raw === "" || raw === null) {
+      res.status(400);
+      throw new Error("Invalid extraFee. Must be >= 0.");
+    }
+
+    const n = Number(raw);
+    if (!Number.isFinite(n) || n < 0) {
+      res.status(400);
+      throw new Error("Invalid extraFee. Must be >= 0.");
+    }
+
+    quote.extraFee = n;
+  }
+
+  /* -------------------------
+     Step 3: notes (optional)
+     ------------------------- */
+  if (adminToAdminNote !== undefined)
+    quote.adminToAdminNote = String(adminToAdminNote || "");
+  if (adminToClientNote !== undefined)
+    quote.adminToClientNote = String(adminToClientNote || "");
+
+  /* -------------------------
+     Step 4: status (optional update)
+     ------------------------- */
+  if (status !== undefined) {
+    const allowed = ["Processing", "Quoted", "Confirmed", "Cancelled"];
+    if (!allowed.includes(status)) {
+      res.status(400);
+      throw new Error(`Invalid status. Allowed: ${allowed.join(", ")}`);
+    }
+    quote.status = status;
+  }
+
+  // ✅ totals recomputed by Quote pre("save")
+  await quote.save();
+
+  // ✅ return populated doc for the steps UI
+  const populated = await Quote.findById(quote._id)
+    .populate("user", "name email phoneNumber")
+    .populate("requestedItems.product", "sku name")
+    .populate("order", "orderNumber");
+
+  res.status(200).json({
+    success: true,
+    message: "Quote updated successfully.",
+    data: populated,
+  });
+});
+
+
+
+

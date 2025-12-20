@@ -12,6 +12,9 @@ import {
   // ✅ NEW (user actions)
   cancelQuoteByUser,
   confirmQuoteByUser,
+
+  // ✅ NEW (admin-only update endpoint for the steps UI)
+  updateQuoteByAdmin,
 } from "../controllers/quoteController.js";
 
 import { protect, admin } from "../middleware/authMiddleware.js";
@@ -34,11 +37,15 @@ router.get("/:id/pdf", protect, admin, getQuotePDF);
 // ✅ Get all quotes (admin only)
 router.route("/admin").get(protect, admin, getQuotes);
 
+// ✅ Admin-only update for the steps page
+// NOTE: Put this BEFORE "/:id" routes to avoid path conflicts.
+router.put("/admin/:id", protect, admin, updateQuoteByAdmin);
+
 // ✅ Get / update / delete a specific quote
 router
   .route("/:id")
   .get(protect, getQuoteById)
-  .put(protect, admin, updateQuote)
+  .put(protect, admin, updateQuote) // you can keep this for backward compatibility
   .delete(protect, admin, deleteQuote);
 
 export default router;
