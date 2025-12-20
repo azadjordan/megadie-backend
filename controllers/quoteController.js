@@ -246,24 +246,6 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   GET /api/quotes/admin
-   Private/Admin
-   Get all quotes
-   ========================= */
-export const getQuotes = asyncHandler(async (_req, res) => {
-  const quotes = await Quote.find({})
-    .populate("user", "name email")
-    .populate("requestedItems.product", "sku") // 👈 sku for admin
-    .sort({ createdAt: -1 });
-
-  res.status(200).json({
-    success: true,
-    message: "Quotes retrieved successfully.",
-    data: quotes,
-  });
-});
-
-/* =========================
    GET /api/quotes/:id
    Private (owner) or Admin
    Get quote by ID (sanitized for owner by status)
@@ -560,5 +542,40 @@ export const deleteQuote = asyncHandler(async (req, res) => {
     success: true,
     message: "Quote deleted successfully.",
     ...snapshot,
+  });
+});
+
+/* =========================
+   GET /api/quotes/admin?page=1&limit=20
+   Private/Admin
+   Get all quotes (paginated, newest first)
+   ========================= */
+export const getQuotes = asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20)); // hard cap optional
+  const skip = (page - 1) * limit;
+
+  const filter = {}; // add status/user filters later if needed
+
+  const [total, quotes] = await Promise.all([
+    Quote.countDocuments(filter),
+    Quote.find(filter)
+      .populate("user", "name email")
+      .populate("requestedItems.product", "sku")
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(limit),
+  ]);
+
+  const pages = Math.max(1, Math.ceil(total / limit));
+
+  res.status(200).json({
+    success: true,
+    message: "Quotes retrieved successfully.",
+    page,
+    pages,
+    total,
+    limit,
+    data: quotes,
   });
 });
