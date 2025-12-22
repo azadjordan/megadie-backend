@@ -20,8 +20,12 @@ const orderSchema = new mongoose.Schema(
     user:        { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User", index: true },
     orderNumber: { type: String, required: true, unique: true, index: true },
 
+    // ✅ One-to-one optional link to Quote (temporary link until Delivered)
+    // - Used to: (1) delete quote when order becomes Delivered, (2) unlink quote if order is deleted/cancelled
+    quote: { type: mongoose.Schema.Types.ObjectId, ref: "Quote", default: null },
+
     // One-to-one optional link to Invoice
-    invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null},
+    invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null },
 
     orderItems: {
       type: [OrderItemSchema],
@@ -39,7 +43,12 @@ const orderSchema = new mongoose.Schema(
     deliveredBy: { type: String },
     deliveredAt: { type: Date },
 
-    status: { type: String, enum: ["Processing", "Delivered", "Cancelled"], default: "Processing", index: true },
+    status: {
+      type: String,
+      enum: ["Processing", "Delivered", "Cancelled"],
+      default: "Processing",
+      index: true,
+    },
 
     clientToAdminNote: { type: String },
     adminToAdminNote:  { type: String },
@@ -77,15 +86,27 @@ orderSchema.virtual("stockUpdated").get(function () {
 orderSchema.virtual("invoiceGenerated").get(function () {
   return !!this.invoice;
 });
+// ✅ For UI / logic convenience
+orderSchema.virtual("isFromQuote").get(function () {
+  return !!this.quote;
+});
 
 /* ========== Validators & Business Rules ========== */
 // Allow invoice link while Processing, Delivered, or Cancelled
-// - Processing / Delivered: normal business flow (you can create an invoice)
-// - Cancelled: keep existing invoice link valid, or allow cleanup workflows
 orderSchema.path("invoice").validate(function (val) {
   if (!val) return true;
   return ["Processing", "Delivered", "Cancelled"].includes(this.status);
 }, "Invoice can only be attached for Processing, Delivered, or Cancelled orders.");
+
+// ✅ Allow quote link while Processing or Cancelled.
+// - Processing: normal flow (order created from quote)
+// - Cancelled: keep link so you can unlink the quote when deleting/cancelling the order
+// - Delivered: you plan to hard-delete the quote and unlink it at delivery time,
+//   so we intentionally disallow attaching a quote while Delivered.
+orderSchema.path("quote").validate(function (val) {
+  if (!val) return true;
+  return ["Processing", "Cancelled"].includes(this.status);
+}, "Quote can only be attached for Processing or Cancelled orders.");
 
 /* ========== Hooks ========== */
 // Generate order number & compute totals; stamp deliveredAt when first delivered
@@ -151,6 +172,13 @@ orderSchema.set("toObject", {
 
 /* ========== Indexes ========== */
 orderSchema.index({ user: 1, createdAt: -1 });
+
+// ✅ Enforce 1:1 between Order and Quote (only when quote != null)
+orderSchema.index(
+  { quote: 1 },
+  { unique: true, partialFilterExpression: { quote: { $exists: true, $ne: null } } }
+);
+
 orderSchema.index(
   { invoice: 1 },
   { unique: true, partialFilterExpression: { invoice: { $exists: true, $ne: null } } }

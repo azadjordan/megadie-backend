@@ -172,6 +172,10 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
   // 2) Now fetch full invoice with safe populates
   const invoice = await Invoice.findById(id)
     .populate({
+      path: "user",
+      select: "name email phoneNumber",
+    })
+    .populate({
       path: "order",
       // user-safe fields only (avoid admin-only internals)
       select: [

@@ -1,5 +1,6 @@
 // models/quoteModel.js
 import mongoose from "mongoose";
+import crypto from "crypto";
 
 /* =========================
    Subschema: Requested Item
@@ -43,7 +44,18 @@ const quoteSchema = new mongoose.Schema(
       index: true,
     },
 
+    // ✅ Human-friendly quote identifier (like orderNumber)
+    // Format: QTE-YYMMDD-XXXXXX
+    quoteNumber: {
+      type: String,
+      required: true,
+      unique: true,
+      index: true,
+    },
+
     // ✅ Link to Order (set when admin creates an order from this quote)
+    // - When order is deleted/cancelled: set back to null so quote can be edited & converted again
+    // - When order is delivered: quote is hard-deleted, so this link disappears with the doc
     order: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Order",
@@ -110,12 +122,28 @@ quoteSchema.virtual("isOrderCreated").get(function () {
 /* =========================
    Hooks
    ========================= */
+// Generate quote number before validation (required/unique)
+quoteSchema.pre("validate", function (next) {
+  try {
+    // QTE-YYMMDD-XXXXXX
+    if (!this.quoteNumber) {
+      const now = new Date();
+      const yy = String(now.getFullYear()).slice(-2);
+      const mm = String(now.getMonth() + 1).padStart(2, "0");
+      const dd = String(now.getDate()).padStart(2, "0");
+      const randomHex = crypto.randomBytes(3).toString("hex").toUpperCase();
+      this.quoteNumber = `QTE-${yy}${mm}${dd}-${randomHex}`;
+    }
+    next();
+  } catch (err) {
+    next(err);
+  }
+});
+
 // Recompute totals before save
 quoteSchema.pre("save", function (next) {
   const items = this.requestedItems || [];
 
-  // ✅ (defensive) ensure no negatives slip through
-  // (Schema already prevents negatives, but this keeps totals stable if raw data exists)
   const itemsTotal = items.reduce((sum, it) => {
     const qty = Math.max(0, Number(it.qty) || 0);
     const unitPrice = Math.max(0, Number(it.unitPrice) || 0);
@@ -133,8 +161,13 @@ quoteSchema.pre("save", function (next) {
    Indexes
    ========================= */
 quoteSchema.index({ user: 1, createdAt: -1 });
-// Useful for admin dashboards / filtering "already converted to order"
-quoteSchema.index({ order: 1, createdAt: -1 });
+
+// ✅ Enforce 1:1 between Quote and Order (only when order != null)
+// This is what enables: delete order -> set quote.order=null -> quote becomes reusable
+quoteSchema.index(
+  { order: 1 },
+  { unique: true, partialFilterExpression: { order: { $exists: true, $ne: null } } }
+);
 
 /* =========================
    Model export (avoid recompile in dev)

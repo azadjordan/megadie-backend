@@ -4,6 +4,7 @@ import Order from "../models/orderModel.js";
 import Quote from "../models/quoteModel.js";
 import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
+import Product from "../models/productModel.js";
 
 /* =========================
    Helpers (pagination)
@@ -194,12 +195,13 @@ export const getMyOrders = asyncHandler(async (req, res) => {
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
-    defaultLimit: 20,
-    maxLimit: 200,
+    defaultLimit: 10,
+    maxLimit: 20,
   });
 
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
+
   if (req.query.user) {
     if (!mongoose.isValidObjectId(req.query.user)) {
       res.status(400);
@@ -208,17 +210,21 @@ export const getOrders = asyncHandler(async (req, res) => {
     filter.user = req.query.user;
   }
 
-const sort = { createdAt: -1, _id: -1 };
+  const sort = { createdAt: -1, _id: -1 };
 
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
       .populate("user", "name email")
+      // ✅ populate invoice number for UI
+      .populate("invoice", "invoiceNumber")
       .sort(sort)
       .skip(skip)
       .limit(limit)
       .lean(),
   ]);
+
+  const totalPages = Math.max(Math.ceil(total / limit), 1);
 
   res.status(200).json({
     success: true,
@@ -228,9 +234,9 @@ const sort = { createdAt: -1, _id: -1 };
       page,
       limit,
       total,
-      totalPages: Math.max(Math.ceil(total / limit), 1),
+      totalPages,
       hasPrev: page > 1,
-      hasNext: page * limit < total,
+      hasNext: page < totalPages,
     },
   });
 });
@@ -238,102 +244,92 @@ const sort = { createdAt: -1, _id: -1 };
 /* =========================
    POST /api/orders/from-quote/:quoteId
    Private/Admin
-   Create an order from a Confirmed quote, then remove the quote
+   Create an order from a Confirmed quote
    ========================= */
 export const createOrderFromQuote = asyncHandler(async (req, res) => {
   const { quoteId } = req.params;
-  if (!mongoose.isValidObjectId(quoteId)) {
-    res.status(400);
-    throw new Error("Invalid quote id.");
+
+  // -------------------------
+  // 1. Load quote
+  // -------------------------
+  const quote = await Quote.findById(quoteId).lean(false);
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
   }
 
+  // -------------------------
+  // 2. Business rules
+  // -------------------------
+  if (quote.status !== "Confirmed") {
+    res.status(400);
+    throw new Error("Only Confirmed quotes can be converted to orders.");
+  }
+
+  if (quote.order) {
+    res.status(409);
+    throw new Error("An order has already been created for this quote.");
+  }
+
+  // -------------------------
+  // 3. Resolve product SKUs (snapshot)
+  // -------------------------
+  const productIds = quote.requestedItems.map((it) => it.product);
+
+  const products = await Product.find(
+    { _id: { $in: productIds } },
+    { _id: 1, sku: 1 }
+  ).lean();
+
+  const skuMap = new Map(
+    products.map((p) => [String(p._id), p.sku])
+  );
+
+  // -------------------------
+  // 4. Map quote items → order items
+  // qty = 0 is allowed by business rules
+  // -------------------------
+  const orderItems = quote.requestedItems.map((it) => ({
+    product: it.product,
+    sku: skuMap.get(String(it.product)) || "",
+    qty: it.qty,
+    unitPrice: it.unitPrice,
+  }));
+
+  // -------------------------
+  // 5. Transaction (order + quote link)
+  // -------------------------
   const session = await mongoose.startSession();
-  let createdOrder;
-  let quoteDeleted = false;
-  let deletedQuoteId = null;
+  session.startTransaction();
 
   try {
-    await session.withTransaction(async () => {
-      const quote = await Quote.findById(quoteId)
-        .populate("requestedItems.product", "_id sku")
-        .session(session);
+    // Create order
+    const order = await Order.create(
+      [
+        {
+          user: quote.user,           // always trust quote.user
+          quote: quote._id,            // link quote → order
+          orderItems,
+          deliveryCharge: quote.deliveryCharge,
+          extraFee: quote.extraFee,
+          status: "Processing",
+        },
+      ],
+      { session }
+    );
 
-      if (!quote) {
-        res.status(404);
-        throw new Error("Quote not found.");
-      }
+    // Link quote → order
+    quote.order = order[0]._id;
+    await quote.save({ session });
 
-      if (quote.status !== "Confirmed") {
-        res.status(409);
-        throw new Error("Quote must be Confirmed before creating an order.");
-      }
-
-      if (
-        !Array.isArray(quote.requestedItems) ||
-        quote.requestedItems.length === 0
-      ) {
-        res.status(400);
-        throw new Error("Quote has no items.");
-      }
-
-      const orderItems = quote.requestedItems.map((it) => {
-        const product = it.product;
-        const skuSnapshot = product?.sku || "";
-        if (!skuSnapshot) {
-          res.status(400);
-          throw new Error("Missing SKU on referenced product.");
-        }
-        if (typeof it.unitPrice !== "number") {
-          res.status(400);
-          throw new Error(
-            "Each quoted item must have a unitPrice before creating an order."
-          );
-        }
-        return {
-          product: product?._id || it.product,
-          sku: skuSnapshot,
-          qty: it.qty,
-          unitPrice: it.unitPrice,
-        };
-      });
-
-      const orderPayload = {
-        user: quote.user,
-        orderItems,
-        deliveryCharge: Math.max(0, quote.deliveryCharge || 0),
-        extraFee: Math.max(0, quote.extraFee || 0),
-        totalPrice: 0, // computed in Order model
-        // 🚫 Do not carry over any notes from the quote:
-        // clientToAdminNote: undefined,
-        // adminToAdminNote: undefined,
-        // adminToClientNote: undefined,
-        status: "Processing",
-      };
-
-      const [order] = await Order.create([orderPayload], { session });
-      createdOrder = order;
-
-      // Delete the source quote and record result for the response
-      deletedQuoteId = quote._id;
-      const delRes = await Quote.deleteOne({ _id: quote._id }).session(session);
-      quoteDeleted = !!delRes?.deletedCount;
-    });
-
-    res.setHeader("Location", `/api/orders/${createdOrder._id}`);
-
-    res.status(201).json({
-      success: true,
-      message: quoteDeleted
-        ? "Order created from quote successfully. Source quote deleted."
-        : "Order created from quote successfully. Source quote was not deleted.",
-      data: createdOrder,
-      meta: {
-        quoteDeleted,
-        deletedQuoteId,
-      },
-    });
-  } finally {
+    await session.commitTransaction();
     session.endSession();
+
+    res.status(201).json(order[0]);
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err; // handled by error middleware
   }
 });
 
