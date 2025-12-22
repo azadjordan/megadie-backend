@@ -3,6 +3,7 @@ import asyncHandler from "../middleware/asyncHandler.js";
 
 import Invoice from "../models/invoiceModel.js";
 import Order from "../models/orderModel.js";
+import User from "../models/userModel.js";
 
 /* -----------------------
    Helpers
@@ -17,6 +18,17 @@ function parseDate(v) {
   const d = new Date(v);
   return Number.isNaN(d.getTime()) ? null : d;
 }
+
+function escapeRegex(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const SORT_MAP = {
+  newest: { createdAt: -1 },
+  oldest: { createdAt: 1 },
+  amountHigh: { amountMinor: -1, createdAt: -1 },
+  amountLow: { amountMinor: 1, createdAt: -1 },
+};
 
 // Convert "major" (e.g. 10.50) to integer minor (e.g. 1050), using factor (e.g. 100)
 function toMinorUnits(majorAmount, factor = 100) {
@@ -45,24 +57,31 @@ function pick(obj, keys) {
  * - status=Issued|Cancelled
  * - paymentStatus=Unpaid|PartiallyPaid|Paid
  * - unpaid=true  (Issued + paymentStatus != Paid)
+ * - overdue=true (dueDate < now + balanceDueMinor > 0 + status != Cancelled)
  * - user=<userId>  (filter by client)
  * - from=YYYY-MM-DD, to=YYYY-MM-DD (createdAt range)
- * - q=<string> (search invoiceNumber exact-ish OR orderNumber exact-ish)
+ * - search=<string> (invoiceNumber/orderNumber/user name/email, case-insensitive)
+ * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use createdAt)
+ * - q=<string> (legacy alias for search)
  */
 export const getInvoices = asyncHandler(async (req, res) => {
   const page = Math.max(1, toInt(req.query.page, 1));
-  const limitRaw = toInt(req.query.limit, 10);
-  const limit = Math.min(Math.max(1, limitRaw), 50);
+  const limitRaw = toInt(req.query.limit, 5);
+  const limit = Math.min(Math.max(1, limitRaw), 5);
+  const sortKey = req.query.sort ? String(req.query.sort) : "newest";
+  const sort = SORT_MAP[sortKey] || SORT_MAP.newest;
 
   const status = req.query.status ? String(req.query.status) : null;
   const paymentStatus = req.query.paymentStatus ? String(req.query.paymentStatus) : null;
   const unpaid = String(req.query.unpaid || "").toLowerCase() === "true";
+  const overdue = String(req.query.overdue || "").toLowerCase() === "true";
 
   const user = req.query.user ? String(req.query.user) : null;
   const from = parseDate(req.query.from);
   const to = parseDate(req.query.to);
 
-  const qText = req.query.q ? String(req.query.q).trim() : "";
+  const search = req.query.search ? String(req.query.search).trim() : "";
+  const qText = search || (req.query.q ? String(req.query.q).trim() : "");
 
   const filter = {};
 
@@ -88,27 +107,42 @@ export const getInvoices = asyncHandler(async (req, res) => {
     if (to) filter.createdAt.$lte = to;
   }
 
+  if (overdue) {
+    filter.status = "Issued";
+    filter.balanceDueMinor = { $gt: 0 };
+    if (!filter.paymentStatus) {
+      filter.paymentStatus = { $ne: "Paid" };
+    }
+    filter.dueDate = { $lt: new Date(), $type: "date" };
+  }
+
   // Search:
   // - invoiceNumber matches q (case-insensitive)
   // - OR invoices whose linked order.orderNumber matches q
-  let orderIdsForSearch = null;
+  let orderIdsForSearch = [];
+  let userIdsForSearch = [];
   if (qText) {
     // invoiceNumber regex
-    const invoiceNumberRegex = new RegExp(qText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const invoiceNumberRegex = new RegExp(escapeRegex(qText), "i");
 
-    // orderNumber search -> get matching orders, then filter invoices by order in [...]
-    const orders = await Order.find({
-      orderNumber: invoiceNumberRegex,
-    })
-      .select("_id")
-      .limit(200)
-      .lean();
+    const [orders, users] = await Promise.all([
+      Order.find({ orderNumber: invoiceNumberRegex })
+        .select("_id")
+        .limit(200)
+        .lean(),
+      User.find({ $or: [{ name: invoiceNumberRegex }, { email: invoiceNumberRegex }] })
+        .select("_id")
+        .limit(200)
+        .lean(),
+    ]);
 
     orderIdsForSearch = orders.map((o) => o._id);
+    userIdsForSearch = users.map((u) => u._id);
 
     filter.$or = [
       { invoiceNumber: invoiceNumberRegex },
       ...(orderIdsForSearch.length ? [{ order: { $in: orderIdsForSearch } }] : []),
+      ...(userIdsForSearch.length ? [{ user: { $in: userIdsForSearch } }] : []),
     ];
   }
 
@@ -136,7 +170,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
           "order",
         ].join(" ")
       )
-      .sort({ createdAt: -1 })
+      .sort(sort)
       .skip(skip)
       .limit(limit)
       .populate({ path: "user", select: "name email" }) // adjust to your User schema
@@ -144,14 +178,25 @@ export const getInvoices = asyncHandler(async (req, res) => {
       .lean(),
   ]);
 
-  const pages = Math.max(1, Math.ceil(total / limit));
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
   res.json({
+    success: true,
+    message: "Invoices retrieved successfully.",
     page,
-    pages,
+    pages: totalPages,
     total,
     limit,
     items,
+    data: items,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
   });
 });
 

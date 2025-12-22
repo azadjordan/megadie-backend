@@ -1,297 +1,222 @@
-// controllers/paymentController.js
+// megadie-backend/controllers/paymentController.js
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Payment from "../models/paymentModel.js";
 import Invoice from "../models/invoiceModel.js";
-import { roundToTwo } from "../utils/rounding.js";
+import User from "../models/userModel.js";
 
-/* =========================
-   Helpers (pagination + filters)
-   ========================= */
-const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
-  const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
-  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || defaultLimit, 1), maxLimit);
-  const skip = (page - 1) * limit;
-  return { page, limit, skip };
+/* -----------------------
+   Helpers
+------------------------ */
+function toInt(v, fallback) {
+  const n = Number.parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function escapeRegex(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function toMinorUnits(majorAmount, factor = 100) {
+  const n = Number(majorAmount);
+  const f = Number(factor);
+  if (!Number.isFinite(n)) return NaN;
+  if (!Number.isFinite(f) || f <= 0) return Math.round(n * 100);
+  return Math.round(n * f);
+}
+
+const SORT_MAP = {
+  newest: { createdAt: -1 },
+  oldest: { createdAt: 1 },
+  amountHigh: { amountMinor: -1, createdAt: -1 },
+  amountLow: { amountMinor: 1, createdAt: -1 },
 };
 
-const parseFilters = (req) => {
-  const { status, method, user, invoiceNumber, reference, dateFrom, dateTo, min, max } = req.query || {};
-
-  const q = {};
-  if (status) q.status = status;
-  if (method) q.paymentMethod = method;
-  if (user) q.user = new mongoose.Types.ObjectId(user);
-  if (reference) q.reference = { $regex: reference, $options: "i" };
-
-  // invoiceNumber handled separately later
-  if (invoiceNumber) q.invoice = q.invoice || { $in: [] };
-
-  if (dateFrom || dateTo) {
-    q.paymentDate = {};
-    if (dateFrom) q.paymentDate.$gte = new Date(dateFrom);
-    if (dateTo) q.paymentDate.$lte = new Date(dateTo);
-  }
-
-  if (min || max) {
-    q.amount = {};
-    if (min) q.amount.$gte = Number(min);
-    if (max) q.amount.$lte = Number(max);
-  }
-
-  return q;
-};
-
-/* =========================
-   POST /api/payments/from-invoice/:invoiceId
-   Private/Admin
-   Create a payment (no totals returned — invoice computes them later)
-   ========================= */
+/**
+ * @desc    Admin: add payment to an invoice
+ * @route   POST /api/payments/from-invoice/:invoiceId
+ * @access  Private/Admin
+ */
 export const addPaymentToInvoice = asyncHandler(async (req, res) => {
-  const { amount, paymentMethod, note, paymentDate, paidTo, reference } = req.body || {};
   const { invoiceId } = req.params;
 
-  const amt = roundToTwo(Number(amount));
-  if (!Number.isFinite(amt) || amt <= 0) throw new Error("Payment amount must be a positive number.");
-  if (!paymentMethod) throw new Error("Payment method is required.");
-  if (!paidTo || !String(paidTo).trim()) throw new Error("'paidTo' field is required.");
-
-  const session = await mongoose.startSession();
-
-  try {
-    let createdPayment;
-
-    await session.withTransaction(async () => {
-      const inv = await Invoice.findById(invoiceId).select("user amount").session(session);
-      if (!inv) throw new Error("Invoice not found.");
-
-      // Ensure we don't exceed the invoice amount
-      const paidAgg = await Payment.aggregate([
-        { $match: { invoice: inv._id, status: "Received" } },
-        { $group: { _id: null, total: { $sum: "$amount" } } },
-      ]).session(session);
-
-      const alreadyPaid = roundToTwo(paidAgg?.[0]?.total || 0);
-      const remaining = roundToTwo(inv.amount - alreadyPaid);
-
-      if (amt > remaining) {
-        throw new Error(`Payment exceeds remaining balance. Remaining due: ${remaining.toFixed(2)}`);
-      }
-
-      const [payment] = await Payment.create(
-        [{
-          invoice: inv._id,
-          user: inv.user,
-          amount: amt,
-          paymentMethod,
-          note,
-          paymentDate: paymentDate || Date.now(),
-          paidTo: String(paidTo).trim(),
-          reference: reference?.toString().trim(),
-          status: "Received",
-        }],
-        { session }
-      );
-
-      createdPayment = payment;
-    });
-
-    res.status(201).json({
-      success: true,
-      message: "Payment recorded successfully.",
-      data: createdPayment,
-    });
-
-  } finally {
-    session.endSession();
+  if (!mongoose.Types.ObjectId.isValid(invoiceId)) {
+    res.status(400);
+    throw new Error("Invalid invoice id.");
   }
-});
 
-/* =========================
-   PATCH /api/payments/:id
-   Private/Admin
-   Edit non-financial fields only
-   ========================= */
-export const updatePaymentMeta = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const { paymentDate, note, reference, paidTo, paymentMethod } = req.body || {};
+  const { amount, paymentMethod, receivedBy, paymentDate, note, reference } =
+    req.body || {};
 
-  const payment = await Payment.findById(id);
-  if (!payment) throw new Error("Payment not found.");
+  if (!paymentMethod) {
+    res.status(400);
+    throw new Error("Payment method is required.");
+  }
 
-  const changes = {};
+  if (!receivedBy || !String(receivedBy).trim()) {
+    res.status(400);
+    throw new Error("Received by is required.");
+  }
 
-  if (typeof paymentDate !== "undefined") {
-    const newDate = new Date(paymentDate);
-    if (!payment.paymentDate || +payment.paymentDate !== +newDate) {
-      changes.paymentDate = { from: payment.paymentDate ?? null, to: newDate ?? null };
-      payment.paymentDate = newDate;
+  const majorAmount = Number(amount);
+  if (!Number.isFinite(majorAmount) || majorAmount <= 0) {
+    res.status(400);
+    throw new Error("Payment amount must be a positive number.");
+  }
+
+  const invoice = await Invoice.findById(invoiceId)
+    .select("user status minorUnitFactor paymentStatus balanceDueMinor")
+    .lean();
+
+  if (!invoice) {
+    res.status(404);
+    throw new Error("Invoice not found.");
+  }
+
+  if (invoice.status !== "Issued") {
+    res.status(400);
+    throw new Error("Payments can only be added to Issued invoices.");
+  }
+
+  if (
+    invoice.paymentStatus === "Paid" ||
+    (typeof invoice.balanceDueMinor === "number" && invoice.balanceDueMinor <= 0)
+  ) {
+    res.status(400);
+    throw new Error("Invoice is already paid.");
+  }
+
+  let parsedPaymentDate;
+  if (paymentDate) {
+    const d = new Date(paymentDate);
+    if (Number.isNaN(d.getTime())) {
+      res.status(400);
+      throw new Error("Invalid payment date.");
     }
-  }
-  if (typeof note !== "undefined" && note !== payment.note) {
-    changes.note = { from: payment.note ?? null, to: String(note) };
-    payment.note = String(note);
-  }
-  if (typeof reference !== "undefined" && reference !== payment.reference) {
-    changes.reference = { from: payment.reference ?? null, to: String(reference) };
-    payment.reference = String(reference);
-  }
-  if (typeof paidTo !== "undefined" && paidTo !== payment.paidTo) {
-    changes.paidTo = { from: payment.paidTo ?? null, to: String(paidTo) };
-    payment.paidTo = String(paidTo);
-  }
-  if (typeof paymentMethod !== "undefined" && paymentMethod !== payment.paymentMethod) {
-    changes.paymentMethod = { from: payment.paymentMethod ?? null, to: String(paymentMethod) };
-    payment.paymentMethod = String(paymentMethod);
+    parsedPaymentDate = d;
   }
 
-  const updated = await payment.save();
+  const amountMinor = toMinorUnits(majorAmount, invoice.minorUnitFactor || 100);
+  if (!Number.isFinite(amountMinor) || amountMinor <= 0) {
+    res.status(400);
+    throw new Error("Payment amount is invalid.");
+  }
 
-  res.status(200).json({
-    success: true,
-    message: Object.keys(changes).length
-      ? `Payment updated successfully (${Object.keys(changes).join(", ")}).`
-      : "Payment saved (no changes detected).",
-    changed: changes,
-    data: updated,
+  const payment = await Payment.create({
+    invoice: invoiceId,
+    user: invoice.user,
+    amountMinor,
+    paymentMethod,
+    receivedBy: String(receivedBy).trim(),
+    paymentDate: parsedPaymentDate,
+    note: typeof note === "string" ? note.trim() : note,
+    reference: typeof reference === "string" ? reference.trim() : reference,
   });
-});
 
-/* =========================
-   DELETE /api/payments/:id
-   Private/Admin
-   Delete payment (no invoice recalculation needed)
-   ========================= */
-export const deletePayment = asyncHandler(async (req, res) => {
-  const payment = await Payment.findById(req.params.id)
-    .select("_id amount paymentMethod reference invoice user");
-
-  if (!payment) throw new Error("Payment not found.");
-
-  const snapshot = {
-    paymentId: payment._id,
-    amount: payment.amount,
-    paymentMethod: payment.paymentMethod,
-    reference: payment.reference ?? null,
-    invoice: payment.invoice,
-    user: payment.user,
-  };
-
-  await payment.deleteOne();
-
-  res.status(200).json({
+  res.status(201).json({
     success: true,
-    message: "Payment deleted successfully.",
-    ...snapshot,
-  });
-});
-
-/* =========================
-   GET /api/payments/by-invoice?invoice=:invoiceId
-   Private/Admin
-   ========================= */
-export const getPaymentsByInvoice = asyncHandler(async (req, res) => {
-  const { invoice } = req.query;
-
-  if (!invoice) throw new Error("Invoice ID is required.");
-
-  const payments = await Payment.find({ invoice })
-    .populate("user", "name email")
-    .sort({ paymentDate: 1 });
-
-  res.status(200).json({
-    success: true,
-    message: "Payments retrieved successfully.",
-    data: payments,
-    invoiceId: invoice,
-  });
-});
-
-/* =========================
-   GET /api/payments/my
-   Private (owner)
-   ========================= */
-export const getMyPayments = asyncHandler(async (req, res) => {
-  const { limit, skip, page } = parsePagination(req);
-
-  const [items, total] = await Promise.all([
-    Payment.find({ user: req.user._id })
-      .populate("invoice", "invoiceNumber amount")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit),
-    Payment.countDocuments({ user: req.user._id }),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    message: "Your payments retrieved successfully.",
-    page,
-    total,
-    data: items,
-  });
-});
-
-/* =========================
-   GET /api/payments
-   Private/Admin
-   All payments with filters + pagination
-   ========================= */
-export const getAllPayments = asyncHandler(async (req, res) => {
-  const { limit, skip, page } = parsePagination(req);
-  const filters = parseFilters(req);
-
-  // Resolve invoiceNumber → invoice _id[]
-  if (filters.invoice && "$in" in filters.invoice) {
-    const invs = await Invoice.find(
-      { invoiceNumber: { $regex: req.query.invoiceNumber, $options: "i" } },
-      { _id: 1 }
-    );
-    filters.invoice.$in = invs.map((i) => i._id);
-    if (filters.invoice.$in.length === 0) {
-      return res.status(200).json({
-        success: true,
-        message: "Payments retrieved successfully.",
-        page,
-        total: 0,
-        data: [],
-      });
-    }
-  }
-
-  const [items, total] = await Promise.all([
-    Payment.find(filters)
-      .populate("user", "name email")
-      .populate("invoice", "invoiceNumber amount")
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(limit),
-    Payment.countDocuments(filters),
-  ]);
-
-  res.status(200).json({
-    success: true,
-    message: "Payments retrieved successfully.",
-    page,
-    total,
-    data: items,
-  });
-});
-
-/* =========================
-   GET /api/payments/:id
-   Private/Admin
-   ========================= */
-export const getPaymentById = asyncHandler(async (req, res) => {
-  const payment = await Payment.findById(req.params.id)
-    .populate("user", "name email")
-    .populate("invoice", "invoiceNumber amount");
-
-  if (!payment) throw new Error("Payment not found.");
-
-  res.status(200).json({
-    success: true,
-    message: "Payment retrieved successfully.",
+    message: "Payment recorded successfully.",
     data: payment,
+  });
+});
+
+/**
+ * @desc    Admin: list payments (filters + pagination)
+ * @route   GET /api/payments
+ * @access  Private/Admin
+ *
+ * Query params (optional):
+ * - page, limit
+ * - search=<string> (invoiceNumber/user name/email/reference/receivedBy, case-insensitive)
+ * - method=Cash|Bank Transfer|Credit Card|Cheque|Other
+ * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use createdAt)
+ */
+export const getPaymentsAdmin = asyncHandler(async (req, res) => {
+  const page = Math.max(1, toInt(req.query.page, 1));
+  const limitRaw = toInt(req.query.limit, 5);
+  const limit = Math.min(Math.max(1, limitRaw), 5);
+  const skip = (page - 1) * limit;
+
+  const method = req.query.method ? String(req.query.method) : null;
+  const sortKey = req.query.sort ? String(req.query.sort) : "newest";
+  const sort = SORT_MAP[sortKey] || SORT_MAP.newest;
+
+  const search = req.query.search ? String(req.query.search).trim() : "";
+
+  const filter = {};
+  if (method && method !== "all") filter.paymentMethod = method;
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+
+    const [invoices, users] = await Promise.all([
+      Invoice.find({ invoiceNumber: regex }).select("_id").limit(200).lean(),
+      User.find({ $or: [{ name: regex }, { email: regex }] })
+        .select("_id")
+        .limit(200)
+        .lean(),
+    ]);
+
+    const invoiceIds = invoices.map((inv) => inv._id);
+    const userIds = users.map((u) => u._id);
+
+    filter.$or = [
+      { reference: regex },
+      { receivedBy: regex },
+      { note: regex },
+      ...(invoiceIds.length ? [{ invoice: { $in: invoiceIds } }] : []),
+      ...(userIds.length ? [{ user: { $in: userIds } }] : []),
+    ];
+  }
+
+  const [total, items] = await Promise.all([
+    Payment.countDocuments(filter),
+    Payment.find(filter)
+      .select(
+        [
+          "invoice",
+          "user",
+          "amountMinor",
+          "paymentMethod",
+          "paymentDate",
+          "note",
+          "reference",
+          "receivedBy",
+          "createdAt",
+        ].join(" ")
+      )
+      .populate({
+        path: "invoice",
+        select: "invoiceNumber currency minorUnitFactor",
+      })
+      .populate({
+        path: "user",
+        select: "name email",
+      })
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
+  res.json({
+    success: true,
+    message: "Payments retrieved successfully.",
+    page,
+    pages: totalPages,
+    total,
+    limit,
+    items,
+    data: items,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
   });
 });

@@ -8,6 +8,24 @@ import crypto from "crypto";
 import sendTransactionalEmail from "../utils/sendTransactionalEmail.js";
 
 /* =========================
+   Helpers
+   ========================= */
+function toInt(v, fallback) {
+  const n = Number.parseInt(String(v), 10);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+function escapeRegex(text = "") {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const USER_SORT_MAP = {
+  newest: { createdAt: -1 },
+  oldest: { createdAt: 1 },
+  name: { name: 1, createdAt: -1 },
+};
+
+/* =========================
    POST /api/users/auth
    Public — Authenticate user
    ========================= */
@@ -263,13 +281,59 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
    GET /api/users
    Private/Admin — Get all users
    ========================= */
-export const getUsers = asyncHandler(async (_req, res) => {
-  const users = await User.find({}).select("-password").lean();
+export const getUsers = asyncHandler(async (req, res) => {
+  const page = Math.max(1, toInt(req.query.page, 1));
+  const limitRaw = toInt(req.query.limit, 5);
+  const limit = Math.min(Math.max(1, limitRaw), 5);
+  const skip = (page - 1) * limit;
+
+  const search = req.query.search ? String(req.query.search).trim() : "";
+  const role = req.query.role ? String(req.query.role) : "all";
+  const sortKey = req.query.sort ? String(req.query.sort) : "name";
+  const sort = USER_SORT_MAP[sortKey] || USER_SORT_MAP.newest;
+
+  const filter = {};
+  if (role === "admin") filter.isAdmin = true;
+  if (role === "user") filter.isAdmin = false;
+
+  if (search) {
+    const regex = new RegExp(escapeRegex(search), "i");
+    filter.$or = [
+      { name: regex },
+      { email: regex },
+      { phoneNumber: regex },
+    ];
+  }
+
+  const [total, users] = await Promise.all([
+    User.countDocuments(filter),
+    User.find(filter)
+      .select("name email phoneNumber address isAdmin createdAt")
+      .sort(sort)
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+  ]);
+
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+
   res.status(200).json({
     success: true,
     message: "Users retrieved successfully.",
-    total: users.length,
+    page,
+    pages: totalPages,
+    total,
+    limit,
+    items: users,
     data: users,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
   });
 });
 

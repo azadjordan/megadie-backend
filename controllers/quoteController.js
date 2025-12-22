@@ -23,6 +23,9 @@ const ALLOWED_TRANSITIONS = {
   Cancelled: new Set(["Cancelled"]), // locked by default
 };
 
+const escapeRegex = (text = "") =>
+  String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
 /* =========================
    Helper: sanitize quote for OWNER views based on status
    ========================= */
@@ -305,16 +308,41 @@ export const deleteQuote = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   GET /api/quotes/admin?page=1&limit=20
+   GET /api/quotes/admin?page=1&limit=5&status=Processing&search=abc
    Private/Admin
    Get all quotes (paginated, newest first)
    ========================= */
 export const getQuotes = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 20));
+  const limit = Math.min(5, Math.max(1, Number(req.query.limit) || 5));
   const skip = (page - 1) * limit;
 
   const filter = {};
+  const status = req.query.status ? String(req.query.status).trim() : "";
+  if (status) {
+    if (!allowedStatusesSet.has(status)) {
+      res.status(400);
+      throw new Error(`Invalid status. Allowed: ${ALLOWED_STATUSES.join(", ")}`);
+    }
+    filter.status = status;
+  }
+
+  const search = req.query.search ? String(req.query.search).trim() : "";
+  if (search) {
+    const searchRegex = new RegExp(escapeRegex(search), "i");
+    const users = await User.find({
+      $or: [{ name: searchRegex }, { email: searchRegex }],
+    })
+      .select("_id")
+      .limit(200)
+      .lean();
+
+    const userIds = users.map((u) => u._id);
+    filter.$or = [{ quoteNumber: searchRegex }];
+    if (userIds.length) {
+      filter.$or.push({ user: { $in: userIds } });
+    }
+  }
 
   const [total, quotes] = await Promise.all([
     Quote.countDocuments(filter),
@@ -328,16 +356,24 @@ export const getQuotes = asyncHandler(async (req, res) => {
       .limit(limit),
   ]);
 
-  const pages = Math.max(1, Math.ceil(total / limit));
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
   res.status(200).json({
     success: true,
     message: "Quotes retrieved successfully.",
     page,
-    pages,
+    pages: totalPages,
     total,
     limit,
     data: quotes,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
   });
 });
 

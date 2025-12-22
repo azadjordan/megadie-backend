@@ -5,6 +5,7 @@ import Quote from "../models/quoteModel.js";
 import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
 import Product from "../models/productModel.js";
+import User from "../models/userModel.js";
 
 /* =========================
    Helpers (pagination)
@@ -18,6 +19,9 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
   const skip = (page - 1) * limit;
   return { page, limit, skip };
 };
+
+const escapeRegex = (text = "") =>
+  String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 // Remove all pricing fields for client/owner responses
 const sanitizeOrderForClient = (order) => {
@@ -191,18 +195,33 @@ export const getMyOrders = asyncHandler(async (req, res) => {
    GET /api/orders
    Private/Admin
    Paginated list of orders with optional filters
-   Query: status, user
+   Query: status, search (matches user name/email or order number)
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
-    defaultLimit: 10,
-    maxLimit: 20,
+    defaultLimit: 5,
+    maxLimit: 5,
   });
 
   const filter = {};
   if (req.query.status) filter.status = req.query.status;
 
-  if (req.query.user) {
+  const search = req.query.search ? String(req.query.search).trim() : "";
+  if (search) {
+    const searchRegex = new RegExp(escapeRegex(search), "i");
+    const users = await User.find({
+      $or: [{ name: searchRegex }, { email: searchRegex }],
+    })
+      .select("_id")
+      .limit(200)
+      .lean();
+
+    const userIds = users.map((u) => u._id);
+    filter.$or = [{ orderNumber: searchRegex }];
+    if (userIds.length) {
+      filter.$or.push({ user: { $in: userIds } });
+    }
+  } else if (req.query.user) {
     if (!mongoose.isValidObjectId(req.query.user)) {
       res.status(400);
       throw new Error("Invalid user id.");
