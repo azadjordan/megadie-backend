@@ -57,7 +57,7 @@ userSchema.set("toJSON", {
 });
 
 userSchema.index({ name: 1 });
-userSchema.index({ email: 1 });
+// unique: true already creates an index on email
 
 const User = mongoose.model("User", userSchema);
 export default User;

@@ -89,10 +89,29 @@ const asNumber = (v) => {
 };
 
 const safe = (v) => (v === 0 ? "0" : v ? String(v) : "—");
-const money = (n) => asNumber(n).toFixed(2);
+const money = (n, digits = 2) => asNumber(n).toFixed(digits);
+
+const fractionDigitsFromFactor = (factor) => {
+  const f = Number(factor);
+  if (!Number.isFinite(f) || f <= 0) return 2;
+  if (f === 1) return 0;
+  const pow = Math.log10(f);
+  return Number.isInteger(pow) ? pow : 2;
+};
+
+const minorToMajor = (minor, factor) => {
+  const n = asNumber(minor);
+  const f = Number(factor);
+  const safeFactor = Number.isFinite(f) && f > 0 ? f : 100;
+  return n / safeFactor;
+};
 
 const InvoicePDF = ({ invoice, order, company }) => {
-  // Charges live on the order; invoice.amount is the official total
+  const factor = Number(invoice?.minorUnitFactor);
+  const minorUnitFactor = Number.isFinite(factor) && factor > 0 ? factor : 100;
+  const fractionDigits = fractionDigitsFromFactor(minorUnitFactor);
+
+  // Charges live on the order; invoice.amountMinor is the official total
   const deliveryCharge = asNumber(order?.deliveryCharge ?? 0);
   const extraFee = asNumber(order?.extraFee ?? 0);
 
@@ -106,11 +125,9 @@ const InvoicePDF = ({ invoice, order, company }) => {
 
   // Prefer the single source of truth from the Invoice model.
   // Fallback: derive from subtotal + charges if amount is missing.
-  const invoiceAmount = asNumber(
-    typeof invoice?.amount === "number"
-      ? invoice.amount
-      : subtotal + deliveryCharge + extraFee
-  );
+  const invoiceAmount = Number.isFinite(Number(invoice?.amountMinor))
+    ? minorToMajor(invoice.amountMinor, minorUnitFactor)
+    : subtotal + deliveryCharge + extraFee;
 
   // Payments: if controller precomputed totalPaid/balanceDue use them,
   // otherwise derive from payments (Received) as a fallback.
@@ -118,18 +135,23 @@ const InvoicePDF = ({ invoice, order, company }) => {
     ? invoice.payments
     : [];
 
-  const receivedPaymentsTotal = paymentsArray
-    .filter((p) => p && (p.status === "Received" || typeof p.status === "undefined"))
-    .reduce((sum, p) => sum + asNumber(p.amount), 0);
+  const receivedPaymentsTotal = paymentsArray.reduce((sum, p) => {
+    if (p && typeof p.amountMinor === "number") {
+      return sum + minorToMajor(p.amountMinor, minorUnitFactor);
+    }
+    if (p && typeof p.amount === "number") {
+      return sum + asNumber(p.amount);
+    }
+    return sum;
+  }, 0);
 
-  const amountPaid = asNumber(
-    typeof invoice?.totalPaid === "number" ? invoice.totalPaid : receivedPaymentsTotal
-  );
+  const amountPaid = Number.isFinite(Number(invoice?.paidTotalMinor))
+    ? minorToMajor(invoice.paidTotalMinor, minorUnitFactor)
+    : receivedPaymentsTotal;
 
-  const balanceDue =
-    typeof invoice?.balanceDue === "number"
-      ? asNumber(invoice.balanceDue)
-      : Math.max(invoiceAmount - amountPaid, 0);
+  const balanceDue = Number.isFinite(Number(invoice?.balanceDueMinor))
+    ? minorToMajor(invoice.balanceDueMinor, minorUnitFactor)
+    : Math.max(invoiceAmount - amountPaid, 0);
 
   const year =
     (invoice?.createdAt && new Date(invoice.createdAt).getFullYear()) ||
@@ -147,7 +169,7 @@ const InvoicePDF = ({ invoice, order, company }) => {
       React.createElement(
         Text,
         { style: styles.cellTotal },
-        money(asNumber(item.unitPrice) * asNumber(item.qty))
+        money(asNumber(item.unitPrice) * asNumber(item.qty), fractionDigits)
       ),
     ])
   );
@@ -281,7 +303,7 @@ const InvoicePDF = ({ invoice, order, company }) => {
                   ),
                 ]
               ),
-              // Invoice Status (computed in controller if provided)
+              // Payment Status
               React.createElement(
                 View,
                 { style: styles.metaRow, key: "m-status" },
@@ -291,7 +313,7 @@ const InvoicePDF = ({ invoice, order, company }) => {
                   React.createElement(
                     Text,
                     { style: styles.value },
-                    safe(invoice.status || "Unpaid")
+                    safe(invoice.paymentStatus || "Unpaid")
                   ),
                 ]
               ),
@@ -314,32 +336,56 @@ const InvoicePDF = ({ invoice, order, company }) => {
       React.createElement(View, { style: styles.section, key: "totals" }, [
         React.createElement(View, { style: styles.totalLine, key: "subtotal" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Subtotal:"),
-          React.createElement(Text, { style: styles.totalValue }, money(subtotal)),
+          React.createElement(
+            Text,
+            { style: styles.totalValue },
+            money(subtotal, fractionDigits)
+          ),
         ]),
 
         React.createElement(View, { style: styles.totalLine, key: "delivery" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Delivery Charge:"),
-          React.createElement(Text, { style: styles.totalValue }, money(deliveryCharge)),
+          React.createElement(
+            Text,
+            { style: styles.totalValue },
+            money(deliveryCharge, fractionDigits)
+          ),
         ]),
 
         React.createElement(View, { style: styles.totalLine, key: "extrafee" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Extra Fee:"),
-          React.createElement(Text, { style: styles.totalValue }, money(extraFee)),
+          React.createElement(
+            Text,
+            { style: styles.totalValue },
+            money(extraFee, fractionDigits)
+          ),
         ]),
 
         React.createElement(View, { style: styles.totalLine, key: "grand" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Invoice Amount:"),
-          React.createElement(Text, { style: styles.totalValue }, money(invoiceAmount)),
+          React.createElement(
+            Text,
+            { style: styles.totalValue },
+            money(invoiceAmount, fractionDigits)
+          ),
         ]),
 
         React.createElement(View, { style: styles.totalLine, key: "paid" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Amount Paid:"),
-          React.createElement(Text, { style: styles.totalValue }, money(amountPaid)),
+          React.createElement(
+            Text,
+            { style: styles.totalValue },
+            money(amountPaid, fractionDigits)
+          ),
         ]),
 
         React.createElement(View, { style: styles.totalLine, key: "due" }, [
           React.createElement(Text, { style: styles.totalLabel }, "Balance Due:"),
-          React.createElement(Text, { style: styles.totalValue }, money(balanceDue)),
+          React.createElement(
+            Text,
+            { style: styles.totalValue },
+            money(balanceDue, fractionDigits)
+          ),
         ]),
       ]),
 

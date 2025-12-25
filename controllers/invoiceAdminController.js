@@ -4,6 +4,7 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Invoice from "../models/invoiceModel.js";
 import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
+import Payment from "../models/paymentModel.js";
 
 /* -----------------------
    Helpers
@@ -19,6 +20,14 @@ function parseDate(v) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function toMinorUnits(majorAmount, factor = 100) {
+  const n = Number(majorAmount);
+  const f = Number(factor);
+  if (!Number.isFinite(n)) return NaN;
+  if (!Number.isFinite(f) || f <= 0) return Math.round(n * 100);
+  return Math.round(n * f);
+}
+
 function escapeRegex(text = "") {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -30,14 +39,11 @@ const SORT_MAP = {
   amountLow: { amountMinor: 1, createdAt: -1 },
 };
 
-// Convert "major" (e.g. 10.50) to integer minor (e.g. 1050), using factor (e.g. 100)
-function toMinorUnits(majorAmount, factor = 100) {
-  const n = Number(majorAmount);
-  const f = Number(factor);
-  if (!Number.isFinite(n)) return 0;
-  if (!Number.isFinite(f) || f <= 0) return Math.round(n * 100);
-  return Math.round(n * f);
-}
+const INVOICE_STATUS_ALLOWED = new Set(Invoice.schema.path("status")?.enumValues || []);
+const INVOICE_PAYMENT_STATUS_ALLOWED = new Set(
+  Invoice.schema.path("paymentStatus")?.enumValues || []
+);
+
 
 function pick(obj, keys) {
   const out = {};
@@ -75,6 +81,22 @@ export const getInvoices = asyncHandler(async (req, res) => {
   const paymentStatus = req.query.paymentStatus ? String(req.query.paymentStatus) : null;
   const unpaid = String(req.query.unpaid || "").toLowerCase() === "true";
   const overdue = String(req.query.overdue || "").toLowerCase() === "true";
+
+  if (status && !INVOICE_STATUS_ALLOWED.has(status)) {
+    res.status(400);
+    throw new Error(
+      `Invalid status. Allowed: ${Array.from(INVOICE_STATUS_ALLOWED).join(", ")}.`
+    );
+  }
+
+  if (paymentStatus && !INVOICE_PAYMENT_STATUS_ALLOWED.has(paymentStatus)) {
+    res.status(400);
+    throw new Error(
+      `Invalid paymentStatus. Allowed: ${Array.from(INVOICE_PAYMENT_STATUS_ALLOWED).join(
+        ", "
+      )}.`
+    );
+  }
 
   const user = req.query.user ? String(req.query.user) : null;
   const from = parseDate(req.query.from);
@@ -232,9 +254,14 @@ export const updateInvoice = asyncHandler(async (req, res) => {
 
   const allowed = pick(req.body || {}, ["dueDate", "adminNote", "status", "cancelReason"]);
 
-  // dueDate: allow null to clear
+  // dueDate: required
   if (Object.prototype.hasOwnProperty.call(allowed, "dueDate")) {
-    invoice.dueDate = allowed.dueDate ? new Date(allowed.dueDate) : null;
+    const parsed = parseDate(allowed.dueDate);
+    if (!parsed) {
+      res.status(400);
+      throw new Error("Invalid due date.");
+    }
+    invoice.dueDate = parsed;
   }
 
   if (Object.prototype.hasOwnProperty.call(allowed, "adminNote")) {
@@ -300,32 +327,44 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
     throw new Error("Only Cancelled invoices can be deleted.");
   }
 
+  const paymentsDeleted = await Payment.countDocuments({ invoice: invoice._id });
+
   // Unlink order.invoice (best-effort)
+  let orderUnlinked = false;
   if (invoice.order) {
-    await Order.findByIdAndUpdate(invoice.order, { $set: { invoice: null } });
+    const result = await Order.updateOne(
+      { _id: invoice.order },
+      { $set: { invoice: null } }
+    );
+    orderUnlinked = (result?.matchedCount || 0) > 0;
   }
 
   // This will trigger model middleware (findOneAndDelete) and delete linked payments
   await Invoice.findByIdAndDelete(invoice._id);
 
-  res.json({ message: "Invoice deleted." });
+  const message = invoice.order
+    ? "Invoice and linked payments deleted AND Order unlinked."
+    : "Invoice and linked payments deleted.";
+
+  res.json({
+    message,
+    paymentsDeleted,
+    orderUnlinked,
+  });
 });
 
 /**
- * @desc    Admin: create invoice for an order (canonical)
+ * @desc    Admin: create invoice from an order
  * @route   POST /api/invoices/from-order/:orderId
  * @access  Private/Admin
  *
- * Behavior:
- * - Creates Invoice (snapshot)
- * - Links Order.invoice to the new invoice id
- * - Enforces 1:1 order->invoice
- *
- * Notes:
- * - Order.totalPrice is in major units (Number). We convert to minor units here.
- * - You can later move Order totals to minor units too, but not required immediately.
+ * Body (optional):
+ * - dueDate
+ * - adminNote
+ * - currency
+ * - minorUnitFactor
  */
-export const createInvoiceForOrder = asyncHandler(async (req, res) => {
+export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
   const { orderId } = req.params;
 
   if (!mongoose.Types.ObjectId.isValid(orderId)) {
@@ -333,65 +372,109 @@ export const createInvoiceForOrder = asyncHandler(async (req, res) => {
     throw new Error("Invalid order id.");
   }
 
-  const order = await Order.findById(orderId)
-    .select("_id user status totalPrice invoice orderNumber")
-    .lean();
+  const session = await mongoose.startSession();
+  session.startTransaction();
 
-  if (!order) {
-    res.status(404);
-    throw new Error("Order not found.");
-  }
+  try {
+    const order = await Order.findById(orderId)
+      .select("user status totalPrice invoice")
+      .session(session);
 
-  if (order.invoice) {
-    res.status(400);
-    throw new Error("This order already has an invoice.");
-  }
+    if (!order) {
+      res.status(404);
+      throw new Error("Order not found.");
+    }
 
-  // You told us: admins usually create invoice from an order.
-  // Keep this aligned with your business flow; adjust allowed statuses as you like.
-  const allowedOrderStatuses = ["Processing", "Delivered", "Cancelled"];
-  if (!allowedOrderStatuses.includes(order.status)) {
-    res.status(400);
-    throw new Error(
-      `Invoice can only be created for orders in status: ${allowedOrderStatuses.join(", ")}.`
+    if (!["Processing", "Delivered"].includes(order.status)) {
+      res.status(400);
+      throw new Error("Invoices can only be created for Processing or Delivered orders.");
+    }
+
+    if (order.invoice) {
+      res.status(400);
+      throw new Error("This order already has an invoice.");
+    }
+
+    const existing = await Invoice.exists({ order: order._id }).session(session);
+    if (existing) {
+      res.status(400);
+      throw new Error("An invoice already exists for this order.");
+    }
+
+    const minorUnitFactor = Object.prototype.hasOwnProperty.call(
+      req.body || {},
+      "minorUnitFactor"
+    )
+      ? Number(req.body.minorUnitFactor)
+      : 100;
+
+    if (!Number.isInteger(minorUnitFactor) || minorUnitFactor <= 0) {
+      res.status(400);
+      throw new Error("minorUnitFactor must be a positive integer.");
+    }
+
+    const amountMinor = toMinorUnits(order.totalPrice, minorUnitFactor);
+    if (!Number.isFinite(amountMinor) || amountMinor < 0) {
+      res.status(400);
+      throw new Error("Order total is invalid for invoice creation.");
+    }
+
+    const rawDueDate = req.body?.dueDate;
+    if (!rawDueDate) {
+      res.status(400);
+      throw new Error("Due date is required.");
+    }
+    const dueDate = parseDate(rawDueDate);
+    if (!dueDate) {
+      res.status(400);
+      throw new Error("Invalid due date.");
+    }
+
+    const currencyRaw =
+      typeof req.body?.currency === "string" ? req.body.currency.trim() : "";
+    const currency = currencyRaw ? currencyRaw.toUpperCase() : undefined;
+    const adminNote =
+      typeof req.body?.adminNote === "string" ? req.body.adminNote.trim() : undefined;
+
+    const [invoice] = await Invoice.create(
+      [
+        {
+          user: order.user,
+          order: order._id,
+          amountMinor,
+          minorUnitFactor,
+          ...(currency ? { currency } : {}),
+          ...(dueDate ? { dueDate } : {}),
+          ...(adminNote ? { adminNote } : {}),
+        },
+      ],
+      { session }
     );
+
+    const linkResult = await Order.updateOne(
+      { _id: order._id, invoice: null },
+      { $set: { invoice: invoice._id } },
+      { session }
+    );
+
+    if (!linkResult?.matchedCount) {
+      res.status(409);
+      throw new Error("Order already has an invoice.");
+    }
+
+    await session.commitTransaction();
+
+    res.status(201).json({
+      success: true,
+      message: "Invoice created.",
+      data: invoice,
+    });
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
   }
-
-  // Optional: Don’t allow creating invoices for cancelled orders unless you want it
-  // If you want to block it, uncomment:
-  // if (order.status === "Cancelled") {
-  //   res.status(400);
-  //   throw new Error("Cannot create invoice for a Cancelled order.");
-  // }
-
-  // Currency defaults: you can later pass these from request body or store settings
-  const currency = (req.body?.currency ? String(req.body.currency) : "AED").toUpperCase();
-  const minorUnitFactor = Number.isInteger(req.body?.minorUnitFactor)
-    ? req.body.minorUnitFactor
-    : 100;
-
-  const amountMinor = toMinorUnits(order.totalPrice, minorUnitFactor);
-
-  // Create invoice
-  const invoice = await Invoice.create({
-    user: order.user,
-    order: order._id,
-    amountMinor,
-    currency,
-    minorUnitFactor,
-    // optional admin fields
-    dueDate: req.body?.dueDate ? new Date(req.body.dueDate) : undefined,
-    adminNote: req.body?.adminNote ? String(req.body.adminNote) : undefined,
-    status: "Issued",
-  });
-
-  // Link order -> invoice (1:1)
-  await Order.findByIdAndUpdate(order._id, { $set: { invoice: invoice._id } });
-
-  // Return populated invoice for admin UI convenience
-  const populated = await Invoice.findById(invoice._id)
-    .populate({ path: "user", select: "name email" })
-    .populate({ path: "order", select: "orderNumber status totalPrice createdAt" });
-
-  res.status(201).json(populated);
 });
+
+

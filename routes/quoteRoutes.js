@@ -8,6 +8,7 @@ import {
   deleteQuote,
   getMyQuotes,
   getQuotePDF,
+  getQuoteShare,
 
   // ✅ NEW (user actions)
   cancelQuoteByUser,
@@ -33,6 +34,7 @@ router.put("/:id/confirm", protect, confirmQuoteByUser);
 
 // ✅ Generate PDF version of a quote (admin only)
 router.get("/:id/pdf", protect, admin, getQuotePDF);
+router.get("/:id/share", protect, admin, getQuoteShare);
 
 // ✅ Get all quotes (admin only)
 router.route("/admin").get(protect, admin, getQuotes);

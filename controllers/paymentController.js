@@ -1,7 +1,7 @@
 // megadie-backend/controllers/paymentController.js
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
-import Payment from "../models/paymentModel.js";
+import Payment, { RECEIVED_BY_OPTIONS } from "../models/paymentModel.js";
 import Invoice from "../models/invoiceModel.js";
 import User from "../models/userModel.js";
 
@@ -32,6 +32,10 @@ const SORT_MAP = {
   amountLow: { amountMinor: 1, createdAt: -1 },
 };
 
+const PAYMENT_METHODS_ALLOWED = new Set(
+  Payment.schema.path("paymentMethod")?.enumValues || []
+);
+
 /**
  * @desc    Admin: add payment to an invoice
  * @route   POST /api/payments/from-invoice/:invoiceId
@@ -53,9 +57,16 @@ export const addPaymentToInvoice = asyncHandler(async (req, res) => {
     throw new Error("Payment method is required.");
   }
 
-  if (!receivedBy || !String(receivedBy).trim()) {
+  const receivedByTrimmed = String(receivedBy || "").trim();
+  if (!receivedByTrimmed) {
     res.status(400);
     throw new Error("Received by is required.");
+  }
+  if (!RECEIVED_BY_OPTIONS.includes(receivedByTrimmed)) {
+    res.status(400);
+    throw new Error(
+      `Invalid receivedBy. Allowed: ${RECEIVED_BY_OPTIONS.join(", ")}.`
+    );
   }
 
   const majorAmount = Number(amount);
@@ -107,7 +118,7 @@ export const addPaymentToInvoice = asyncHandler(async (req, res) => {
     user: invoice.user,
     amountMinor,
     paymentMethod,
-    receivedBy: String(receivedBy).trim(),
+    receivedBy: receivedByTrimmed,
     paymentDate: parsedPaymentDate,
     note: typeof note === "string" ? note.trim() : note,
     reference: typeof reference === "string" ? reference.trim() : reference,
@@ -144,7 +155,17 @@ export const getPaymentsAdmin = asyncHandler(async (req, res) => {
   const search = req.query.search ? String(req.query.search).trim() : "";
 
   const filter = {};
-  if (method && method !== "all") filter.paymentMethod = method;
+  if (method && method !== "all") {
+    if (!PAYMENT_METHODS_ALLOWED.has(method)) {
+      res.status(400);
+      throw new Error(
+        `Invalid payment method. Allowed: ${Array.from(PAYMENT_METHODS_ALLOWED).join(
+          ", "
+        )}.`
+      );
+    }
+    filter.paymentMethod = method;
+  }
 
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i");
@@ -218,5 +239,33 @@ export const getPaymentsAdmin = asyncHandler(async (req, res) => {
       hasPrev: page > 1,
       hasNext: page < totalPages,
     },
+  });
+});
+
+/**
+ * @desc    Admin: delete a payment
+ * @route   DELETE /api/payments/:id
+ * @access  Private/Admin
+ */
+export const deletePayment = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid payment id.");
+  }
+
+  const payment = await Payment.findById(id).select("_id invoice amountMinor");
+  if (!payment) {
+    res.status(404);
+    throw new Error("Payment not found.");
+  }
+
+  await payment.deleteOne();
+
+  res.json({
+    message: "Payment deleted and invoice balance updated.",
+    paymentId: payment._id,
+    invoiceId: payment.invoice,
   });
 });

@@ -15,6 +15,13 @@ import mongoose from "mongoose";
  * - Invoice.updatedAt IS updated when payments are created/deleted (so activity shows up in UI).
  */
 
+export const RECEIVED_BY_OPTIONS = [
+  "Azad",
+  "Momani",
+  "Company Account",
+  "Ahmad Emad",
+];
+
 const paymentSchema = new mongoose.Schema(
   {
     invoice: {
@@ -57,7 +64,12 @@ const paymentSchema = new mongoose.Schema(
     reference: { type: String, trim: true },
 
     // Who received / processed the payment
-    receivedBy: { type: String, required: true, trim: true },
+    receivedBy: {
+      type: String,
+      required: true,
+      trim: true,
+      enum: RECEIVED_BY_OPTIONS,
+    },
   },
   {
     timestamps: true,

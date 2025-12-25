@@ -60,7 +60,6 @@ const quoteSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: "Order",
       default: null,
-      index: true,
     },
 
     requestedItems: {

@@ -56,7 +56,7 @@ const sanitizeOrderForClient = (order) => {
    ========================= */
 export const deleteOrder = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id).select(
-    "_id status invoice"
+    "_id status invoice quote"
   );
   if (!order) {
     res.status(404);
@@ -94,6 +94,13 @@ export const deleteOrder = asyncHandler(async (req, res) => {
           await inv.deleteOne({ session });
           invoiceDeleted = true;
         }
+      }
+      if (order.quote) {
+        await Quote.findByIdAndUpdate(
+          order.quote,
+          { $set: { order: null } },
+          { session }
+        );
       }
       await order.deleteOne({ session });
     });
@@ -204,7 +211,17 @@ export const getOrders = asyncHandler(async (req, res) => {
   });
 
   const filter = {};
-  if (req.query.status) filter.status = req.query.status;
+  const status = req.query.status ? String(req.query.status).trim() : "";
+  if (status) {
+    const allowedStatuses = new Set(Order.schema.path("status")?.enumValues || []);
+    if (!allowedStatuses.has(status)) {
+      res.status(400);
+      throw new Error(
+        `Invalid status. Allowed: ${Array.from(allowedStatuses).join(", ")}.`
+      );
+    }
+    filter.status = status;
+  }
 
   const search = req.query.search ? String(req.query.search).trim() : "";
   if (search) {
@@ -353,6 +370,106 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
 });
 
 /* =========================
+   PUT /api/orders/:id/deliver
+   Private/Admin
+   Mark order as Delivered and delete linked quote if present
+   ========================= */
+export const markOrderDelivered = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const body = req.body || {};
+
+  const session = await mongoose.startSession();
+  let quoteDeleted = false;
+  let updated = null;
+
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findById(id).session(session);
+      if (!order) {
+        res.status(404);
+        throw new Error("Order not found.");
+      }
+
+      const hasInvoice = !!order.invoice;
+      const triesDeliveryCharge = Object.prototype.hasOwnProperty.call(
+        body,
+        "deliveryCharge"
+      );
+      const triesExtraFee = Object.prototype.hasOwnProperty.call(body, "extraFee");
+
+      if (hasInvoice && (triesDeliveryCharge || triesExtraFee)) {
+        res.status(400);
+        throw new Error(
+          "Cannot modify deliveryCharge or extraFee because an invoice already exists for this order."
+        );
+      }
+
+      if (triesDeliveryCharge) {
+        const val = Number(body.deliveryCharge);
+        if (!Number.isFinite(val) || val < 0) {
+          res.status(400);
+          throw new Error("deliveryCharge must be a non-negative number.");
+        }
+        order.deliveryCharge = val;
+      }
+
+      if (triesExtraFee) {
+        const val = Number(body.extraFee);
+        if (!Number.isFinite(val) || val < 0) {
+          res.status(400);
+          throw new Error("extraFee must be a non-negative number.");
+        }
+        order.extraFee = val;
+      }
+
+      if (Object.prototype.hasOwnProperty.call(body, "adminToAdminNote")) {
+        order.adminToAdminNote = String(body.adminToAdminNote ?? "");
+      }
+
+      if (Object.prototype.hasOwnProperty.call(body, "adminToClientNote")) {
+        order.adminToClientNote = String(body.adminToClientNote ?? "");
+      }
+
+      const deliveredBy = String(
+        body.deliveredBy || order.deliveredBy || ""
+      ).trim();
+      if (!deliveredBy) {
+        res.status(400);
+        throw new Error("Delivered by is required.");
+      }
+      order.deliveredBy = deliveredBy;
+
+      if (order.quote) {
+        const quote = await Quote.findById(order.quote).session(session);
+        if (quote) {
+          await quote.deleteOne({ session });
+          quoteDeleted = true;
+        }
+        order.quote = null;
+      }
+
+      order.status = "Delivered";
+      if (!order.deliveredAt) {
+        order.deliveredAt = new Date();
+      }
+
+      updated = await order.save({ session });
+    });
+  } finally {
+    session.endSession();
+  }
+
+  res.status(200).json({
+    success: true,
+    message: quoteDeleted
+      ? "Order delivered and quote deleted."
+      : "Order delivered.",
+    quoteDeleted,
+    data: updated,
+  });
+});
+
+/* =========================
    PUT /api/orders/:id
    Private/Admin
    Update allowed top-level fields; orderItems are immutable
@@ -370,6 +487,11 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error(
       "Order items are immutable after creation and cannot be modified."
     );
+  }
+
+  if (req.body?.status === "Delivered") {
+    res.status(400);
+    throw new Error("Use /api/orders/:id/deliver to mark an order as Delivered.");
   }
 
   const hasInvoice = !!order.invoice;

@@ -7,6 +7,7 @@ import {
   getOrderById,
   deleteOrder,
   updateOrder,
+  markOrderDelivered,
 } from "../controllers/orderController.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
 
@@ -20,6 +21,9 @@ router.get("/my", protect, getMyOrders);
 
 // ✅ Create order from quote (admin)
 router.post("/from-quote/:quoteId", protect, admin, createOrderFromQuote);
+
+// Mark order as delivered (admin)
+router.put("/:id/deliver", protect, admin, markOrderDelivered);
 
 // ✅ Get / Update / Delete order by ID
 router

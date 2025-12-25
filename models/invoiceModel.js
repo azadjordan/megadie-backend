@@ -27,7 +27,6 @@ const invoiceSchema = new mongoose.Schema(
       ref: "Order",
       required: true,
       unique: true,
-      index: true,
     },
 
     /**
@@ -75,7 +74,7 @@ const invoiceSchema = new mongoose.Schema(
       index: true,
     },
 
-    dueDate: { type: Date, index: true },
+    dueDate: { type: Date, required: true, index: true },
 
     // Admin-editable metadata (controller controls allowed edits)
     adminNote: { type: String, trim: true },

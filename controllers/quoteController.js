@@ -219,7 +219,17 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
 
   const skip = (page - 1) * limit;
 
+  const statusRaw = req.query.status ? String(req.query.status).trim() : "";
   const filter = { user: req.user._id };
+  if (statusRaw) {
+    if (!allowedStatusesSet.has(statusRaw) || statusRaw === "Cancelled") {
+      res.status(400);
+      throw new Error("Invalid status. Allowed: Processing, Quoted, Confirmed.");
+    }
+    filter.status = statusRaw;
+  } else {
+    filter.status = { $ne: "Cancelled" };
+  }
   const sort = { createdAt: -1, _id: -1 }; // newest -> oldest, stable
 
   const [total, quotesRaw] = await Promise.all([
@@ -263,6 +273,11 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     throw new Error("Quote not found.");
   }
 
+  if (quote.status !== "Quoted") {
+    res.status(400);
+    throw new Error("PDF can only be generated for Quoted requests.");
+  }
+
   const pdfStream = await renderToStream(
     React.createElement(QuotePDF, { quote })
   );
@@ -272,6 +287,47 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     `inline; filename=quote-${quote._id}.pdf`
   );
   pdfStream.pipe(res);
+});
+
+/* =========================
+   GET /api/quotes/:id/share
+   Private/Admin
+   Lightweight payload for sharing (clipboard)
+   ========================= */
+export const getQuoteShare = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid quote id.");
+  }
+
+  const quote = await Quote.findById(id)
+    .select(
+      [
+        "quoteNumber",
+        "status",
+        "createdAt",
+        "deliveryCharge",
+        "extraFee",
+        "totalPrice",
+        "requestedItems",
+        "user",
+      ].join(" ")
+    )
+    .populate("user", "name email")
+    .populate("requestedItems.product", "name");
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Quote share data retrieved.",
+    data: quote,
+  });
 });
 
 /* =========================
@@ -347,8 +403,18 @@ export const getQuotes = asyncHandler(async (req, res) => {
   const [total, quotes] = await Promise.all([
     Quote.countDocuments(filter),
     Quote.find(filter)
+      .select(
+        [
+          "quoteNumber",
+          "status",
+          "createdAt",
+          "totalPrice",
+          "requestedItems.qty",
+          "user",
+          "order",
+        ].join(" ")
+      )
       .populate("user", "name email")
-      .populate("requestedItems.product", "sku")
       // optional: show order number in admin list
       .populate("order", "orderNumber status")
       .sort({ createdAt: -1 })

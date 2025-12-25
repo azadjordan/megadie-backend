@@ -7,14 +7,14 @@ import {
   getMyInvoices,
   getInvoiceById,
   getInvoicePDF,
-} from "../controllers/invoiceUserController.js";
+} from "../controllers/invoiceController.js";
 
 // Admin-only endpoints
 import {
   getInvoices,
   updateInvoice,
   deleteInvoice,
-  createInvoiceForOrder,
+  createInvoiceFromOrder,
 } from "../controllers/invoiceAdminController.js";
 
 const router = express.Router();
@@ -27,14 +27,12 @@ router.get("/:id/pdf", protect, getInvoicePDF);
 router.get("/:id", protect, getInvoiceById);
 
 /* ----- Admin mutate ----- */
+router.post("/from-order/:orderId", protect, admin, createInvoiceFromOrder);
 router.put("/:id", protect, admin, updateInvoice);
 router.delete("/:id", protect, admin, deleteInvoice);
 
 /* ----- Admin list (filters + pagination) ----- */
 router.get("/", protect, admin, getInvoices);
 
-/* ----- Admin create-from-order (canonical) ----- */
-// POST /api/invoices/from-order/:orderId
-router.post("/from-order/:orderId", protect, admin, createInvoiceForOrder);
 
 export default router;

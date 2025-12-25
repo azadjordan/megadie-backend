@@ -1,7 +1,10 @@
-// megadie-backend/controllers/invoiceUserController.js
+// megadie-backend/controllers/invoiceController.js
+import React from "react";
 import mongoose from "mongoose";
+import { renderToStream } from "@react-pdf/renderer";
 import Invoice from "../models/invoiceModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
+import InvoicePDF from "../utils/InvoicePDF.js";
 
 /* -----------------------
    Small helpers
@@ -221,12 +224,97 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
 });
 
 /**
- * @desc    Get invoice PDF (NOT IMPLEMENTED YET)
+ * @desc    Get invoice PDF (owner OR admin)
  * @route   GET /api/invoices/:id/pdf
- * @access  Private (owner or admin) — route uses protect
+ * @access  Private (owner or admin)
  */
-export const getInvoicePDF = asyncHandler(async (_req, res) => {
-  res.status(501).json({
-    message: "Invoice PDF is handled elsewhere (not implemented here yet).",
-  });
+export const getInvoicePDF = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid invoice id.");
+  }
+
+  // Auth probe first
+  const authProbe = await Invoice.findById(id).select("user").lean();
+  if (!authProbe) {
+    res.status(404);
+    throw new Error("Invoice not found.");
+  }
+
+  const ownerId = String(authProbe.user);
+  const requesterId = String(req.user?._id);
+
+  if (!isAdminUser(req) && ownerId !== requesterId) {
+    res.status(403);
+    throw new Error("Not authorized to view this invoice.");
+  }
+
+  const invoice = await Invoice.findById(id)
+    .select(
+      [
+        "invoiceNumber",
+        "status",
+        "amountMinor",
+        "currency",
+        "minorUnitFactor",
+        "paidTotalMinor",
+        "balanceDueMinor",
+        "paymentStatus",
+        "dueDate",
+        "createdAt",
+        "user",
+        "order",
+      ].join(" ")
+    )
+    .populate({
+      path: "user",
+      select: "name email",
+    })
+    .populate({
+      path: "order",
+      select: [
+        "orderNumber",
+        "orderItems",
+        "deliveryCharge",
+        "extraFee",
+        "createdAt",
+      ].join(" "),
+      populate: {
+        path: "orderItems.product",
+        select: "name",
+      },
+    })
+    .populate({
+      path: "payments",
+      options: { sort: { paymentDate: -1, createdAt: -1 } },
+      select: [
+        "amountMinor",
+        "paymentMethod",
+        "paymentDate",
+        "reference",
+        "receivedBy",
+        "createdAt",
+      ].join(" "),
+    })
+    .lean();
+
+  if (!invoice) {
+    res.status(404);
+    throw new Error("Invoice not found.");
+  }
+
+  const pdfStream = await renderToStream(
+    React.createElement(InvoicePDF, { invoice, order: invoice.order })
+  );
+
+  const fileName = invoice.invoiceNumber
+    ? `invoice-${invoice.invoiceNumber}.pdf`
+    : `invoice-${invoice._id}.pdf`;
+
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `inline; filename=${fileName}`);
+  pdfStream.pipe(res);
 });
+
