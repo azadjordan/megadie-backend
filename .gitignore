@@ -36,3 +36,6 @@ coverage/
 
 # Ignore seeders folder
 seeders/
+
+# Ignore scripts folder
+scripts/

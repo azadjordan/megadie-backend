@@ -52,10 +52,10 @@ const slotSchema = new mongoose.Schema(
 // Unique within a store
 slotSchema.index({ store: 1, unit: 1, position: 1 }, { unique: true });
 
-// Auto-generate label like “A1”
+// Auto-generate label like “A1-AE1”
 slotSchema.pre("validate", function (next) {
-  if (this.unit && this.position != null) {
-    this.label = `${this.unit}${this.position}`;
+  if (this.store && this.unit && this.position != null) {
+    this.label = `${this.unit}${this.position}-${this.store}`;
   }
   next();
 });

@@ -1,4 +1,4 @@
-// models/orderModel.js
+// models/orderModel.js (MVP Clean)
 import mongoose from "mongoose";
 import crypto from "crypto";
 
@@ -20,11 +20,10 @@ const orderSchema = new mongoose.Schema(
     user:        { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User", index: true },
     orderNumber: { type: String, required: true, unique: true, index: true },
 
-    // ✅ One-to-one optional link to Quote (temporary link until Delivered)
-    // - Used to: (1) delete quote when order becomes Delivered, (2) unlink quote if order is deleted/cancelled
+    // link to quote (optional, 1:1 when exists)
     quote: { type: mongoose.Schema.Types.ObjectId, ref: "Quote", default: null },
 
-    // One-to-one optional link to Invoice
+    // optional invoice link
     invoice: { type: mongoose.Schema.Types.ObjectId, ref: "Invoice", default: null },
 
     orderItems: {
@@ -50,27 +49,18 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Minimal allocation state for UI (source of truth is OrderAllocation docs)
+    allocationStatus: {
+      type: String,
+      enum: ["Unallocated", "PartiallyAllocated", "Allocated"],
+      default: "Unallocated",
+      index: true,
+    },
+    allocatedAt: { type: Date },
+
     clientToAdminNote: { type: String },
     adminToAdminNote:  { type: String },
     adminToClientNote: { type: String },
-
-    /* ---- Stock deduction state (single source of truth) ---- */
-    stockDeducted: { type: Boolean, default: false }, // true => stock currently deducted
-
-    /* ---- Applied picks snapshot (used for exact reversal) ---- */
-    deliveredPicks: [
-      {
-        product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
-        sku:     { type: String, required: true }, // snapshot for audit/UX even if product.sku changes
-        slot:    { type: mongoose.Schema.Types.ObjectId, ref: "Slot", required: true },
-        qty:     { type: Number, required: true, min: 1 },
-        at:      { type: Date, default: Date.now },
-      },
-    ],
-
-    /* ---- Optional audit timestamps ---- */
-    appliedAt:  { type: Date },
-    reversedAt: { type: Date },
   },
   { timestamps: true }
 );
@@ -79,40 +69,26 @@ const orderSchema = new mongoose.Schema(
 orderSchema.virtual("isDelivered").get(function () {
   return this.status === "Delivered";
 });
-// Backward-compat: expose old name if any legacy code reads it
-orderSchema.virtual("stockUpdated").get(function () {
-  return this.stockDeducted;
-});
-orderSchema.virtual("invoiceGenerated").get(function () {
-  return !!this.invoice;
-});
-// ✅ For UI / logic convenience
 orderSchema.virtual("isFromQuote").get(function () {
   return !!this.quote;
 });
 
-/* ========== Validators & Business Rules ========== */
-// Allow invoice link while Processing, Delivered, or Cancelled
+/* ========== Validators ========== */
+// Invoice allowed for any status you had (keep it)
 orderSchema.path("invoice").validate(function (val) {
   if (!val) return true;
   return ["Processing", "Delivered", "Cancelled"].includes(this.status);
 }, "Invoice can only be attached for Processing, Delivered, or Cancelled orders.");
 
-// ✅ Allow quote link while Processing or Cancelled.
-// - Processing: normal flow (order created from quote)
-// - Cancelled: keep link so you can unlink the quote when deleting/cancelling the order
-// - Delivered: you plan to hard-delete the quote and unlink it at delivery time,
-//   so we intentionally disallow attaching a quote while Delivered.
+// Quote allowed only while Processing/Cancelled (same logic you had)
 orderSchema.path("quote").validate(function (val) {
   if (!val) return true;
   return ["Processing", "Cancelled"].includes(this.status);
 }, "Quote can only be attached for Processing or Cancelled orders.");
 
 /* ========== Hooks ========== */
-// Generate order number & compute totals; stamp deliveredAt when first delivered
 orderSchema.pre("validate", function (next) {
   try {
-    // ORD-YYMMDD-XXXXXX
     if (!this.orderNumber) {
       const now = new Date();
       const yy = String(now.getFullYear()).slice(-2);
@@ -122,14 +98,12 @@ orderSchema.pre("validate", function (next) {
       this.orderNumber = `ORD-${yy}${mm}${dd}-${randomHex}`;
     }
 
-    // Recompute line totals & grand total
     let itemsSum = 0;
     this.orderItems = (this.orderItems || []).map((it) => {
       const unit = typeof it.unitPrice === "number" ? it.unitPrice : 0;
       const qty  = typeof it.qty === "number" ? it.qty : 0;
       const lineTotal = Math.max(0, unit * qty);
       itemsSum += lineTotal;
-
       const base = typeof it.toObject === "function" ? it.toObject() : it;
       return { ...base, lineTotal };
     });
@@ -138,7 +112,6 @@ orderSchema.pre("validate", function (next) {
     const extra    = this.extraFee || 0;
     this.totalPrice = Math.max(0, itemsSum + delivery + extra);
 
-    // Stamp deliveredAt once when moving to Delivered
     if (this.status === "Delivered" && !this.deliveredAt) {
       this.deliveredAt = new Date();
     }
@@ -153,27 +126,18 @@ orderSchema.pre("validate", function (next) {
 orderSchema.set("toJSON", {
   virtuals: true,
   versionKey: false,
-  transform: (_doc, ret) => {
-    // Keep Mongo canonical id for all clients
-    // Add friendly alias for UI/frameworks that prefer `id`
-    ret.id = ret._id;
-    return ret;
-  },
+  transform: (_doc, ret) => { ret.id = ret._id; return ret; },
 });
 
 orderSchema.set("toObject", {
   virtuals: true,
   versionKey: false,
-  transform: (_doc, ret) => {
-    ret.id = ret._id;
-    return ret;
-  },
+  transform: (_doc, ret) => { ret.id = ret._id; return ret; },
 });
 
 /* ========== Indexes ========== */
 orderSchema.index({ user: 1, createdAt: -1 });
 
-// ✅ Enforce 1:1 between Order and Quote (only when quote != null)
 orderSchema.index(
   { quote: 1 },
   { unique: true, partialFilterExpression: { quote: { $exists: true, $ne: null } } }

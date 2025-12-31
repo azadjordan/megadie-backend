@@ -1,4 +1,4 @@
-// models/quoteModel.js
+// models/quoteModel.js (MVP additions + availabilityCheckedAt)
 import mongoose from "mongoose";
 import crypto from "crypto";
 
@@ -7,26 +7,22 @@ import crypto from "crypto";
    ========================= */
 const requestedItemSchema = new mongoose.Schema(
   {
-    product: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Product",
-      required: true,
-    },
+    product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
 
-    // ✅ Admin UI needs to allow qty = 0 (do NOT force min 1)
-    qty: {
-      type: Number,
-      required: true,
-      default: 0,
-      min: [0, "Quantity must be at least 0"],
-    },
+    // ✅ Admin UI needs to allow qty = 0
+    qty: { type: Number, required: true, default: 0, min: [0, "Quantity must be at least 0"] },
 
     // ✅ unitPrice can be 0
-    unitPrice: {
-      type: Number,
+    unitPrice: { type: Number, required: true, default: 0, min: [0, "Unit price cannot be negative"] },
+
+    /* ---- Availability snapshot (computed in controller/service, NOT here) ---- */
+    availableNow: { type: Number, required: true, default: 0, min: 0 },
+    shortage:     { type: Number, required: true, default: 0, min: 0 },
+    availabilityStatus: {
+      type: String,
+      enum: ["AVAILABLE", "PARTIAL", "SHORTAGE", "NOT_AVAILABLE"],
+      default: "NOT_AVAILABLE",
       required: true,
-      default: 0,
-      min: [0, "Unit price cannot be negative"],
     },
   },
   { _id: false }
@@ -37,30 +33,14 @@ const requestedItemSchema = new mongoose.Schema(
    ========================= */
 const quoteSchema = new mongoose.Schema(
   {
-    user: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "User",
-      required: true,
-      index: true,
-    },
+    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
     // ✅ Human-friendly quote identifier (like orderNumber)
     // Format: QTE-YYMMDD-XXXXXX
-    quoteNumber: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
+    quoteNumber: { type: String, required: true, unique: true, index: true },
 
     // ✅ Link to Order (set when admin creates an order from this quote)
-    // - When order is deleted/cancelled: set back to null so quote can be edited & converted again
-    // - When order is delivered: quote is hard-deleted, so this link disappears with the doc
-    order: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Order",
-      default: null,
-    },
+    order: { type: mongoose.Schema.Types.ObjectId, ref: "Order", default: null },
 
     requestedItems: {
       type: [requestedItemSchema],
@@ -71,26 +51,9 @@ const quoteSchema = new mongoose.Schema(
       required: true,
     },
 
-    deliveryCharge: {
-      type: Number,
-      required: true,
-      default: 0,
-      min: [0, "Delivery charge cannot be negative"],
-    },
-
-    extraFee: {
-      type: Number,
-      required: true,
-      default: 0,
-      min: [0, "Extra fee cannot be negative"],
-    },
-
-    totalPrice: {
-      type: Number,
-      required: true,
-      default: 0,
-      min: [0, "Total price cannot be negative"],
-    },
+    deliveryCharge: { type: Number, required: true, default: 0, min: [0, "Delivery charge cannot be negative"] },
+    extraFee:       { type: Number, required: true, default: 0, min: [0, "Extra fee cannot be negative"] },
+    totalPrice:     { type: Number, required: true, default: 0, min: [0, "Total price cannot be negative"] },
 
     status: {
       type: String,
@@ -99,9 +62,15 @@ const quoteSchema = new mongoose.Schema(
       index: true,
     },
 
-    adminToAdminNote: { type: String },
+    // ✅ Quote-level timestamp for the snapshot
+    // - set whenever you compute availability snapshot (on create, or admin refresh)
+    availabilityCheckedAt: { type: Date, default: null, index: true },
+
+    adminToAdminNote:  { type: String },
     clientToAdminNote: { type: String },
     adminToClientNote: { type: String },
+
+    clientQtyEditLocked: { type: Boolean, default: false },
   },
   {
     timestamps: true,
@@ -113,7 +82,6 @@ const quoteSchema = new mongoose.Schema(
 /* =========================
    Virtuals
    ========================= */
-// ✅ Derived flag for UI (no risk of drift)
 quoteSchema.virtual("isOrderCreated").get(function () {
   return Boolean(this.order);
 });
@@ -124,7 +92,6 @@ quoteSchema.virtual("isOrderCreated").get(function () {
 // Generate quote number before validation (required/unique)
 quoteSchema.pre("validate", function (next) {
   try {
-    // QTE-YYMMDD-XXXXXX
     if (!this.quoteNumber) {
       const now = new Date();
       const yy = String(now.getFullYear()).slice(-2);
@@ -139,7 +106,7 @@ quoteSchema.pre("validate", function (next) {
   }
 });
 
-// Recompute totals before save
+// Recompute totals before save (availability snapshot is computed elsewhere)
 quoteSchema.pre("save", function (next) {
   const items = this.requestedItems || [];
 
@@ -162,14 +129,13 @@ quoteSchema.pre("save", function (next) {
 quoteSchema.index({ user: 1, createdAt: -1 });
 
 // ✅ Enforce 1:1 between Quote and Order (only when order != null)
-// This is what enables: delete order -> set quote.order=null -> quote becomes reusable
 quoteSchema.index(
   { order: 1 },
   { unique: true, partialFilterExpression: { order: { $exists: true, $ne: null } } }
 );
 
 /* =========================
-   Model export (avoid recompile in dev)
+   Model export
    ========================= */
 const Quote = mongoose.models.Quote || mongoose.model("Quote", quoteSchema);
 export default Quote;
