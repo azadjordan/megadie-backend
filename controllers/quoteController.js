@@ -5,6 +5,9 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
 import { renderToStream } from "@react-pdf/renderer";
 import QuotePDF from "../utils/QuotePDF.js";
+import Product from "../models/productModel.js";
+import UserPrice from "../models/userPriceModel.js";
+import PriceRule from "../models/priceRuleModel.js";
 import User from "../models/userModel.js";
 import { getAvailabilityTotalsByProduct, getAvailabilityStatus } from "../utils/quoteAvailability.js";
 
@@ -76,6 +79,7 @@ const buildAcceptedShortageItems = (items, totalsMap) => {
     return {
       product: productId,
       qty: nextQty,
+      priceRule: it?.priceRule || null,
       unitPrice: Math.max(0, Number(it.unitPrice) || 0),
       availableNow,
       shortage: nextShortage,
@@ -331,8 +335,21 @@ export const createQuote = asyncHandler(async (req, res) => {
     seenProducts.add(key);
   }
 
-  // Compute availability snapshot (single aggregation for all products)
   const productIds = safeItems.map((it) => it.product);
+  const products = await Product.find({ _id: { $in: productIds } })
+    .select("_id priceRule")
+    .lean();
+
+  const priceRuleByProduct = new Map(
+    products.map((p) => [String(p._id), p.priceRule])
+  );
+
+  for (const it of safeItems) {
+    const priceRule = priceRuleByProduct.get(String(it.product));
+    it.priceRule = priceRule || null;
+  }
+
+  // Compute availability snapshot (single aggregation for all products)
   const totalsMap = await getAvailabilityTotalsByProduct(productIds);
 
   for (const it of safeItems) {
@@ -356,13 +373,14 @@ export const createQuote = asyncHandler(async (req, res) => {
     path: "requestedItems.product",
     select: "sku name",
   });
+  const sanitized = sanitizeQuoteForOwner(populated);
 
   res.setHeader("Location", `/api/quotes/${quote._id}`);
 
   res.status(201).json({
     success: true,
     message: "Quote created successfully.",
-    data: populated,
+    data: sanitized,
   });
 });
 
@@ -398,11 +416,12 @@ export const cancelQuoteByUser = asyncHandler(async (req, res) => {
 
   quote.status = "Cancelled";
   const updated = await quote.save();
+  const sanitized = sanitizeQuoteForOwner(updated);
 
   res.status(200).json({
     success: true,
     message: "Quote cancelled successfully.",
-    data: updated,
+    data: sanitized,
   });
 });
 
@@ -441,11 +460,12 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
 
   quote.status = "Confirmed";
   const updated = await quote.save();
+  const sanitized = sanitizeQuoteForOwner(updated);
 
   res.status(200).json({
     success: true,
     message: "Quote confirmed successfully.",
-    data: updated,
+    data: sanitized,
   });
 });
 
@@ -557,6 +577,7 @@ export const updateQuoteQuantitiesByUser = asyncHandler(async (req, res) => {
     return {
       product: existing.product,
       qty: nextQty,
+      priceRule: existing?.priceRule || null,
       unitPrice: Math.max(0, Number(existing.unitPrice) || 0),
       availableNow,
       shortage: nextShortage,
@@ -668,6 +689,7 @@ export const updateQuoteQuantitiesByAdmin = asyncHandler(async (req, res) => {
     return {
       product: existing.product,
       qty: nextQty,
+      priceRule: existing?.priceRule || null,
       unitPrice: Math.max(0, Number(existing.unitPrice) || 0),
       availableNow,
       shortage: nextShortage,
@@ -730,6 +752,7 @@ export const updateQuotePricingByAdmin = asyncHandler(async (req, res) => {
     return {
       product: existing.product,
       qty: Math.max(0, Number(existing.qty) || 0),
+      priceRule: existing?.priceRule || null,
       unitPrice,
       availableNow: Math.max(0, Number(existing.availableNow) || 0),
       shortage: Math.max(0, Number(existing.shortage) || 0),
@@ -761,6 +784,95 @@ export const updateQuotePricingByAdmin = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Pricing updated.",
+    data: populated,
+  });
+});
+
+/* =========================
+   POST /api/quotes/admin/:id/assign-user-prices
+   Private/Admin
+   Assign unit prices based on the user's price rules
+   ========================= */
+export const assignUserPricesByAdmin = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const quote = await Quote.findById(id);
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  ensureQuoteEditable(res, quote);
+
+  const items = quote.requestedItems || [];
+  if (!items.length) {
+    res.status(400);
+    throw new Error("Quote has no items.");
+  }
+
+  const missingRules = items.filter((it) => !it?.priceRule);
+  if (missingRules.length) {
+    res.status(409);
+    throw new Error(
+      "Some items are missing price rules. Refresh or recreate the quote."
+    );
+  }
+
+  const priceRules = Array.from(
+    new Set(items.map((it) => String(it.priceRule)))
+  );
+
+  if (!priceRules.length) {
+    res.status(400);
+    throw new Error("No price rules found on quote items.");
+  }
+
+  const userId = quote.user?._id || quote.user;
+
+  const [userPrices, ruleDefaults] = await Promise.all([
+    UserPrice.find({
+      user: userId,
+      priceRule: { $in: priceRules },
+    })
+      .select("priceRule unitPrice")
+      .lean(),
+    PriceRule.find({ code: { $in: priceRules } })
+      .select("code defaultPrice")
+      .lean(),
+  ]);
+
+  const priceByRule = new Map(userPrices.map((p) => [p.priceRule, p.unitPrice]));
+  const defaultByRule = new Map(
+    ruleDefaults.map((rule) => [rule.code, rule.defaultPrice])
+  );
+
+  quote.requestedItems = items.map((it) => {
+    const resolved = priceByRule.get(it.priceRule);
+    const fallback = defaultByRule.get(it.priceRule);
+    const unitPrice =
+      resolved == null
+        ? fallback == null
+          ? Math.max(0, Number(it.unitPrice) || 0)
+          : fallback
+        : resolved;
+
+    return {
+      product: it.product,
+      qty: Math.max(0, Number(it.qty) || 0),
+      priceRule: it.priceRule || null,
+      unitPrice: Math.max(0, Number(unitPrice) || 0),
+      availableNow: Math.max(0, Number(it.availableNow) || 0),
+      shortage: Math.max(0, Number(it.shortage) || 0),
+      availabilityStatus: it.availabilityStatus || "NOT_AVAILABLE",
+    };
+  });
+
+  await quote.save();
+
+  const populated = await populateAdminQuote(quote._id);
+  res.status(200).json({
+    success: true,
+    message: "User prices assigned.",
     data: populated,
   });
 });
@@ -898,6 +1010,7 @@ export const recheckQuoteAvailabilityByAdmin = asyncHandler(async (req, res) => 
     return {
       product: it.product,
       qty,
+      priceRule: it?.priceRule || null,
       unitPrice: Math.max(0, Number(it.unitPrice) || 0),
       availableNow,
       shortage,

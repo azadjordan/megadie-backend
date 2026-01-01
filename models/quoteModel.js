@@ -15,6 +15,9 @@ const requestedItemSchema = new mongoose.Schema(
     // ✅ unitPrice can be 0
     unitPrice: { type: Number, required: true, default: 0, min: [0, "Unit price cannot be negative"] },
 
+    // Pricing rule snapshot (admin-facing; populated from Product at creation)
+    priceRule: { type: String, trim: true, default: null },
+
     /* ---- Availability snapshot (computed in controller/service, NOT here) ---- */
     availableNow: { type: Number, required: true, default: 0, min: 0 },
     shortage:     { type: Number, required: true, default: 0, min: 0 },

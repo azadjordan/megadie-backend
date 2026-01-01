@@ -11,6 +11,7 @@ import {
   deleteUser,
   getUserById,
   updateUser,
+  updateUserPasswordByAdmin,
 
   forgotPassword,
   resetPassword,
@@ -35,6 +36,8 @@ router
 
 // Admin (protected)
 router.route("/").get(protect, admin, getUsers);
+
+router.put("/:id/password", protect, admin, updateUserPasswordByAdmin);
 
 router
   .route("/:id")

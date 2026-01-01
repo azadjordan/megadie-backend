@@ -390,6 +390,11 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
         throw new Error("Order not found.");
       }
 
+      if (order.status !== "Shipping") {
+        res.status(400);
+        throw new Error("Order must be Shipping before delivery.");
+      }
+
       const hasInvoice = !!order.invoice;
       const triesDeliveryCharge = Object.prototype.hasOwnProperty.call(
         body,

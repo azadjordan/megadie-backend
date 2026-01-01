@@ -1,6 +1,5 @@
 // models/userPriceModel.js
 import mongoose from "mongoose";
-import { PRICE_RULES } from "../constants.js";
 
 const userPriceSchema = new mongoose.Schema(
   {
@@ -10,12 +9,11 @@ const userPriceSchema = new mongoose.Schema(
       required: true,
     },
 
-    // Must match Product.priceRule and constants.PRICE_RULES
+    // Must match Product.priceRule and PriceRule.code
     priceRule: {
       type: String,
       required: true,
       trim: true,
-      enum: PRICE_RULES,      // ⬅️ tie to shared enum
     },
 
     unitPrice: {

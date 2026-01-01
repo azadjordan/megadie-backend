@@ -18,6 +18,7 @@ import {
   updateQuoteOwnerByAdmin,
   updateQuoteQuantitiesByAdmin,
   updateQuotePricingByAdmin,
+  assignUserPricesByAdmin,
   updateQuoteNotesByAdmin,
   updateQuoteStatusByAdmin,
   recheckQuoteAvailabilityByAdmin,
@@ -55,6 +56,12 @@ router.put(
   updateQuoteQuantitiesByAdmin
 );
 router.put("/admin/:id/pricing", protect, admin, updateQuotePricingByAdmin);
+router.post(
+  "/admin/:id/assign-user-prices",
+  protect,
+  admin,
+  assignUserPricesByAdmin
+);
 router.put("/admin/:id/notes", protect, admin, updateQuoteNotesByAdmin);
 router.put("/admin/:id/status", protect, admin, updateQuoteStatusByAdmin);
 router.put(

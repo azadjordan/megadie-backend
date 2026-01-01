@@ -422,3 +422,32 @@ export const updateUser = asyncHandler(async (req, res) => {
     throw err;
   }
 });
+
+/* =========================
+   PUT /api/users/:id/password
+   Private/Admin — Update user password
+   ========================= */
+export const updateUserPasswordByAdmin = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found.");
+  }
+
+  const password = String(req.body?.password || "");
+  if (password.length < 6) {
+    res.status(400);
+    throw new Error("Password must be at least 6 characters.");
+  }
+
+  user.password = password;
+  user.passwordResetTokenHash = undefined;
+  user.passwordResetExpires = undefined;
+  await user.save();
+
+  return res.status(200).json({
+    success: true,
+    message: "Password updated successfully.",
+  });
+});

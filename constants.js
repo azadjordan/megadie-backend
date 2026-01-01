@@ -69,12 +69,6 @@ export const VARIANTS = [
   "50 Pieces",
 ];
 
-export const PRICE_RULES = [
-  "RIB-GRO-25MM-100YD-PREM-ROLL",
-  "RIB-GRO-13MM-100YD-PREM-ROLL",
-  "RIB-SAT-25MM-100YD-SF-PREM-ROLL",
-  "RIB-SAT-13MM-100YD-SF-PREM-ROLL",
-];
 
 /** 
  * SLOT SYSTEM 

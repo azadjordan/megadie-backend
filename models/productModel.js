@@ -1,11 +1,10 @@
 import mongoose from "mongoose";
 import {
   PRODUCT_TYPES,
-  TAGS,            // ⬅️ global tag enum
+  TAGS,            // ??.?,? global tag enum
   SIZES,
   GRADES,
   VARIANTS,
-  PRICE_RULES,
   FINISHES,
 } from "../constants.js";
 
@@ -21,7 +20,7 @@ function sanitizeToken(value) {
 }
 
 /**
- * Mapping from verbose values → short SKU codes
+ * Mapping from verbose values ?+' short SKU codes
  * Only affects the `sku` field, NOT the human-facing `name`.
  */
 const SKU_MAP = {
@@ -43,7 +42,7 @@ const SKU_MAP = {
   variant: {
     "100 Yards": "100-YD",
     "150 Yards": "150-YD",
-    "35 Yards":  "35-YD",
+    "35 Yards": "35-YD",
     "50 Meters": "50-M",
     "50 Pieces": "50-PC",
   },
@@ -125,7 +124,6 @@ const productSchema = new mongoose.Schema(
 
     priceRule: {
       type: String,
-      enum: PRICE_RULES,
       required: true,
       index: true,
     },
@@ -133,7 +131,7 @@ const productSchema = new mongoose.Schema(
     color: { type: String, trim: true },
     catalogCode: { type: String, trim: true },
 
-    // 🔥 Universal global tags
+    // dY"? Universal global tags
     tags: {
       type: [String],
       default: [],

@@ -125,19 +125,45 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
       .populate({
         path: "order",
         // keep the card UI light + user-safe
-        select: "orderNumber status createdAt deliveredAt",
+        select: [
+          "orderNumber",
+          "status",
+          "createdAt",
+          "deliveredAt",
+          "orderItems",
+        ].join(" "),
+        populate: {
+          path: "orderItems.product",
+          select: "name",
+        },
       })
       .lean(),
   ]);
 
   const pages = Math.max(1, Math.ceil(total / limit));
 
+  const safeItems = (items || []).map((inv) => {
+    if (!inv?.order?.orderItems) return inv;
+    const orderItems = inv.order.orderItems.map((it) => ({
+      product: it?.product || it?.product?._id || null,
+      sku: it?.sku,
+      qty: it?.qty,
+    }));
+    return {
+      ...inv,
+      order: {
+        ...inv.order,
+        orderItems,
+      },
+    };
+  });
+
   res.json({
     page,
     pages,
     total,
     limit,
-    items,
+    items: safeItems,
   });
 });
 

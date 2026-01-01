@@ -2,6 +2,7 @@
 import mongoose from "mongoose";
 import Product from "../models/productModel.js";
 import FilterConfig from "../models/filterConfigModel.js";
+import PriceRule from "../models/priceRuleModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 
 /* =========================
@@ -46,6 +47,22 @@ const parsePagination = (req, { defaultLimit = 48, maxLimit = 100 } = {}) => {
   );
   const skip = (page - 1) * limit;
   return { page, limit, skip };
+};
+
+const ensureValidPriceRule = async (res, rawRule) => {
+  const rule = String(rawRule || "").trim();
+  if (!rule) {
+    res.status(400);
+    throw new Error("priceRule is required.");
+  }
+
+  const exists = await PriceRule.findOne({ code: rule }).select("_id").lean();
+  if (!exists) {
+    res.status(400);
+    throw new Error("priceRule must match an existing price rule.");
+  }
+
+  return rule;
 };
 
 /**
@@ -184,7 +201,10 @@ const buildProductFilter = async (req, { forAdmin = false } = {}) => {
    Create a new product
    ========================= */
 export const createProduct = asyncHandler(async (req, res) => {
-  const product = new Product(req.body); // model handles validation + sku + name
+  const payload = { ...(req.body || {}) };
+  payload.priceRule = await ensureValidPriceRule(res, payload.priceRule);
+
+  const product = new Product(payload); // model handles validation + sku + name
   const created = await product.save();
 
   res.setHeader("Location", `/api/products/${created._id}`);
@@ -335,7 +355,10 @@ export const updateProduct = asyncHandler(async (req, res) => {
     throw new Error("Product not found.");
   }
 
-  const incoming = req.body || {};
+  const incoming = { ...(req.body || {}) };
+  if (Object.prototype.hasOwnProperty.call(incoming, "priceRule")) {
+    incoming.priceRule = await ensureValidPriceRule(res, incoming.priceRule);
+  }
   const changes = {};
 
   Object.keys(incoming).forEach((key) => {

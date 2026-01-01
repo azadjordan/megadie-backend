@@ -44,7 +44,7 @@ const orderSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["Processing", "Delivered", "Cancelled"],
+      enum: ["Processing", "Shipping", "Delivered", "Cancelled"],
       default: "Processing",
       index: true,
     },
@@ -77,14 +77,14 @@ orderSchema.virtual("isFromQuote").get(function () {
 // Invoice allowed for any status you had (keep it)
 orderSchema.path("invoice").validate(function (val) {
   if (!val) return true;
-  return ["Processing", "Delivered", "Cancelled"].includes(this.status);
-}, "Invoice can only be attached for Processing, Delivered, or Cancelled orders.");
+  return ["Processing", "Shipping", "Delivered", "Cancelled"].includes(this.status);
+}, "Invoice can only be attached for Processing, Shipping, Delivered, or Cancelled orders.");
 
 // Quote allowed only while Processing/Cancelled (same logic you had)
 orderSchema.path("quote").validate(function (val) {
   if (!val) return true;
-  return ["Processing", "Cancelled"].includes(this.status);
-}, "Quote can only be attached for Processing or Cancelled orders.");
+  return ["Processing", "Shipping", "Cancelled"].includes(this.status);
+}, "Quote can only be attached for Processing, Shipping, or Cancelled orders.");
 
 /* ========== Hooks ========== */
 orderSchema.pre("validate", function (next) {
