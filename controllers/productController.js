@@ -230,6 +230,11 @@ export const getProducts = asyncHandler(async (req, res) => {
 
   const filter = await buildProductFilter(req, { forAdmin: false })
   const sort = buildSort(productType)
+  const featuredFirst = String(req.query.featuredFirst || "").toLowerCase()
+  const sortWithFeatured =
+    featuredFirst === "true" || featuredFirst === "1"
+      ? { isFeatured: -1, featuredRank: 1, ...sort }
+      : sort
 
   const [total, products] = await Promise.all([
     Product.countDocuments(filter),
@@ -237,7 +242,7 @@ export const getProducts = asyncHandler(async (req, res) => {
       .select(
         "name productType category size color catalogCode variant grade finish packingUnit images sku priceRule sort"
       )
-      .sort(sort)
+      .sort(sortWithFeatured)
       .skip(skip)
       .limit(limit)
       .lean(),

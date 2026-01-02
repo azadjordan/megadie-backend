@@ -158,6 +158,8 @@ const productSchema = new mongoose.Schema(
 
     moq: { type: Number, default: 1, min: 1 },
     isAvailable: { type: Boolean, default: true },
+    isFeatured: { type: Boolean, default: false },
+    featuredRank: { type: Number, default: 0 },
 
     images: {
       type: [String],
@@ -234,6 +236,7 @@ productSchema.index({ sort: 1, productType: 1 });
 productSchema.index({ createdAt: -1, _id: 1 });
 productSchema.index({ size: 1 });
 productSchema.index({ catalogCode: 1 });
+productSchema.index({ productType: 1, isFeatured: 1, featuredRank: 1, createdAt: -1 });
 
 const Product = mongoose.model("Product", productSchema);
 export default Product;
