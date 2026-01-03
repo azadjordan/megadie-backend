@@ -18,7 +18,5 @@ const priceRuleSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-priceRuleSchema.index({ code: 1 }, { unique: true });
-
 const PriceRule = mongoose.model("PriceRule", priceRuleSchema);
 export default PriceRule;
