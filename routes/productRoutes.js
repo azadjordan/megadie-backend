@@ -1,12 +1,11 @@
 import express from "express";
+import { getProducts, getProductById } from "../controllers/productController.js";
 import {
-  getProducts,
   getProductsAdmin,     // ✅ Admin: list all with filters/pagination
-  getProductById,
   createProduct,
   updateProduct,
   deleteProduct,
-} from "../controllers/productController.js";
+} from "../controllers/productAdminController.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
