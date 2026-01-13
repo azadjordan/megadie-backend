@@ -9,10 +9,20 @@ const orderAllocationSchema = new mongoose.Schema(
 
     qty: { type: Number, required: true, min: 1 },
 
+    status: {
+      type: String,
+      enum: ["Reserved", "Deducted", "Cancelled"],
+      default: "Reserved",
+      index: true,
+    },
+    deductedAt: { type: Date },
+    deductedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+
     // Who applied the allocation (admin user)
     by:   { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
 
     note: { type: String, trim: true },
+    expiresAt: { type: Date },
   },
   { timestamps: true }
 );
@@ -25,6 +35,7 @@ orderAllocationSchema.index({ order: 1, product: 1, slot: 1 }, { unique: true })
 orderAllocationSchema.index({ order: 1, createdAt: -1 });
 orderAllocationSchema.index({ product: 1, createdAt: -1 });
 orderAllocationSchema.index({ slot: 1, createdAt: -1 });
+orderAllocationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 orderAllocationSchema.set("toJSON", {
   versionKey: false,

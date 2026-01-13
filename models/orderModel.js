@@ -57,6 +57,7 @@ const orderSchema = new mongoose.Schema(
       index: true,
     },
     allocatedAt: { type: Date },
+    stockFinalizedAt: { type: Date },
 
     clientToAdminNote: { type: String },
     adminToAdminNote:  { type: String },
@@ -89,7 +90,7 @@ orderSchema.path("quote").validate(function (val) {
 /* ========== Hooks ========== */
 orderSchema.pre("validate", function (next) {
   try {
-    if (!this.orderNumber) {
+    if (this.isNew && !this.orderNumber) {
       const now = new Date();
       const yy = String(now.getFullYear()).slice(-2);
       const mm = String(now.getMonth() + 1).padStart(2, "0");

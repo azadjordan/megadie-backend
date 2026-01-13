@@ -84,6 +84,11 @@ export const registerUser = asyncHandler(async (req, res) => {
   const email = (req.body.email || "").trim().toLowerCase();
   const { password } = req.body;
 
+  if (!phoneNumber) {
+    res.status(400);
+    throw new Error("Phone number is required.");
+  }
+
   const userExists = await User.findOne({ email });
   if (userExists) {
     res.status(409);
@@ -284,7 +289,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
 export const getUsers = asyncHandler(async (req, res) => {
   const page = Math.max(1, toInt(req.query.page, 1));
   const limitRaw = toInt(req.query.limit, 5);
-  const limit = Math.min(Math.max(1, limitRaw), 5);
+  const limit = Math.min(Math.max(1, limitRaw), 100);
   const skip = (page - 1) * limit;
 
   const search = req.query.search ? String(req.query.search).trim() : "";

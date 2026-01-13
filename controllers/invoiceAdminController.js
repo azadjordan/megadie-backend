@@ -3,7 +3,6 @@ import asyncHandler from "../middleware/asyncHandler.js";
 
 import Invoice from "../models/invoiceModel.js";
 import Order from "../models/orderModel.js";
-import User from "../models/userModel.js";
 import Payment from "../models/paymentModel.js";
 
 /* -----------------------
@@ -54,6 +53,86 @@ function pick(obj, keys) {
 }
 
 /**
+ * @desc    Admin: invoice balance summary (unpaid + overdue totals)
+ * @route   GET /api/invoices/summary
+ * @access  Private/Admin
+ */
+export const getInvoicesSummary = asyncHandler(async (req, res) => {
+  const now = new Date();
+
+  const baseMatch = {
+    status: "Issued",
+    paymentStatus: { $ne: "Paid" },
+    balanceDueMinor: { $gt: 0 },
+  };
+
+  const search = req.query.search ? String(req.query.search).trim() : "";
+  const user = req.query.user ? String(req.query.user) : null;
+
+  if (user) {
+    if (!mongoose.Types.ObjectId.isValid(user)) {
+      res.status(400);
+      throw new Error("Invalid user filter.");
+    }
+    baseMatch.user = new mongoose.Types.ObjectId(user);
+  }
+
+  if (search) {
+    const invoiceNumberRegex = new RegExp(escapeRegex(search), "i");
+    const orders = await Order.find({ orderNumber: invoiceNumberRegex })
+      .select("_id")
+      .limit(200)
+      .lean();
+
+    const orderIds = orders.map((o) => o._id);
+
+    baseMatch.$or = [
+      { invoiceNumber: invoiceNumberRegex },
+      ...(orderIds.length ? [{ order: { $in: orderIds } }] : []),
+    ];
+  }
+
+  const [summary] = await Invoice.aggregate([
+    { $match: baseMatch },
+    {
+      $facet: {
+        unpaid: [
+          {
+            $group: {
+              _id: null,
+              total: { $sum: "$balanceDueMinor" },
+              count: { $sum: 1 },
+            },
+          },
+        ],
+        overdue: [
+          { $match: { dueDate: { $lt: now, $type: "date" } } },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: "$balanceDueMinor" },
+              count: { $sum: 1 },
+            },
+          },
+        ],
+      },
+    },
+  ]);
+
+  const unpaid = summary?.unpaid?.[0] || {};
+  const overdue = summary?.overdue?.[0] || {};
+
+  res.json({
+    unpaidTotalMinor: unpaid.total || 0,
+    unpaidCount: unpaid.count || 0,
+    overdueTotalMinor: overdue.total || 0,
+    overdueCount: overdue.count || 0,
+    currency: "AED",
+    minorUnitFactor: 100,
+  });
+});
+
+/**
  * @desc    Admin: list invoices (filters + pagination)
  * @route   GET /api/invoices
  * @access  Private/Admin
@@ -66,7 +145,7 @@ function pick(obj, keys) {
  * - overdue=true (dueDate < now + balanceDueMinor > 0 + status != Cancelled)
  * - user=<userId>  (filter by client)
  * - from=YYYY-MM-DD, to=YYYY-MM-DD (createdAt range)
- * - search=<string> (invoiceNumber/orderNumber/user name/email, case-insensitive)
+ * - search=<string> (invoiceNumber/orderNumber, case-insensitive)
  * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use createdAt)
  * - q=<string> (legacy alias for search)
  */
@@ -120,7 +199,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
       res.status(400);
       throw new Error("Invalid user filter.");
     }
-    filter.user = user;
+    filter.user = new mongoose.Types.ObjectId(user);
   }
 
   if (from || to) {
@@ -142,29 +221,19 @@ export const getInvoices = asyncHandler(async (req, res) => {
   // - invoiceNumber matches q (case-insensitive)
   // - OR invoices whose linked order.orderNumber matches q
   let orderIdsForSearch = [];
-  let userIdsForSearch = [];
   if (qText) {
     // invoiceNumber regex
     const invoiceNumberRegex = new RegExp(escapeRegex(qText), "i");
-
-    const [orders, users] = await Promise.all([
-      Order.find({ orderNumber: invoiceNumberRegex })
-        .select("_id")
-        .limit(200)
-        .lean(),
-      User.find({ $or: [{ name: invoiceNumberRegex }, { email: invoiceNumberRegex }] })
-        .select("_id")
-        .limit(200)
-        .lean(),
-    ]);
+    const orders = await Order.find({ orderNumber: invoiceNumberRegex })
+      .select("_id")
+      .limit(200)
+      .lean();
 
     orderIdsForSearch = orders.map((o) => o._id);
-    userIdsForSearch = users.map((u) => u._id);
 
     filter.$or = [
       { invoiceNumber: invoiceNumberRegex },
       ...(orderIdsForSearch.length ? [{ order: { $in: orderIdsForSearch } }] : []),
-      ...(userIdsForSearch.length ? [{ user: { $in: userIdsForSearch } }] : []),
     ];
   }
 
@@ -385,11 +454,9 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
       throw new Error("Order not found.");
     }
 
-    if (!["Shipping", "Delivered"].includes(order.status)) {
+    if (order.status !== "Processing") {
       res.status(400);
-      throw new Error(
-        "Invoices can only be created for Shipping or Delivered orders."
-      );
+      throw new Error("Invoices can only be created for Processing orders.");
     }
 
     if (order.invoice) {

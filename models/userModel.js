@@ -15,7 +15,13 @@ const userSchema = new mongoose.Schema(
     },
     password: { type: String, required: true },
     isAdmin: { type: Boolean, required: true, default: false },
-    phoneNumber: { type: String, trim: true },
+    phoneNumber: {
+      type: String,
+      trim: true,
+      required: function requiredPhoneOnCreate() {
+        return this.isNew;
+      },
+    },
     address: { type: String, trim: true },
 
     /* =========================

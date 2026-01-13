@@ -6,6 +6,7 @@ import {
   GRADES,
   VARIANTS,
   FINISHES,
+  PACKING_UNITS,
 } from "../constants.js";
 
 /** Normalize for SKU */
@@ -53,6 +54,7 @@ const SKU_MAP = {
   // optional: packing units if you ever want them shorter
   packingUnit: {
     Roll: "ROLL",
+    Pack: "PACK",
     // "Box": "BOX",
     // ...
   },
@@ -152,7 +154,7 @@ const productSchema = new mongoose.Schema(
 
     finish: { type: String, enum: FINISHES, trim: true },
 
-    packingUnit: { type: String, trim: true },
+    packingUnit: { type: String, enum: PACKING_UNITS, required: true, trim: true },
 
     sku: { type: String, required: true, unique: true, trim: true },
 
@@ -248,4 +250,5 @@ export const ENUMS = {
   GRADES,
   VARIANTS,
   FINISHES,
+  PACKING_UNITS,
 };

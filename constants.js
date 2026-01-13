@@ -69,6 +69,8 @@ export const VARIANTS = [
   "50 Pieces",
 ];
 
+export const PACKING_UNITS = ["Roll", "Pack"];
+
 
 /** 
  * SLOT SYSTEM 

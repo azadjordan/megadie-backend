@@ -6,6 +6,7 @@ import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
 import Product from "../models/productModel.js";
 import User from "../models/userModel.js";
+import OrderAllocation from "../models/orderAllocationModel.js";
 
 /* =========================
    Helpers (pagination)
@@ -51,12 +52,13 @@ const sanitizeOrderForClient = (order) => {
 /* =========================
    DELETE /api/orders/:id
    Private/Admin
-   Delete order only if status === "Cancelled".
-   Cascades: delete dependent invoice + its dependent payments (if any).
+   Delete order only if status === "Cancelled" and no allocations exist.
+   Block deletion if stock was finalized.
+   Cascades: delete linked quote, invoice, invoice payments, and allocations.
    ========================= */
 export const deleteOrder = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id).select(
-    "_id status invoice quote"
+    "_id status invoice quote stockFinalizedAt"
   );
   if (!order) {
     res.status(404);
@@ -77,12 +79,36 @@ export const deleteOrder = asyncHandler(async (req, res) => {
     );
   }
 
-  let paymentsDeleted = 0;
-  let invoiceDeleted = false;
+  if (order.stockFinalizedAt) {
+    res.status(409);
+    throw new Error("Stock finalized orders cannot be deleted.");
+  }
+
+  const hasBlockingAllocations = await OrderAllocation.exists({
+    order: order._id,
+    $or: [
+      { status: { $in: ["Reserved", "Deducted"] } },
+      { status: { $exists: false } },
+    ],
+  });
+  if (hasBlockingAllocations) {
+    res.status(409);
+    throw new Error("Remove allocations before deleting this order.");
+  }
 
   const session = await mongoose.startSession();
+  let invoiceDeleted = false;
+  let paymentsDeleted = 0;
+  let quoteDeleted = false;
+  let allocationsDeleted = 0;
   try {
     await session.withTransaction(async () => {
+      const allocationResult = await OrderAllocation.deleteMany(
+        { order: order._id },
+        { session }
+      );
+      allocationsDeleted = allocationResult?.deletedCount || 0;
+
       if (order.invoice) {
         const inv = await Invoice.findById(order.invoice).session(session);
         if (inv) {
@@ -90,29 +116,31 @@ export const deleteOrder = asyncHandler(async (req, res) => {
             { invoice: inv._id },
             { session }
           );
-          paymentsDeleted = payDel.deletedCount || 0;
+          paymentsDeleted = payDel?.deletedCount || 0;
           await inv.deleteOne({ session });
           invoiceDeleted = true;
         }
       }
+
       if (order.quote) {
-        await Quote.findByIdAndUpdate(
-          order.quote,
-          { $set: { order: null } },
-          { session }
-        );
+        const quote = await Quote.findById(order.quote).session(session);
+        if (quote) {
+          await quote.deleteOne({ session });
+          quoteDeleted = true;
+        }
       }
       await order.deleteOne({ session });
     });
 
     res.status(200).json({
       success: true,
-      message: invoiceDeleted
-        ? `Order deleted successfully. Associated invoice deleted and ${paymentsDeleted} payment(s) removed.`
-        : "Order deleted successfully.",
+      message:
+        "Order deleted. Linked quote, invoice, payments, and allocations removed.",
       orderId: order._id,
       invoiceDeleted,
       paymentsDeleted,
+      quoteDeleted,
+      allocationsDeleted,
     });
   } finally {
     session.endSession();
@@ -127,6 +155,7 @@ export const deleteOrder = asyncHandler(async (req, res) => {
 export const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id)
     .populate("user", "name email")
+    .populate("quote", "quoteNumber")
     .populate("invoice", "invoiceNumber")
     .populate("orderItems.product", "name sku size");
 
@@ -402,6 +431,11 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
       );
       const triesExtraFee = Object.prototype.hasOwnProperty.call(body, "extraFee");
 
+      if (!hasInvoice) {
+        res.status(409);
+        throw new Error("Invoice required before delivery.");
+      }
+
       if (hasInvoice && (triesDeliveryCharge || triesExtraFee)) {
         res.status(400);
         throw new Error(
@@ -443,6 +477,62 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
         throw new Error("Delivered by is required.");
       }
       order.deliveredBy = deliveredBy;
+
+      if (!order.stockFinalizedAt) {
+        const allocations = await OrderAllocation.find({ order: order._id })
+          .select("product qty status")
+          .lean()
+          .session(session);
+
+        if (!allocations.length) {
+          res.status(409);
+          throw new Error(
+            "Order has no allocations. Finalize allocations before delivery."
+          );
+        }
+
+        const hasReservedAllocations = allocations.some(
+          (row) => !row.status || row.status === "Reserved"
+        );
+        if (hasReservedAllocations) {
+          res.status(409);
+          throw new Error(
+            "Order has reserved allocations. Finalize allocations before delivery."
+          );
+        }
+
+        const deductedTotals = new Map();
+        for (const row of allocations) {
+          if (row.status !== "Deducted") continue;
+          const key = String(row.product);
+          deductedTotals.set(
+            key,
+            (deductedTotals.get(key) || 0) + (Number(row.qty) || 0)
+          );
+        }
+
+        for (const item of order.orderItems || []) {
+          const productId = String(item.product);
+          const orderedQty = Number(item.qty) || 0;
+          const deductedQty = deductedTotals.get(productId) || 0;
+          if (deductedQty !== orderedQty) {
+            res.status(409);
+            throw new Error(
+              "Order allocations are not finalized. Finalize allocations before delivery."
+            );
+          }
+        }
+
+        order.stockFinalizedAt = new Date();
+        const expiresAt = new Date(
+          order.stockFinalizedAt.getTime() + 60 * 24 * 60 * 60 * 1000
+        );
+        await OrderAllocation.updateMany(
+          { order: order._id },
+          { $set: { expiresAt } },
+          { session }
+        );
+      }
 
       if (order.quote) {
         const quote = await Quote.findById(order.quote).session(session);
@@ -528,6 +618,50 @@ export const updateOrder = asyncHandler(async (req, res) => {
 
   const prevStatus = order.status;
   const nextStatus = req.body.status ?? prevStatus;
+
+  if (
+    Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
+    nextStatus === "Cancelled"
+  ) {
+    if (prevStatus === "Delivered") {
+      res.status(409);
+      throw new Error("Delivered orders cannot be cancelled.");
+    }
+    if (order.stockFinalizedAt) {
+      res.status(409);
+      throw new Error("Stock finalized orders cannot be cancelled.");
+    }
+
+    const hasBlockingAllocations = await OrderAllocation.exists({
+      order: order._id,
+      $or: [
+        { status: { $in: ["Reserved", "Deducted"] } },
+        { status: { $exists: false } },
+      ],
+    });
+    if (hasBlockingAllocations) {
+      res.status(409);
+      throw new Error("Remove allocations before cancelling this order.");
+    }
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
+    nextStatus === "Shipping" &&
+    prevStatus !== "Processing"
+  ) {
+    res.status(409);
+    throw new Error("Only Processing orders can be set to Shipping.");
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
+    nextStatus === "Shipping" &&
+    !order.invoice
+  ) {
+    res.status(400);
+    throw new Error("Invoice required before setting Shipping status.");
+  }
 
   // Delivered stamp (first time)
   if (nextStatus === "Delivered" && !order.deliveredAt) {

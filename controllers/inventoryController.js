@@ -1,4 +1,5 @@
 // controllers/inventoryController.js
+import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Product from "../models/productModel.js";
 import SlotItem from "../models/slotItemModel.js";
@@ -73,7 +74,12 @@ export const getInventoryProducts = asyncHandler(async (req, res) => {
         from: allocationsCollection,
         let: { productId: "$_id" },
         pipeline: [
-          { $match: { $expr: { $eq: ["$product", "$$productId"] } } },
+          {
+            $match: {
+              $expr: { $eq: ["$product", "$$productId"] },
+              $or: [{ status: "Reserved" }, { status: { $exists: false } }],
+            },
+          },
           { $group: { _id: "$product", allocated: { $sum: "$qty" } } },
         ],
         as: "allocAgg",
@@ -225,5 +231,230 @@ export const getInventoryProducts = asyncHandler(async (req, res) => {
       hasNext: page < totalPages,
     },
     data: rows,
+  });
+});
+
+/* =========================
+   GET /api/inventory/allocations
+   Private/Admin
+   Returns allocation ledger across orders
+   Query: status, orderStatus, q, orderId, productId, slotId
+   ========================= */
+export const getInventoryAllocations = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req, {
+    defaultLimit: 25,
+    maxLimit: 100,
+  });
+
+  const statusRaw = String(req.query.status || "").trim();
+  const orderStatusRaw = String(req.query.orderStatus || "").trim();
+  const searchRaw = String(req.query.q || "").trim();
+  const orderId = String(req.query.orderId || "").trim();
+  const productId = String(req.query.productId || "").trim();
+  const slotId = String(req.query.slotId || "").trim();
+
+  const match = {};
+  if (statusRaw && statusRaw !== "all") {
+    const normalized = statusRaw.toLowerCase();
+    if (normalized === "reserved") {
+      match.$or = [{ status: "Reserved" }, { status: { $exists: false } }];
+    } else if (normalized === "deducted") {
+      match.status = "Deducted";
+    } else if (normalized === "cancelled" || normalized === "canceled") {
+      match.status = "Cancelled";
+    } else {
+      res.status(400);
+      throw new Error("Invalid allocation status filter.");
+    }
+  }
+
+  if (orderId) {
+    if (!mongoose.isValidObjectId(orderId)) {
+      res.status(400);
+      throw new Error("Invalid order id.");
+    }
+    match.order = new mongoose.Types.ObjectId(orderId);
+  }
+
+  if (productId) {
+    if (!mongoose.isValidObjectId(productId)) {
+      res.status(400);
+      throw new Error("Invalid product id.");
+    }
+    match.product = new mongoose.Types.ObjectId(productId);
+  }
+
+  if (slotId) {
+    if (!mongoose.isValidObjectId(slotId)) {
+      res.status(400);
+      throw new Error("Invalid slot id.");
+    }
+    match.slot = new mongoose.Types.ObjectId(slotId);
+  }
+
+  const pipeline = [
+    { $match: match },
+    {
+      $lookup: {
+        from: "orders",
+        localField: "order",
+        foreignField: "_id",
+        as: "order",
+      },
+    },
+    { $unwind: "$order" },
+    {
+      $lookup: {
+        from: "users",
+        localField: "order.user",
+        foreignField: "_id",
+        as: "customer",
+      },
+    },
+    { $unwind: { path: "$customer", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "products",
+        localField: "product",
+        foreignField: "_id",
+        as: "product",
+      },
+    },
+    { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "slots",
+        localField: "slot",
+        foreignField: "_id",
+        as: "slot",
+      },
+    },
+    { $unwind: { path: "$slot", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "users",
+        localField: "by",
+        foreignField: "_id",
+        as: "by",
+      },
+    },
+    { $unwind: { path: "$by", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "users",
+        localField: "deductedBy",
+        foreignField: "_id",
+        as: "deductedBy",
+      },
+    },
+    { $unwind: { path: "$deductedBy", preserveNullAndEmptyArrays: true } },
+  ];
+
+  if (orderStatusRaw && orderStatusRaw !== "all") {
+    const allowedStatuses = new Set(
+      ["Processing", "Shipping", "Delivered", "Cancelled"]
+    );
+    if (!allowedStatuses.has(orderStatusRaw)) {
+      res.status(400);
+      throw new Error("Invalid order status filter.");
+    }
+    pipeline.push({ $match: { "order.status": orderStatusRaw } });
+  }
+
+  if (searchRaw) {
+    const regex = new RegExp(escapeRegex(searchRaw), "i");
+    pipeline.push({
+      $match: {
+        $or: [
+          { "order.orderNumber": regex },
+          { "product.name": regex },
+          { "product.sku": regex },
+          { "slot.label": regex },
+          { "slot.store": regex },
+          { "customer.name": regex },
+          { "customer.email": regex },
+        ],
+      },
+    });
+  }
+
+  pipeline.push(
+    { $sort: { createdAt: -1, _id: -1 } },
+    {
+      $facet: {
+        rows: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              _id: 0,
+              id: "$_id",
+              qty: 1,
+              status: { $ifNull: ["$status", "Reserved"] },
+              note: 1,
+              expiresAt: 1,
+              createdAt: 1,
+              updatedAt: 1,
+              deductedAt: 1,
+              order: {
+                id: "$order._id",
+                orderNumber: "$order.orderNumber",
+                status: "$order.status",
+                allocationStatus: "$order.allocationStatus",
+                invoice: "$order.invoice",
+                stockFinalizedAt: "$order.stockFinalizedAt",
+                user: {
+                  id: "$customer._id",
+                  name: "$customer.name",
+                  email: "$customer.email",
+                },
+              },
+              product: {
+                id: "$product._id",
+                name: "$product.name",
+                sku: "$product.sku",
+              },
+              slot: {
+                id: "$slot._id",
+                label: "$slot.label",
+                store: "$slot.store",
+                unit: "$slot.unit",
+                position: "$slot.position",
+              },
+              by: {
+                id: "$by._id",
+                name: "$by.name",
+                email: "$by.email",
+              },
+              deductedBy: {
+                id: "$deductedBy._id",
+                name: "$deductedBy.name",
+                email: "$deductedBy.email",
+              },
+            },
+          },
+        ],
+        total: [{ $count: "count" }],
+      },
+    }
+  );
+
+  const [result] = await OrderAllocation.aggregate(pipeline);
+  const rows = result?.rows ?? [];
+  const total = result?.total?.[0]?.count ?? 0;
+  const totalPages = Math.max(Math.ceil(total / limit), 1);
+
+  res.status(200).json({
+    success: true,
+    message: "Inventory allocations retrieved successfully.",
+    data: rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
   });
 });

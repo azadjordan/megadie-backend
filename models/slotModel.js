@@ -37,6 +37,16 @@ const slotSchema = new mongoose.Schema(
       required: true,
       min: 0,
     },
+    occupiedCbm: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    fillPercent: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
     isActive: {
       type: Boolean,
       default: true,

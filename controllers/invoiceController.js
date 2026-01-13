@@ -168,6 +168,62 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
 });
 
 /**
+ * @desc    Get my invoice balance summary (unpaid + overdue totals)
+ * @route   GET /api/invoices/my/summary
+ * @access  Private (owner)
+ */
+export const getMyInvoiceSummary = asyncHandler(async (req, res) => {
+  const userId = req.user?._id;
+  const now = new Date();
+
+  const baseMatch = {
+    user: userId,
+    status: "Issued",
+    paymentStatus: { $ne: "Paid" },
+    balanceDueMinor: { $gt: 0 },
+  };
+
+  const [summary] = await Invoice.aggregate([
+    { $match: baseMatch },
+    {
+      $facet: {
+        unpaid: [
+          {
+            $group: {
+              _id: null,
+              total: { $sum: "$balanceDueMinor" },
+              count: { $sum: 1 },
+            },
+          },
+        ],
+        overdue: [
+          { $match: { dueDate: { $lt: now } } },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: "$balanceDueMinor" },
+              count: { $sum: 1 },
+            },
+          },
+        ],
+      },
+    },
+  ]);
+
+  const unpaid = summary?.unpaid?.[0] || {};
+  const overdue = summary?.overdue?.[0] || {};
+
+  res.json({
+    unpaidTotalMinor: unpaid.total || 0,
+    unpaidCount: unpaid.count || 0,
+    overdueTotalMinor: overdue.total || 0,
+    overdueCount: overdue.count || 0,
+    currency: "AED",
+    minorUnitFactor: 100,
+  });
+});
+
+/**
  * @desc    Get invoice details (owner OR admin)
  * @route   GET /api/invoices/:id
  * @access  Private (owner or admin)

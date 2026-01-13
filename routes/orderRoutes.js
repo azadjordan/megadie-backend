@@ -13,6 +13,7 @@ import {
   getOrderAllocations,
   upsertOrderAllocation,
   deleteOrderAllocation,
+  finalizeOrderAllocations,
 } from "../controllers/orderAllocationController.js";
 import { protect, admin } from "../middleware/authMiddleware.js";
 
@@ -33,6 +34,7 @@ router.put("/:id/deliver", protect, admin, markOrderDelivered);
 // Order allocations (admin)
 router.get("/:id/allocations", protect, admin, getOrderAllocations);
 router.post("/:id/allocations", protect, admin, upsertOrderAllocation);
+router.post("/:id/allocations/finalize", protect, admin, finalizeOrderAllocations);
 router.delete("/:id/allocations/:allocationId", protect, admin, deleteOrderAllocation);
 
 // ✅ Get / Update / Delete order by ID

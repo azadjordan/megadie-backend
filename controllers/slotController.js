@@ -1,6 +1,9 @@
 // controllers/slotController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import Slot from "../models/slotModel.js";
+import SlotItem from "../models/slotItemModel.js";
+import { SLOT_UNITS } from "../constants.js";
+import { computeFillPercent } from "../utils/slotOccupancy.js";
 
 /* =========================
    GET /api/slots
@@ -9,7 +12,16 @@ import Slot from "../models/slotModel.js";
    Pagination: page, limit
    ========================= */
 export const getSlots = asyncHandler(async (req, res) => {
-  const { store, unit, isActive, q, page = 1, limit = 50 } = req.query;
+  const {
+    store,
+    unit,
+    isActive,
+    q,
+    sort,
+    order,
+    page = 1,
+    limit = 50,
+  } = req.query;
 
   const filter = {};
   if (store) filter.store = String(store).trim();
@@ -22,12 +34,19 @@ export const getSlots = asyncHandler(async (req, res) => {
     filter.$or = [{ label: regex }, { store: regex }, { unit: regex }, { notes: regex }];
   }
 
+  const allowedSorts = new Set(["occupiedCbm", "fillPercent"]);
+  const sortField = allowedSorts.has(sort) ? sort : null;
+  const sortDir = String(order).toLowerCase() === "asc" ? 1 : -1;
+  const sortSpec = sortField
+    ? { [sortField]: sortDir, store: 1, unit: 1, position: 1 }
+    : { store: 1, unit: 1, position: 1 };
+
   const pageNum = Math.max(parseInt(page, 10) || 1, 1);
   const perPage = Math.min(Math.max(parseInt(limit, 10) || 50, 1), 200);
 
   const total = await Slot.countDocuments(filter);
   const data = await Slot.find(filter)
-    .sort({ store: 1, unit: 1, position: 1 })
+    .sort(sortSpec)
     .skip((pageNum - 1) * perPage)
     .limit(perPage);
 
@@ -39,6 +58,106 @@ export const getSlots = asyncHandler(async (req, res) => {
     limit: perPage,
     total,
     data,
+  });
+});
+
+/* =========================
+   GET /api/slots/summary
+   Private/Admin
+   Summary counts for slots
+   ========================= */
+export const getSlotSummary = asyncHandler(async (req, res) => {
+  const { store, unit, isActive, q } = req.query;
+
+  const filter = {};
+  if (store) filter.store = String(store).trim();
+  if (unit) filter.unit = String(unit).trim();
+  if (typeof isActive !== "undefined") {
+    filter.isActive = String(isActive).toLowerCase() === "true";
+  }
+  if (q && q.trim()) {
+    const regex = { $regex: q.trim(), $options: "i" };
+    filter.$or = [{ label: regex }, { store: regex }, { unit: regex }, { notes: regex }];
+  }
+
+  const totalSlots = await Slot.countDocuments(filter);
+  let inactiveSlots = 0;
+  if (Object.prototype.hasOwnProperty.call(filter, "isActive")) {
+    inactiveSlots = filter.isActive === false ? totalSlots : 0;
+  } else {
+    inactiveSlots = await Slot.countDocuments({ ...filter, isActive: false });
+  }
+  const storesFilteredRaw = await Slot.distinct("store", filter);
+  const storesFiltered = storesFilteredRaw
+    .map((value) => String(value || "").trim())
+    .filter(Boolean);
+  const storesRaw = await Slot.distinct("store");
+  const stores = storesRaw
+    .map((value) => String(value || "").trim())
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
+  res.status(200).json({
+    success: true,
+    message: "Slot summary retrieved successfully.",
+    data: {
+      totalSlots,
+      inactiveSlots,
+      storesCount: storesFiltered.length,
+      stores,
+      units: SLOT_UNITS,
+    },
+  });
+});
+
+/* =========================
+   POST /api/slots/occupancy/rebuild
+   Private/Admin
+   Optional query: store
+   ========================= */
+export const rebuildSlotOccupancy = asyncHandler(async (req, res) => {
+  const store = req.query.store ? String(req.query.store).trim() : "";
+  const filter = {};
+  if (store) filter.store = store;
+
+  const slots = await Slot.find(filter).select("_id cbm").lean();
+  if (!slots.length) {
+    res.status(200).json({
+      success: true,
+      message: "No slots found to rebuild.",
+      data: { updated: 0, store: store || null },
+    });
+    return;
+  }
+
+  const slotIds = slots.map((slot) => slot._id);
+  const occRows = await SlotItem.aggregate([
+    { $match: { slot: { $in: slotIds } } },
+    { $group: { _id: "$slot", occupiedCbm: { $sum: "$cbm" } } },
+  ]);
+  const occBySlot = new Map(
+    occRows.map((row) => [String(row._id), row.occupiedCbm || 0])
+  );
+
+  const updates = slots.map((slot) => {
+    const occupied = occBySlot.get(String(slot._id)) || 0;
+    const fillPercent = computeFillPercent(slot.cbm, occupied);
+    return {
+      updateOne: {
+        filter: { _id: slot._id },
+        update: { $set: { occupiedCbm: occupied, fillPercent } },
+      },
+    };
+  });
+
+  if (updates.length) {
+    await Slot.bulkWrite(updates);
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Slot occupancy rebuilt successfully.",
+    data: { updated: updates.length, store: store || null },
   });
 });
 

@@ -5,6 +5,7 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 // Owner + shared (admin OR owner) endpoints
 import {
   getMyInvoices,
+  getMyInvoiceSummary,
   getInvoiceById,
   getInvoicePDF,
 } from "../controllers/invoiceController.js";
@@ -12,6 +13,7 @@ import {
 // Admin-only endpoints
 import {
   getInvoices,
+  getInvoicesSummary,
   updateInvoice,
   deleteInvoice,
   createInvoiceFromOrder,
@@ -21,6 +23,10 @@ const router = express.Router();
 
 /* ----- Owner endpoints ----- */
 router.get("/my", protect, getMyInvoices);
+router.get("/my/summary", protect, getMyInvoiceSummary);
+
+/* ----- Admin summary ----- */
+router.get("/summary", protect, admin, getInvoicesSummary);
 
 /* ----- Admin or Owner ----- */
 router.get("/:id/pdf", protect, getInvoicePDF);

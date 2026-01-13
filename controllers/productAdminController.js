@@ -7,6 +7,16 @@ import {
   parsePagination,
   buildSort,
 } from "./productController.js";
+import {
+  PRODUCT_TYPES,
+  TAGS,
+  SIZES,
+  GRADES,
+  VARIANTS,
+  FINISHES,
+  PACKING_UNITS,
+  ribbonCatalogCodes,
+} from "../constants.js";
 
 const ensureValidPriceRule = async (res, rawRule) => {
   const rule = String(rawRule || "").trim();
@@ -23,6 +33,28 @@ const ensureValidPriceRule = async (res, rawRule) => {
 
   return rule;
 };
+
+/* =========================
+   GET /api/products/meta
+   Private/Admin
+   Returns product enums and catalog codes for create/edit UI
+   ========================= */
+export const getProductMeta = asyncHandler(async (_req, res) => {
+  res.status(200).json({
+    success: true,
+    message: "Product meta retrieved successfully.",
+    data: {
+      productTypes: PRODUCT_TYPES,
+      sizes: SIZES,
+      grades: GRADES,
+      variants: VARIANTS,
+      finishes: FINISHES,
+      packingUnits: PACKING_UNITS,
+      tags: TAGS,
+      ribbonCatalogCodes,
+    },
+  });
+});
 
 /* =========================
    POST /api/products
