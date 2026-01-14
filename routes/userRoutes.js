@@ -12,6 +12,7 @@ import {
   getUserById,
   updateUser,
   updateUserPasswordByAdmin,
+  updateUserApprovalStatus,
 
   forgotPassword,
   resetPassword,
@@ -38,6 +39,7 @@ router
 router.route("/").get(protect, admin, getUsers);
 
 router.put("/:id/password", protect, admin, updateUserPasswordByAdmin);
+router.put("/:id/approval", protect, admin, updateUserApprovalStatus);
 
 router
   .route("/:id")

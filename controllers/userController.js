@@ -19,6 +19,35 @@ function escapeRegex(text = "") {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function applyApprovalStatus(user, nextStatus, actorId) {
+  if (!["Pending", "Approved", "Rejected"].includes(nextStatus)) {
+    throw new Error("Invalid approval status.");
+  }
+
+  user.approvalStatus = nextStatus;
+
+  if (nextStatus === "Approved") {
+    user.approvedAt = new Date();
+    user.approvedBy = actorId || user.approvedBy;
+    user.rejectedAt = null;
+    user.rejectedBy = null;
+    return;
+  }
+
+  if (nextStatus === "Rejected") {
+    user.rejectedAt = new Date();
+    user.rejectedBy = actorId || user.rejectedBy;
+    user.approvedAt = null;
+    user.approvedBy = null;
+    return;
+  }
+
+  user.approvedAt = null;
+  user.approvedBy = null;
+  user.rejectedAt = null;
+  user.rejectedBy = null;
+}
+
 const USER_SORT_MAP = {
   newest: { createdAt: -1 },
   oldest: { createdAt: 1 },
@@ -35,6 +64,10 @@ export const authUser = asyncHandler(async (req, res) => {
 
   const user = await User.findOne({ email });
   if (user && (await user.matchPassword(password))) {
+    if (!user.isAdmin && user.approvalStatus === "Rejected") {
+      res.status(403);
+      throw new Error("Your account was rejected. Contact support.");
+    }
     generateToken(res, user._id);
     return res.status(200).json({
       success: true,
@@ -46,6 +79,7 @@ export const authUser = asyncHandler(async (req, res) => {
         email: user.email,
         isAdmin: user.isAdmin,
         address: user.address,
+        approvalStatus: user.approvalStatus,
       },
     });
   }
@@ -95,23 +129,29 @@ export const registerUser = asyncHandler(async (req, res) => {
     throw new Error("Email already registered.");
   }
 
-  const user = await User.create({ name, phoneNumber, email, password });
+  const user = await User.create({
+    name,
+    phoneNumber,
+    email,
+    password,
+    approvalStatus: "Pending",
+  });
 
   if (!user) {
     res.status(400);
     throw new Error("Invalid user data.");
   }
 
-  generateToken(res, user._id);
   return res.status(201).json({
     success: true,
-    message: "User registered successfully.",
+    message: "Registration submitted. Await admin approval.",
     data: {
       _id: user._id,
       name: user.name,
       phoneNumber: user.phoneNumber,
       email: user.email,
       isAdmin: user.isAdmin,
+      approvalStatus: user.approvalStatus,
     },
   });
 });
@@ -246,6 +286,7 @@ export const getUserProfile = asyncHandler(async (req, res) => {
       phoneNumber: user.phoneNumber,
       address: user.address,
       isAdmin: user.isAdmin,
+      approvalStatus: user.approvalStatus,
     },
   });
 });
@@ -278,6 +319,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
       phoneNumber: updatedUser.phoneNumber,
       address: updatedUser.address,
       isAdmin: updatedUser.isAdmin,
+      approvalStatus: updatedUser.approvalStatus,
     },
   });
 });
@@ -294,26 +336,49 @@ export const getUsers = asyncHandler(async (req, res) => {
 
   const search = req.query.search ? String(req.query.search).trim() : "";
   const role = req.query.role ? String(req.query.role) : "all";
-  const sortKey = req.query.sort ? String(req.query.sort) : "name";
+  const approvalStatus = req.query.approvalStatus
+    ? String(req.query.approvalStatus)
+    : "all";
+  const sortKey = req.query.sort ? String(req.query.sort) : "newest";
   const sort = USER_SORT_MAP[sortKey] || USER_SORT_MAP.newest;
 
   const filter = {};
+  const andFilters = [];
   if (role === "admin") filter.isAdmin = true;
   if (role === "user") filter.isAdmin = false;
 
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i");
-    filter.$or = [
-      { name: regex },
-      { email: regex },
-      { phoneNumber: regex },
-    ];
+    andFilters.push({
+      $or: [{ name: regex }, { email: regex }, { phoneNumber: regex }],
+    });
+  }
+
+  if (approvalStatus !== "all") {
+    if (!["Pending", "Approved", "Rejected"].includes(approvalStatus)) {
+      res.status(400);
+      throw new Error("Invalid approvalStatus filter.");
+    }
+    if (approvalStatus === "Approved") {
+      andFilters.push({
+        $or: [
+          { approvalStatus: "Approved" },
+          { approvalStatus: { $exists: false } },
+        ],
+      });
+    } else {
+      andFilters.push({ approvalStatus });
+    }
+  }
+
+  if (andFilters.length) {
+    filter.$and = andFilters;
   }
 
   const [total, users] = await Promise.all([
     User.countDocuments(filter),
     User.find(filter)
-      .select("name email phoneNumber address isAdmin createdAt")
+      .select("name email phoneNumber address isAdmin approvalStatus createdAt")
       .sort(sort)
       .skip(skip)
       .limit(limit)
@@ -405,6 +470,21 @@ export const updateUser = asyncHandler(async (req, res) => {
   if (req.body.address != null) user.address = req.body.address;
   if (req.body.isAdmin != null) user.isAdmin = Boolean(req.body.isAdmin);
 
+  if (req.body.approvalStatus != null) {
+    const nextStatus = String(req.body.approvalStatus);
+    try {
+      applyApprovalStatus(user, nextStatus, req.user?._id);
+    } catch (err) {
+      res.status(400);
+      throw err;
+    }
+  }
+
+  if (user.isAdmin) {
+    user.approvalStatus = "Approved";
+    if (!user.approvedAt) user.approvedAt = new Date();
+  }
+
   try {
     const updatedUser = await user.save();
     return res.status(200).json({
@@ -417,6 +497,7 @@ export const updateUser = asyncHandler(async (req, res) => {
         phoneNumber: updatedUser.phoneNumber,
         address: updatedUser.address,
         isAdmin: updatedUser.isAdmin,
+        approvalStatus: updatedUser.approvalStatus,
       },
     });
   } catch (err) {
@@ -426,6 +507,50 @@ export const updateUser = asyncHandler(async (req, res) => {
     }
     throw err;
   }
+});
+
+/* =========================
+   PUT /api/users/:id/approval
+   Private/Admin – Update user approval status
+   ========================= */
+export const updateUserApprovalStatus = asyncHandler(async (req, res) => {
+  const user = await User.findById(req.params.id);
+
+  if (!user) {
+    res.status(404);
+    throw new Error("User not found.");
+  }
+
+  const nextStatus = String(req.body?.approvalStatus || "");
+  if (!nextStatus) {
+    res.status(400);
+    throw new Error("Approval status is required.");
+  }
+
+  if (user.isAdmin) {
+    user.approvalStatus = "Approved";
+    if (!user.approvedAt) user.approvedAt = new Date();
+  } else {
+    try {
+      applyApprovalStatus(user, nextStatus, req.user?._id);
+    } catch (err) {
+      res.status(400);
+      throw err;
+    }
+  }
+
+  const updatedUser = await user.save();
+
+  return res.status(200).json({
+    success: true,
+    message: "Approval status updated successfully.",
+    data: {
+      _id: updatedUser._id,
+      approvalStatus: updatedUser.approvalStatus,
+      approvedAt: updatedUser.approvedAt,
+      rejectedAt: updatedUser.rejectedAt,
+    },
+  });
 });
 
 /* =========================

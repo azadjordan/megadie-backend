@@ -10,11 +10,11 @@ import {
   deleteFilterConfig,      // DELETE /api/filter-configs/:productType
 } from "../controllers/filterConfigController.js";
 
-import { protect, admin } from "../middleware/authMiddleware.js";
+import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 
 // Public
-router.get("/", getFilterConfigs);
-router.get("/:productType", getFilterConfig);
+router.get("/", protect, requireApproved, getFilterConfigs);
+router.get("/:productType", protect, requireApproved, getFilterConfig);
 
 // Admin
 router.post("/:productType", protect, admin, createFilterConfig);   // create only (409 if exists)

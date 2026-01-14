@@ -7,12 +7,12 @@ import {
   updateProduct,
   deleteProduct,
 } from "../controllers/productAdminController.js";
-import { protect, admin } from "../middleware/authMiddleware.js";
+import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
 // ✅ Public route for shop (filtered by users)
-router.route("/").get(getProducts);
+router.route("/").get(protect, requireApproved, getProducts);
 
 // ✅ Admin route for backend product management
 router.route("/admin").get(protect, admin, getProductsAdmin);
@@ -26,7 +26,7 @@ router.route("/").post(protect, admin, createProduct);
 // ✅ Individual product routes
 router
   .route("/:id")
-  .get(getProductById)
+  .get(protect, requireApproved, getProductById)
   .put(protect, admin, updateProduct)
   .delete(protect, admin, deleteProduct);
 

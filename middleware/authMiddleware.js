@@ -39,4 +39,22 @@ const admin = (req, res, next) => {
     }
 };
 
-export { protect, admin };
+const requireApproved = (req, res, next) => {
+    if (!req.user) {
+        res.status(401);
+        throw new Error("Not authorized");
+    }
+
+    if (req.user.isAdmin) return next();
+
+    const status = req.user.approvalStatus;
+    if (!status || status === "Approved") return next();
+
+    res.status(403);
+    if (status === "Rejected") {
+        throw new Error("Account rejected.");
+    }
+    throw new Error("Account pending approval.");
+};
+
+export { protect, admin, requireApproved };
