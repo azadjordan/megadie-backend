@@ -1,5 +1,6 @@
 // models/priceRuleModel.js
 import mongoose from "mongoose";
+import { PRODUCT_TYPES } from "../constants.js";
 
 const priceRuleSchema = new mongoose.Schema(
   {
@@ -8,6 +9,13 @@ const priceRuleSchema = new mongoose.Schema(
       required: true,
       trim: true,
       unique: true,
+    },
+    productType: {
+      type: String,
+      enum: PRODUCT_TYPES,
+      required: true,
+      index: true,
+      trim: true,
     },
     defaultPrice: {
       type: Number,

@@ -7,6 +7,8 @@ import {
   VARIANTS,
   FINISHES,
   PACKING_UNITS,
+  ribbonCatalogCodes,
+  SKU_TOKENS,
 } from "../constants.js";
 
 /** Normalize for SKU */
@@ -24,48 +26,13 @@ function sanitizeToken(value) {
  * Mapping from verbose values ?+' short SKU codes
  * Only affects the `sku` field, NOT the human-facing `name`.
  */
-const SKU_MAP = {
-  productType: {
-    Ribbon: "RIB",
-    "Creasing Matrix": "CRM",
-    "Double Face Tape": "DFT",
-  },
-  categoryKey: {
-    grosgrain: "GRO",
-    satin: "SAT",
-    // add more if you add categories
-  },
-  grade: {
-    Premium: "PREM",
-    Standard: "STD",
-    Economy: "ECO",
-  },
-  variant: {
-    "100 Yards": "100-YD",
-    "150 Yards": "150-YD",
-    "35 Yards": "35-YD",
-    "50 Meters": "50-M",
-    "50 Pieces": "50-PC",
-  },
-  finish: {
-    "Single Face": "SF",
-    "Double Face": "DF",
-  },
-  // optional: packing units if you ever want them shorter
-  packingUnit: {
-    Roll: "ROLL",
-    Pack: "PACK",
-    // "Box": "BOX",
-    // ...
-  },
-};
-
 /** Helper: get a short code for a field, then sanitize it for SKU */
 function skuToken(field, value) {
   if (!value) return "";
-  const map = SKU_MAP[field];
-  const raw = map?.[value] || value;
-  return sanitizeToken(raw);
+  const map = SKU_TOKENS[field];
+  const mapped = map?.[value];
+  if (mapped) return mapped;
+  return sanitizeToken(value);
 }
 
 /** Build SKU + Name */
@@ -84,7 +51,7 @@ async function buildSkuForDoc(doc) {
   const parts = [
     skuToken("productType", doc.productType), // RIB
     skuToken("categoryKey", cat.key),         // SAT / GRO
-    sanitizeToken(doc.size),                  // 25-MM
+    skuToken("size", doc.size),               // 25-MM
     sanitizeToken(doc.color),                 // OFFWHITE
     sanitizeToken(doc.catalogCode),           // 000
     skuToken("variant", doc.variant),         // 100-YD
@@ -131,7 +98,19 @@ const productSchema = new mongoose.Schema(
     },
 
     color: { type: String, trim: true },
-    catalogCode: { type: String, trim: true },
+    catalogCode: {
+      type: String,
+      trim: true,
+      validate: {
+        validator: function (value) {
+          if (!value) return true;
+          if (this.productType !== "Ribbon") return false;
+          return ribbonCatalogCodes.includes(String(value));
+        },
+        message:
+          "Catalog code must be a valid Ribbon catalog code from the approved list.",
+      },
+    },
 
     // dY"? Universal global tags
     tags: {

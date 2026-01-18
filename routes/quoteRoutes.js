@@ -22,6 +22,7 @@ import {
   updateQuoteNotesByAdmin,
   updateQuoteStatusByAdmin,
   recheckQuoteAvailabilityByAdmin,
+  getQuoteStockCheckByAdmin,
 } from "../controllers/quoteController.js";
 
 import { protect, admin } from "../middleware/authMiddleware.js";
@@ -69,6 +70,12 @@ router.put(
   protect,
   admin,
   recheckQuoteAvailabilityByAdmin
+);
+router.get(
+  "/admin/:id/stock-check",
+  protect,
+  admin,
+  getQuoteStockCheckByAdmin
 );
 
 // Get / delete a specific quote

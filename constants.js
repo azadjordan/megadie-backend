@@ -41,11 +41,16 @@ export const TAGS = [
  */
 export const SIZES = [
   "25 mm", "20 mm", "13 mm",
-  "0.4 × 1.5 mm", "0.5 × 1.5 mm", "0.5 × 1.6 mm",
+ "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 9mm", "0.5 × 1.6 - 11mm",
   "6 mm", "9 mm", "10 mm", "12 mm",
 ];
 
-export const GRADES = ["Premium", "Standard", "Economy"];
+export const GRADES = [
+  "A",
+  "A+",
+  "B",
+  "B-",
+  ];
 
 /**
  * Generic finish / construction axis:
@@ -62,14 +67,70 @@ export const FINISHES = [
 ];
 
 export const VARIANTS = [
-  "100 Yards",
-  "150 Yards",
-  "35 Yards",
-  "50 Meters",
-  "50 Pieces",
+  "Plastic Core",
+  "Paper Core",
+
 ];
 
-export const PACKING_UNITS = ["Roll", "Pack"];
+export const PACKING_UNITS = [
+  "100yd Roll",
+  "35yd Roll",
+  "150yd Bundle",
+  "48pc Pack",
+  "50pc Pack",
+  "50m Roll",
+];
+
+// SKU short tokens for enum-like fields (others are sanitized directly)
+export const SKU_TOKENS = {
+  productType: {
+    Ribbon: "RIB",
+    "Creasing Matrix": "CRM",
+    "Double Face Tape": "DFT",
+  },
+  categoryKey: {
+    grosgrain: "GRO",
+    satin: "SAT",
+    acrylic: "ACR",
+    paper: "PAP",
+    pro: "PRO",
+    plus: "PLUS",
+  },
+  size: {
+    "25 mm": "25-MM",
+    "20 mm": "20-MM",
+    "13 mm": "13-MM",
+    "0.4 x 1.5 - 11mm": "04X15X11MM",
+    "0.4 x 1.5 - 9mm": "04X15X9MM",
+    "0.5 x 1.6 - 11mm": "05X16X11MM",
+    "6 mm": "6-MM",
+    "9 mm": "9-MM",
+    "10 mm": "10-MM",
+    "12 mm": "12-MM",
+  },
+  grade: {
+    A: "A",
+    "A+": "A+",
+    B: "B",
+    "B-": "B-",
+  },
+  variant: {
+    "Plastic Core": "PLC",
+    "Paper Core": "PPC",
+  },
+  finish: {
+    "Single Face": "SF",
+    "Double Face": "DF",
+  },
+  packingUnit: {
+    "100yd Roll": "100YD-ROLL",
+    "35yd Roll": "35YD-ROLL",
+    "150yd Bundle": "150YD-BUNDLE",
+    "48pc Pack": "48PC-PACK",
+    "50pc Pack": "50PC-PACK",
+    "50m Roll": "50M-ROLL",
+  },
+};
 
 
 /** 

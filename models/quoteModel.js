@@ -8,6 +8,7 @@ import crypto from "crypto";
 const requestedItemSchema = new mongoose.Schema(
   {
     product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
+    productName: { type: String, trim: true },
 
     // ✅ Admin UI needs to allow qty = 0
     qty: { type: Number, required: true, default: 0, min: [0, "Quantity must be at least 0"] },

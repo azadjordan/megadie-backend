@@ -8,6 +8,7 @@ import {
   getMyInvoiceSummary,
   getInvoiceById,
   getInvoicePDF,
+  getStatementOfAccountPDF,
 } from "../controllers/invoiceController.js";
 
 // Admin-only endpoints
@@ -27,6 +28,7 @@ router.get("/my/summary", protect, getMyInvoiceSummary);
 
 /* ----- Admin summary ----- */
 router.get("/summary", protect, admin, getInvoicesSummary);
+router.get("/soa/:userId", protect, admin, getStatementOfAccountPDF);
 
 /* ----- Admin or Owner ----- */
 router.get("/:id/pdf", protect, getInvoicePDF);

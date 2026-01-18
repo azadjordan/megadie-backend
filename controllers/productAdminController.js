@@ -1,5 +1,7 @@
 // controllers/productAdminController.js
 import Product from "../models/productModel.js";
+import SlotItem from "../models/slotItemModel.js";
+import OrderAllocation from "../models/orderAllocationModel.js";
 import PriceRule from "../models/priceRuleModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 import {
@@ -16,6 +18,7 @@ import {
   FINISHES,
   PACKING_UNITS,
   ribbonCatalogCodes,
+  SKU_TOKENS,
 } from "../constants.js";
 
 const ensureValidPriceRule = async (res, rawRule) => {
@@ -52,6 +55,7 @@ export const getProductMeta = asyncHandler(async (_req, res) => {
       packingUnits: PACKING_UNITS,
       tags: TAGS,
       ribbonCatalogCodes,
+      skuTokens: SKU_TOKENS,
     },
   });
 });
@@ -196,6 +200,18 @@ export const deleteProduct = asyncHandler(async (req, res) => {
   if (!product) {
     res.status(404);
     throw new Error("Product not found.");
+  }
+
+  const [slotCount, allocationCount] = await Promise.all([
+    SlotItem.countDocuments({ product: product._id }),
+    OrderAllocation.countDocuments({ product: product._id }),
+  ]);
+
+  if (slotCount > 0 || allocationCount > 0) {
+    res.status(409);
+    throw new Error(
+      `Cannot delete product while it is linked to slots (${slotCount}) or allocations (${allocationCount}).`
+    );
   }
 
   const snapshot = {

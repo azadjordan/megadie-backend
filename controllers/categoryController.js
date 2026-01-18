@@ -1,6 +1,7 @@
 // controllers/categoryController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import Category from "../models/categoryModel.js";
+import Product from "../models/productModel.js";
 
 /* =========================
    GET /api/categories
@@ -8,7 +9,14 @@ import Category from "../models/categoryModel.js";
    Supports filters, search, and pagination
    ========================= */
 export const getCategories = asyncHandler(async (req, res) => {
-  const { productType, isActive, q, page = 1, limit = 50 } = req.query;
+  const {
+    productType,
+    isActive,
+    q,
+    page = 1,
+    limit = 50,
+    includeUsage,
+  } = req.query;
 
   const filter = {};
   if (productType) filter.productType = productType;
@@ -27,7 +35,35 @@ export const getCategories = asyncHandler(async (req, res) => {
   const categories = await Category.find(filter)
     .sort({ sort: 1, label: 1 })
     .skip((pageNum - 1) * perPage)
-    .limit(perPage);
+    .limit(perPage)
+    .lean();
+
+  const includeUsageCounts =
+    String(includeUsage || "").toLowerCase() === "true";
+
+  let data = categories;
+  if (includeUsageCounts && categories.length) {
+    const categoryIds = categories.map((category) => category._id);
+    const usageRows = await Product.aggregate([
+      { $match: { category: { $in: categoryIds } } },
+      { $group: { _id: "$category", count: { $sum: 1 } } },
+    ]);
+
+    const usageMap = new Map();
+    usageRows.forEach((row) => {
+      if (!row?._id) return;
+      usageMap.set(String(row._id), row.count || 0);
+    });
+
+    data = categories.map((category) => {
+      const usageCount = usageMap.get(String(category._id)) || 0;
+      return {
+        ...category,
+        usageCount,
+        canDelete: usageCount === 0,
+      };
+    });
+  }
 
   res.status(200).json({
     success: true,
@@ -36,7 +72,7 @@ export const getCategories = asyncHandler(async (req, res) => {
     pages: Math.ceil(total / perPage) || 1,
     limit: perPage,
     total,
-    data: categories,
+    data,
   });
 });
 
@@ -211,6 +247,12 @@ export const deleteCategory = asyncHandler(async (req, res) => {
   if (!category) {
     res.status(404);
     throw new Error("Category not found.");
+  }
+
+  const usageCount = await Product.countDocuments({ category: category._id });
+  if (usageCount > 0) {
+    res.status(409);
+    throw new Error("Cannot delete category while it is used by products.");
   }
 
   await category.deleteOne();

@@ -1,10 +1,17 @@
 // megadie-backend/controllers/invoiceController.js
-import React from "react";
 import mongoose from "mongoose";
-import { renderToStream } from "@react-pdf/renderer";
+import { chromium } from "playwright";
 import Invoice from "../models/invoiceModel.js";
+import User from "../models/userModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
-import InvoicePDF from "../utils/InvoicePDF.js";
+import {
+  renderInvoiceHtml,
+  invoiceFooterTemplate,
+} from "../utils/invoiceTemplate.js";
+import {
+  renderStatementOfAccountHtml,
+  statementOfAccountFooterTemplate,
+} from "../utils/statementOfAccountTemplate.js";
 
 /* -----------------------
    Small helpers
@@ -36,6 +43,14 @@ function parseBoundedDate(v, bound) {
 function isAdminUser(req) {
   // adjust if your user object uses role instead of isAdmin
   return Boolean(req.user?.isAdmin);
+}
+
+async function applyPdfMedia(page) {
+  if (typeof page.emulateMediaType === "function") {
+    await page.emulateMediaType("screen");
+  } else if (typeof page.emulateMedia === "function") {
+    await page.emulateMedia({ media: "screen" });
+  }
 }
 
 const ALLOWED_STATUSES = new Set(["Issued", "Cancelled"]);
@@ -387,16 +402,133 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
     throw new Error("Invoice not found.");
   }
 
-  const pdfStream = await renderToStream(
-    React.createElement(InvoicePDF, { invoice, order: invoice.order })
-  );
-
+  const html = renderInvoiceHtml({ invoice, order: invoice.order });
   const fileName = invoice.invoiceNumber
     ? `invoice-${invoice.invoiceNumber}.pdf`
     : `invoice-${invoice._id}.pdf`;
 
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `inline; filename=${fileName}`);
-  pdfStream.pipe(res);
+  let browser;
+  try {
+    browser = await chromium.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    await applyPdfMedia(page);
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      displayHeaderFooter: true,
+      headerTemplate: "<div></div>",
+      footerTemplate: invoiceFooterTemplate,
+      margin: { top: "18mm", bottom: "22mm", left: "16mm", right: "16mm" },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=${fileName}`);
+    res.end(pdfBuffer);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
+});
+
+/**
+ * @desc    Get SOA PDF for a user (admin only)
+ * @route   GET /api/invoices/soa/:userId
+ * @access  Private/Admin
+ */
+export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(userId)) {
+    res.status(400);
+    throw new Error("Invalid user id.");
+  }
+
+  const client = await User.findById(userId)
+    .select("name email phoneNumber address")
+    .lean();
+  if (!client) {
+    res.status(404);
+    throw new Error("User not found.");
+  }
+
+  const invoices = await Invoice.find({
+    user: userId,
+    status: "Issued",
+    paymentStatus: { $ne: "Paid" },
+    balanceDueMinor: { $gt: 0 },
+  })
+    .select(
+      [
+        "invoiceNumber",
+        "amountMinor",
+        "paidTotalMinor",
+        "balanceDueMinor",
+        "paymentStatus",
+        "dueDate",
+        "createdAt",
+        "currency",
+        "minorUnitFactor",
+      ].join(" ")
+    )
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const currency = invoices[0]?.currency || "AED";
+  const minorUnitFactor = invoices[0]?.minorUnitFactor || 100;
+  const now = Date.now();
+  const totalDueMinor = invoices.reduce(
+    (sum, inv) => sum + (Number(inv.balanceDueMinor) || 0),
+    0
+  );
+  const overdueTotalMinor = invoices.reduce((sum, inv) => {
+    const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
+    if (!Number.isFinite(due) || due >= now) return sum;
+    return sum + (Number(inv.balanceDueMinor) || 0);
+  }, 0);
+
+  const html = renderStatementOfAccountHtml({
+    client,
+    invoices,
+    summary: { totalDueMinor, overdueTotalMinor, currency, minorUnitFactor },
+    generatedAt: new Date(),
+  });
+
+  const safeName = String(client.name || "client")
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const dateTag = new Date().toISOString().slice(0, 10);
+  const fileName = `soa-${safeName || client._id}-${dateTag}.pdf`;
+
+  let browser;
+  try {
+    browser = await chromium.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    await applyPdfMedia(page);
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      displayHeaderFooter: true,
+      headerTemplate: "<div></div>",
+      footerTemplate: statementOfAccountFooterTemplate,
+      margin: { top: "18mm", bottom: "22mm", left: "16mm", right: "16mm" },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=${fileName}`);
+    res.end(pdfBuffer);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
 });
 

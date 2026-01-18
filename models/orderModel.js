@@ -7,6 +7,7 @@ const OrderItemSchema = new mongoose.Schema(
   {
     product:   { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true },
     sku:       { type: String, required: true, trim: true },
+    productName: { type: String, trim: true },
     qty:       { type: Number, required: true, min: 1 },
     unitPrice: { type: Number, required: true, min: 0 },
     lineTotal: { type: Number, default: 0, min: 0 },

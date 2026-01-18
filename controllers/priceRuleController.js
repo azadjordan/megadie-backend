@@ -5,8 +5,10 @@ import PriceRule from "../models/priceRuleModel.js";
 import Product from "../models/productModel.js";
 import UserPrice from "../models/userPriceModel.js";
 import Quote from "../models/quoteModel.js";
+import { PRODUCT_TYPES } from "../constants.js";
 
 const normalizeCode = (value) => String(value || "").trim().toUpperCase();
+const normalizeProductType = (value) => String(value || "").trim();
 
 const parseNonNegativeNumber = (res, raw, message) => {
   if (raw === "" || raw === null || raw === undefined) {
@@ -21,14 +23,33 @@ const parseNonNegativeNumber = (res, raw, message) => {
   return num;
 };
 
+const assertValidProductType = (res, productType) => {
+  if (!PRODUCT_TYPES.includes(productType)) {
+    res.status(400);
+    throw new Error(
+      `Invalid productType "${productType}". Allowed: ${PRODUCT_TYPES.join(", ")}`
+    );
+  }
+};
+
 /* =========================
    GET /api/price-rules
    Private/Admin
    List all price rules
    ========================= */
-export const getPriceRules = asyncHandler(async (_req, res) => {
+export const getPriceRules = asyncHandler(async (req, res) => {
+  const rawProductType = normalizeProductType(req.query?.productType);
+  const match = {};
+  if (rawProductType) {
+    assertValidProductType(res, rawProductType);
+    match.productType = rawProductType;
+  }
+
   const [rules, productUsage, userPriceUsage, quoteUsage] = await Promise.all([
-    PriceRule.find({}).select("code defaultPrice").sort({ code: 1 }).lean(),
+    PriceRule.find(match)
+      .select("code defaultPrice productType")
+      .sort({ code: 1 })
+      .lean(),
     Product.aggregate([
       { $match: { priceRule: { $ne: null } } },
       { $group: { _id: "$priceRule", count: { $sum: 1 } } },
@@ -90,15 +111,22 @@ export const getPriceRules = asyncHandler(async (_req, res) => {
    POST /api/price-rules
    Private/Admin
    Create a price rule
-   Body: { code, defaultPrice }
+   Body: { code, defaultPrice, productType }
    ========================= */
 export const createPriceRule = asyncHandler(async (req, res) => {
-  const { code, defaultPrice } = req.body || {};
+  const { code, defaultPrice, productType: rawProductType } = req.body || {};
   const normalizedCode = normalizeCode(code);
   if (!normalizedCode) {
     res.status(400);
     throw new Error("code is required.");
   }
+
+  const productType = normalizeProductType(rawProductType);
+  if (!productType) {
+    res.status(400);
+    throw new Error("productType is required.");
+  }
+  assertValidProductType(res, productType);
 
   const price = parseNonNegativeNumber(
     res,
@@ -116,6 +144,7 @@ export const createPriceRule = asyncHandler(async (req, res) => {
 
   const created = await PriceRule.create({
     code: normalizedCode,
+    productType,
     defaultPrice: price,
   });
 
@@ -129,8 +158,8 @@ export const createPriceRule = asyncHandler(async (req, res) => {
 /* =========================
    PUT /api/price-rules/:id
    Private/Admin
-   Update default price only
-   Body: { defaultPrice }
+   Update default price (and optional productType)
+   Body: { defaultPrice, productType? }
    ========================= */
 export const updatePriceRule = asyncHandler(async (req, res) => {
   const { id } = req.params;
@@ -139,6 +168,7 @@ export const updatePriceRule = asyncHandler(async (req, res) => {
     throw new Error("Valid price rule id is required.");
   }
 
+  const rawProductType = req.body?.productType;
   const price = parseNonNegativeNumber(
     res,
     req.body?.defaultPrice,
@@ -152,6 +182,15 @@ export const updatePriceRule = asyncHandler(async (req, res) => {
   }
 
   rule.defaultPrice = price;
+  if (typeof rawProductType !== "undefined") {
+    const productType = normalizeProductType(rawProductType);
+    if (!productType) {
+      res.status(400);
+      throw new Error("productType is required.");
+    }
+    assertValidProductType(res, productType);
+    rule.productType = productType;
+  }
   const updated = await rule.save();
 
   res.status(200).json({

@@ -113,6 +113,7 @@ export const getOrderAllocations = asyncHandler(async (req, res) => {
     .populate("product", "name sku")
     .populate("slot", "label store unit position")
     .populate("by", "name email")
+    .populate("deductedBy", "name email")
     .sort({ createdAt: -1 });
 
   res.status(200).json({

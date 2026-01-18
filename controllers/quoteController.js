@@ -1,14 +1,15 @@
 // controllers/quoteController.js
-import React from "react";
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
-import { renderToStream } from "@react-pdf/renderer";
-import QuotePDF from "../utils/QuotePDF.js";
+import { chromium } from "playwright";
+import { renderQuoteHtml, quoteFooterTemplate } from "../utils/quoteTemplate.js";
 import Product from "../models/productModel.js";
 import UserPrice from "../models/userPriceModel.js";
 import PriceRule from "../models/priceRuleModel.js";
 import User from "../models/userModel.js";
+import SlotItem from "../models/slotItemModel.js";
+import OrderAllocation from "../models/orderAllocationModel.js";
 import { getAvailabilityTotalsByProduct, getAvailabilityStatus } from "../utils/quoteAvailability.js";
 
 /* =========================
@@ -47,6 +48,14 @@ const hasAvailabilityShortage = (items = []) =>
 
     return false;
   });
+
+async function applyPdfMedia(page) {
+  if (typeof page.emulateMediaType === "function") {
+    await page.emulateMediaType("screen");
+  } else if (typeof page.emulateMedia === "function") {
+    await page.emulateMedia({ media: "screen" });
+  }
+}
 
 const hasAnyAvailability = (items = []) =>
   items.some((it) => {
@@ -110,6 +119,7 @@ const sanitizeQuoteForOwner = (quoteDoc) => {
     const availableNow = Number(it?.availableNow);
     const base = {
       product: it.product,
+      productName: it.productName || it.product?.name || "",
       qty: it.qty,
       ...(includeUnitPrice ? { unitPrice: it.unitPrice } : {}),
       availableNow: Number.isFinite(availableNow) ? availableNow : 0,
@@ -121,6 +131,7 @@ const sanitizeQuoteForOwner = (quoteDoc) => {
 
   const mapItemBasic = (it) => ({
     product: it.product,
+    productName: it.productName || it.product?.name || "",
     qty: it.qty,
   });
 
@@ -201,6 +212,7 @@ const sanitizeAvailabilityForCancelled = (quoteDoc) => {
 
   obj.requestedItems = (obj.requestedItems || []).map((it) => ({
     product: it.product,
+    productName: it.productName || it.product?.name || "",
     qty: it.qty,
   }));
   delete obj.availabilityCheckedAt;
@@ -336,6 +348,16 @@ export const createQuote = asyncHandler(async (req, res) => {
   }
 
   const productIds = safeItems.map((it) => it.product);
+
+  const products = await Product.find(
+    { _id: { $in: productIds } },
+    { _id: 1, name: 1 }
+  ).lean();
+  const nameMap = new Map(products.map((p) => [String(p._id), p.name]));
+
+  for (const it of safeItems) {
+    it.productName = nameMap.get(String(it.product)) || "";
+  }
 
   // Compute availability snapshot (single aggregation for all products)
   const totalsMap = await getAvailabilityTotalsByProduct(productIds);
@@ -564,6 +586,7 @@ export const updateQuoteQuantitiesByUser = asyncHandler(async (req, res) => {
 
     return {
       product: existing.product,
+      productName: existing.productName || existing.product?.name || "",
       qty: nextQty,
       priceRule: null,
       unitPrice: Math.max(0, Number(existing.unitPrice) || 0),
@@ -676,6 +699,7 @@ export const updateQuoteQuantitiesByAdmin = asyncHandler(async (req, res) => {
 
     return {
       product: existing.product,
+      productName: existing.productName || existing.product?.name || "",
       qty: nextQty,
       priceRule: null,
       unitPrice: Math.max(0, Number(existing.unitPrice) || 0),
@@ -739,6 +763,7 @@ export const updateQuotePricingByAdmin = asyncHandler(async (req, res) => {
 
     return {
       product: existing.product,
+      productName: existing.productName || existing.product?.name || "",
       qty: Math.max(0, Number(existing.qty) || 0),
       priceRule: null,
       unitPrice,
@@ -870,6 +895,7 @@ export const assignUserPricesByAdmin = asyncHandler(async (req, res) => {
 
     return {
       product: it.product,
+      productName: it.productName || it.product?.name || "",
       qty: Math.max(0, Number(it.qty) || 0),
       priceRule: null,
       unitPrice: Math.max(0, Number(unitPrice) || 0),
@@ -1021,6 +1047,7 @@ export const recheckQuoteAvailabilityByAdmin = asyncHandler(async (req, res) => 
 
     return {
       product: it.product,
+      productName: it.productName || it.product?.name || "",
       qty,
       priceRule: null,
       unitPrice: Math.max(0, Number(it.unitPrice) || 0),
@@ -1038,6 +1065,87 @@ export const recheckQuoteAvailabilityByAdmin = asyncHandler(async (req, res) => 
     success: true,
     message: "Availability refreshed.",
     data: populated,
+  });
+});
+
+/* =========================
+   GET /api/quotes/admin/:id/stock-check
+   Private/Admin
+   Returns on-hand and available-after-reserve totals per item
+   ========================= */
+export const getQuoteStockCheckByAdmin = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    res.status(400);
+    throw new Error("Invalid quote id.");
+  }
+
+  const quote = await Quote.findById(id)
+    .select("requestedItems")
+    .lean();
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  const rawIds = (quote.requestedItems || [])
+    .map((it) => it?.product?._id || it?.product)
+    .filter(Boolean)
+    .map((value) => String(value))
+    .filter((value) => mongoose.Types.ObjectId.isValid(value));
+  const uniqueIds = Array.from(new Set(rawIds));
+  const productObjectIds = uniqueIds.map(
+    (value) => new mongoose.Types.ObjectId(value)
+  );
+
+  let onHandRows = [];
+  let reservedRows = [];
+
+  if (productObjectIds.length > 0) {
+    [onHandRows, reservedRows] = await Promise.all([
+      SlotItem.aggregate([
+        { $match: { product: { $in: productObjectIds } } },
+        { $group: { _id: "$product", onHand: { $sum: "$qty" } } },
+      ]),
+      OrderAllocation.aggregate([
+        {
+          $match: {
+            product: { $in: productObjectIds },
+            $or: [{ status: "Reserved" }, { status: { $exists: false } }],
+          },
+        },
+        { $group: { _id: "$product", reserved: { $sum: "$qty" } } },
+      ]),
+    ]);
+  }
+
+  const onHandByProduct = new Map(
+    onHandRows.map((row) => [String(row._id), Number(row.onHand) || 0])
+  );
+  const reservedByProduct = new Map(
+    reservedRows.map((row) => [String(row._id), Number(row.reserved) || 0])
+  );
+
+  const items = uniqueIds.map((productId) => {
+    const onHand = onHandByProduct.get(productId) || 0;
+    const reserved = reservedByProduct.get(productId) || 0;
+    const availableAfterReserve = Math.max(0, onHand - reserved);
+    return {
+      productId,
+      onHand,
+      reserved,
+      availableAfterReserve,
+    };
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Stock check retrieved.",
+    data: {
+      checkedAt: new Date(),
+      items,
+    },
   });
 });
 
@@ -1126,7 +1234,7 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
 export const getQuotePDF = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
     .populate("user", "name email")
-    .populate("requestedItems.product", "name code size");
+    .populate("requestedItems.product", "name sku code size");
 
   if (!quote) {
     res.status(404);
@@ -1138,15 +1246,35 @@ export const getQuotePDF = asyncHandler(async (req, res) => {
     throw new Error("PDF can only be generated for Quoted requests.");
   }
 
-  const pdfStream = await renderToStream(
-    React.createElement(QuotePDF, { quote })
-  );
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader(
-    "Content-Disposition",
-    `inline; filename=quote-${quote._id}.pdf`
-  );
-  pdfStream.pipe(res);
+  const html = renderQuoteHtml({ quote });
+  let browser;
+  try {
+    browser = await chromium.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    await applyPdfMedia(page);
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      displayHeaderFooter: true,
+      headerTemplate: "<div></div>",
+      footerTemplate: quoteFooterTemplate,
+      margin: { top: "18mm", bottom: "22mm", left: "16mm", right: "16mm" },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename=quote-${quote._id}.pdf`
+    );
+    res.end(pdfBuffer);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
 });
 
 /* =========================

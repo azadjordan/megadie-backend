@@ -343,12 +343,11 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
 
   const products = await Product.find(
     { _id: { $in: productIds } },
-    { _id: 1, sku: 1 }
+    { _id: 1, sku: 1, name: 1 }
   ).lean();
 
-  const skuMap = new Map(
-    products.map((p) => [String(p._id), p.sku])
-  );
+  const skuMap = new Map(products.map((p) => [String(p._id), p.sku]));
+  const nameMap = new Map(products.map((p) => [String(p._id), p.name]));
 
   // -------------------------
   // 4. Map quote items → order items
@@ -357,6 +356,7 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
   const orderItems = quote.requestedItems.map((it) => ({
     product: it.product,
     sku: skuMap.get(String(it.product)) || "",
+    productName: nameMap.get(String(it.product)) || "",
     qty: it.qty,
     unitPrice: it.unitPrice,
   }));
