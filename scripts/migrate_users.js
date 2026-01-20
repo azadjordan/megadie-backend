@@ -2,9 +2,16 @@ import dotenv from "dotenv";
 import mongoose from "mongoose";
 import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
+import path from "path";
+import { fileURLToPath } from "url";
 import User from "../models/userModel.js";
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const envFile =
+  process.env.NODE_ENV === "production"
+    ? ".env.production"
+    : ".env.development";
+dotenv.config({ path: path.resolve(__dirname, "..", envFile) });
 
 const BATCH_SIZE = 200;
 const DEFAULT_PHONE_NUMBER = "Unknown";
