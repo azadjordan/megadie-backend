@@ -2,6 +2,7 @@
 import asyncHandler from "../middleware/asyncHandler.js";
 import User from "../models/userModel.js";
 import generateToken from "../utils/generateToken.js";
+import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 
 // Forgot password (Resend)
 import crypto from "crypto";
@@ -17,6 +18,18 @@ function toInt(v, fallback) {
 
 function escapeRegex(text = "") {
   return String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function escapeTelegramMarkdown(text = "") {
+  return String(text)
+    .replace(/\\/g, "\\\\")
+    .replace(/_/g, "\\_")
+    .replace(/\*/g, "\\*")
+    .replace(/\[/g, "\\[")
+    .replace(/]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/`/g, "\\`");
 }
 
 function applyApprovalStatus(user, nextStatus, actorId) {
@@ -141,6 +154,27 @@ export const registerUser = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Invalid user data.");
   }
+
+  const messageLines = ["⚪ New user registration"];
+  const addLine = (label, value) => {
+    const cleaned = String(value || "").trim();
+    if (!cleaned) return;
+    messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
+  };
+
+  addLine("Name", user.name);
+  addLine("Email", user.email);
+  addLine("Phone", user.phoneNumber);
+  addLine("Approval", user.approvalStatus || "Pending");
+
+  const frontendBaseUrl = String(
+    process.env.FRONTEND_URL || "https://www.megadie.com"
+  ).replace(/\/$/, "");
+  const userUrl = `${frontendBaseUrl}/admin/users/${user._id}/edit`;
+  messageLines.push("");
+  messageLines.push(userUrl);
+
+  void sendTelegramAlert(messageLines.join("\n"));
 
   return res.status(201).json({
     success: true,

@@ -4,6 +4,7 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Quote from "../models/quoteModel.js";
 import { chromium } from "playwright";
 import { renderQuoteHtml, quoteFooterTemplate } from "../utils/quoteTemplate.js";
+import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 import Product from "../models/productModel.js";
 import UserPrice from "../models/userPriceModel.js";
 import PriceRule from "../models/priceRuleModel.js";
@@ -30,6 +31,81 @@ const ALLOWED_TRANSITIONS = {
 
 const escapeRegex = (text = "") =>
   String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const escapeTelegramMarkdown = (text = "") =>
+  String(text)
+    .replace(/\\/g, "\\\\")
+    .replace(/_/g, "\\_")
+    .replace(/\*/g, "\\*")
+    .replace(/\[/g, "\\[")
+    .replace(/]/g, "\\]")
+    .replace(/\(/g, "\\(")
+    .replace(/\)/g, "\\)")
+    .replace(/`/g, "\\`");
+
+const formatUnits = (value) => {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "0";
+  return Number.isInteger(n) ? String(n) : String(n);
+};
+
+const buildProductTypeSummary = (items = [], productMetaMap) => {
+  const stats = new Map();
+  let totalItems = 0;
+  let totalUnits = 0;
+
+  for (const it of items) {
+    totalItems += 1;
+    const qty = Math.max(0, Number(it?.qty) || 0);
+    totalUnits += qty;
+
+    const productId = it?.product;
+    const meta = productMetaMap.get(String(productId));
+    const type = meta?.productType ? String(meta.productType) : "Unknown";
+
+    const current = stats.get(type) || { lineItems: 0, units: 0 };
+    current.lineItems += 1;
+    current.units += qty;
+    stats.set(type, current);
+  }
+
+  const lines = Array.from(stats.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(
+      ([type, summary]) =>
+        `${escapeTelegramMarkdown(type)}: ${summary.lineItems} items, ${formatUnits(
+          summary.units
+        )} units`
+    );
+
+  const fallbackLine = `Items: ${totalItems}, Units: ${formatUnits(totalUnits)}`;
+  return { lines, fallbackLine };
+};
+
+const buildProductMetaMap = async (items = []) => {
+  const productIds = Array.from(
+    new Set(
+      (items || [])
+        .map((it) => it?.product?._id || it?.product)
+        .filter(Boolean)
+        .map((id) => String(id))
+    )
+  );
+
+  if (!productIds.length) return new Map();
+
+  const products = await Product.find(
+    { _id: { $in: productIds } },
+    { _id: 1, productType: 1 }
+  ).lean();
+
+  return new Map(
+    products.map((p) => [
+      String(p._id),
+      { productType: p.productType },
+    ])
+  );
+};
 
 const normalizeAvailabilityStatus = (status) =>
   status === "PARTIAL" ? "SHORTAGE" : status;
@@ -351,12 +427,17 @@ export const createQuote = asyncHandler(async (req, res) => {
 
   const products = await Product.find(
     { _id: { $in: productIds } },
-    { _id: 1, name: 1 }
+    { _id: 1, name: 1, productType: 1 }
   ).lean();
-  const nameMap = new Map(products.map((p) => [String(p._id), p.name]));
+  const productMetaMap = new Map(
+    products.map((p) => [
+      String(p._id),
+      { name: p.name, productType: p.productType },
+    ])
+  );
 
   for (const it of safeItems) {
-    it.productName = nameMap.get(String(it.product)) || "";
+    it.productName = productMetaMap.get(String(it.product))?.name || "";
   }
 
   // Compute availability snapshot (single aggregation for all products)
@@ -384,6 +465,43 @@ export const createQuote = asyncHandler(async (req, res) => {
     select: "sku name",
   });
   const sanitized = sanitizeQuoteForOwner(populated);
+
+  const { lines: productTypeLines, fallbackLine } = buildProductTypeSummary(
+    safeItems,
+    productMetaMap
+  );
+  const messageLines = ["🟣 Quote requested"];
+  const addLine = (label, value) => {
+    const cleaned = String(value || "").trim();
+    if (!cleaned) return;
+    messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
+  };
+
+  addLine("Quote #", quote.quoteNumber || quote._id);
+  addLine("Customer", req.user?.name);
+  addLine("Email", req.user?.email);
+  addLine("Phone", req.user?.phoneNumber);
+
+  const note = String(clientToAdminNote || "").trim();
+  if (note) {
+    addLine("Note", note);
+  }
+
+  if (productTypeLines.length > 0) {
+    messageLines.push("Product types:");
+    messageLines.push(...productTypeLines);
+  } else {
+    messageLines.push(fallbackLine);
+  }
+
+  const frontendBaseUrl = String(
+    process.env.FRONTEND_URL || "https://www.megadie.com"
+  ).replace(/\/$/, "");
+  const quoteUrl = `${frontendBaseUrl}/admin/requests/${quote._id}`;
+  messageLines.push("");
+  messageLines.push(quoteUrl);
+
+  void sendTelegramAlert(messageLines.join("\n"));
 
   res.setHeader("Location", `/api/quotes/${quote._id}`);
 
@@ -424,9 +542,45 @@ export const cancelQuoteByUser = asyncHandler(async (req, res) => {
     throw new Error("Only Processing or Quoted quotes can be cancelled.");
   }
 
+  const previousStatus = quote.status;
   quote.status = "Cancelled";
   const updated = await quote.save();
   const sanitized = sanitizeQuoteForOwner(updated);
+
+  const itemsForSummary = updated.requestedItems || [];
+  const productMetaMap = await buildProductMetaMap(itemsForSummary);
+  const { lines: productTypeLines, fallbackLine } = buildProductTypeSummary(
+    itemsForSummary,
+    productMetaMap
+  );
+  const messageLines = ["🔴 Quote cancelled"];
+  const addLine = (label, value) => {
+    const cleaned = String(value || "").trim();
+    if (!cleaned) return;
+    messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
+  };
+
+  addLine("Quote #", updated.quoteNumber || updated._id);
+  addLine("Customer", req.user?.name);
+  addLine("Email", req.user?.email);
+  addLine("Phone", req.user?.phoneNumber);
+  addLine("Prev status", previousStatus);
+
+  if (productTypeLines.length > 0) {
+    messageLines.push("Product types:");
+    messageLines.push(...productTypeLines);
+  } else {
+    messageLines.push(fallbackLine);
+  }
+
+  const frontendBaseUrl = String(
+    process.env.FRONTEND_URL || "https://www.megadie.com"
+  ).replace(/\/$/, "");
+  const quoteUrl = `${frontendBaseUrl}/admin/requests/${updated._id}`;
+  messageLines.push("");
+  messageLines.push(quoteUrl);
+
+  void sendTelegramAlert(messageLines.join("\n"));
 
   res.status(200).json({
     success: true,
@@ -471,6 +625,40 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
   quote.status = "Confirmed";
   const updated = await quote.save();
   const sanitized = sanitizeQuoteForOwner(updated);
+
+  const itemsForSummary = updated.requestedItems || [];
+  const productMetaMap = await buildProductMetaMap(itemsForSummary);
+  const { lines: productTypeLines, fallbackLine } = buildProductTypeSummary(
+    itemsForSummary,
+    productMetaMap
+  );
+  const messageLines = ["🟢 Quote confirmed"];
+  const addLine = (label, value) => {
+    const cleaned = String(value || "").trim();
+    if (!cleaned) return;
+    messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
+  };
+
+  addLine("Quote #", updated.quoteNumber || updated._id);
+  addLine("Customer", req.user?.name);
+  addLine("Email", req.user?.email);
+  addLine("Phone", req.user?.phoneNumber);
+
+  if (productTypeLines.length > 0) {
+    messageLines.push("Product types:");
+    messageLines.push(...productTypeLines);
+  } else {
+    messageLines.push(fallbackLine);
+  }
+
+  const frontendBaseUrl = String(
+    process.env.FRONTEND_URL || "https://www.megadie.com"
+  ).replace(/\/$/, "");
+  const quoteUrl = `${frontendBaseUrl}/admin/requests/${updated._id}`;
+  messageLines.push("");
+  messageLines.push(quoteUrl);
+
+  void sendTelegramAlert(messageLines.join("\n"));
 
   res.status(200).json({
     success: true,
@@ -1515,9 +1703,6 @@ export const getQuoteById = asyncHandler(async (req, res) => {
    Private/Admin
    Update status only
    ========================= */
-
-
-
 
 
 
