@@ -4,8 +4,14 @@ import readline from "node:readline/promises";
 import { stdin as input, stdout as output } from "node:process";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "url";
 
-dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const envFile =
+  process.env.NODE_ENV === "production"
+    ? ".env.production"
+    : ".env.development";
+dotenv.config({ path: path.resolve(__dirname, "..", envFile) });
 
 const BATCH_SIZE = 200;
 const FAILURE_PATH = path.resolve(
@@ -29,6 +35,8 @@ const ensureMongoUri = () => {
     throw new Error("MONGO_URI is not set in the environment.");
   }
 };
+
+const isValidObjectId = (value) => mongoose.Types.ObjectId.isValid(value);
 
 const promptToContinue = async () => {
   const rl = readline.createInterface({ input, output });
@@ -72,20 +80,77 @@ const normalizeStatus = (status) => {
   return "Processing";
 };
 
-const normalizeAvailabilityStatus = (status) =>
-  AVAILABILITY_VALUES.includes(status) ? status : "NOT_AVAILABLE";
+const normalizeAvailabilityStatus = (status) => {
+  if (AVAILABILITY_VALUES.includes(status)) return status;
 
-const normalizeRequestedItems = (items) =>
-  items.map((item) => ({
-    product: item.product,
-    productName: typeof item.productName === "string" ? item.productName : null,
-    qty: normalizeNumber(item.qty, 0),
-    unitPrice: normalizeNumber(item.unitPrice, 0),
-    priceRule: typeof item.priceRule === "string" ? item.priceRule : null,
-    availableNow: normalizeNumber(item.availableNow, 0),
-    shortage: normalizeNumber(item.shortage, 0),
-    availabilityStatus: normalizeAvailabilityStatus(item.availabilityStatus),
-  }));
+  if (typeof status === "string") {
+    const trimmed = status.trim();
+    if (AVAILABILITY_VALUES.includes(trimmed)) return trimmed;
+
+    const lower = trimmed.toLowerCase();
+    if (lower === "available") return "AVAILABLE";
+    if (lower === "partial") return "PARTIAL";
+    if (lower === "shortage") return "SHORTAGE";
+    if (
+      lower === "not available" ||
+      lower === "notavailable" ||
+      lower === "not_available" ||
+      lower === "not-available"
+    ) {
+      return "NOT_AVAILABLE";
+    }
+  }
+
+  return "NOT_AVAILABLE";
+};
+
+const resolveProduct = (item) => {
+  const candidates = [
+    item?.product,
+    item?.productId,
+    item?.product?._id,
+    item?.product?.id,
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate == null) continue;
+
+    if (isValidObjectId(candidate)) return candidate;
+
+    if (typeof candidate === "object") {
+      const nested = candidate._id ?? candidate.id;
+      if (nested != null && isValidObjectId(nested)) return nested;
+    }
+  }
+
+  return null;
+};
+
+const normalizeRequestedItems = (items) => {
+  const normalizedItems = [];
+  const itemFailures = [];
+
+  items.forEach((item, index) => {
+    const product = resolveProduct(item);
+    if (!product) {
+      itemFailures.push(`requestedItems[${index}].product is required.`);
+      return;
+    }
+
+    normalizedItems.push({
+      product,
+      productName: typeof item.productName === "string" ? item.productName : null,
+      qty: normalizeNumber(item.qty, 0),
+      unitPrice: normalizeNumber(item.unitPrice, 0),
+      priceRule: typeof item.priceRule === "string" ? item.priceRule : null,
+      availableNow: normalizeNumber(item.availableNow, 0),
+      shortage: normalizeNumber(item.shortage, 0),
+      availabilityStatus: normalizeAvailabilityStatus(item.availabilityStatus),
+    });
+  });
+
+  return { normalizedItems, itemFailures };
+};
 
 const calculateTotalPrice = (items, deliveryCharge, extraFee) => {
   const itemsTotal = items.reduce(
@@ -122,15 +187,20 @@ const buildUpdatesForQuote = (quote) => {
     errors.push("requestedItems must be a non-empty array.");
   }
 
-  if (quote.requestedItems?.some((item) => !item?.product)) {
-    errors.push("requestedItems entries must include product.");
-  }
-
   if (errors.length > 0) {
     return { errors };
   }
 
-  const normalizedItems = normalizeRequestedItems(quote.requestedItems);
+  const { normalizedItems, itemFailures } = normalizeRequestedItems(
+    quote.requestedItems
+  );
+  if (normalizedItems.length === 0) {
+    errors.push("requestedItems must be a non-empty array after normalization.");
+  }
+
+  if (errors.length > 0) {
+    return { errors, itemFailures };
+  }
   const deliveryCharge = normalizeNumber(quote.deliveryCharge, 0);
   const extraFee = normalizeNumber(quote.extraFee, 0);
   const totalPrice = calculateTotalPrice(
@@ -181,7 +251,7 @@ const buildUpdatesForQuote = (quote) => {
     });
   }
 
-  return { update, hasChanges };
+  return { update, hasChanges, itemFailures };
 };
 
 const flushBatch = async (operations, counts, failures) => {
@@ -244,14 +314,23 @@ const runMigration = async () => {
   for await (const quote of cursor) {
     counts.scanned += 1;
 
-    const { update, errors, hasChanges } = buildUpdatesForQuote(quote);
+    const { update, errors, hasChanges, itemFailures } =
+      buildUpdatesForQuote(quote);
     if (errors) {
+      const combinedErrors = [...(itemFailures ?? []), ...errors];
       counts.failed += 1;
-      failures.push({ _id: quote._id, errors });
-      errors.forEach((error) => {
+      failures.push({ _id: quote._id, errors: combinedErrors });
+      combinedErrors.forEach((error) => {
         console.error(`Quote ${quote._id}: ${error}`);
       });
       continue;
+    }
+
+    if (itemFailures?.length) {
+      failures.push({ _id: quote._id, errors: itemFailures });
+      itemFailures.forEach((error) => {
+        console.error(`Quote ${quote._id}: ${error}`);
+      });
     }
 
     if (!hasChanges) {
