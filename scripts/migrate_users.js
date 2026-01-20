@@ -7,11 +7,7 @@ import { fileURLToPath } from "url";
 import User from "../models/userModel.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const envFile =
-  process.env.NODE_ENV === "production"
-    ? ".env.production"
-    : ".env.development";
-dotenv.config({ path: path.resolve(__dirname, "..", envFile) });
+dotenv.config({ path: path.resolve(__dirname, "..", ".env.development") });
 
 const BATCH_SIZE = 200;
 const DEFAULT_PHONE_NUMBER = "Unknown";
