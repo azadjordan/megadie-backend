@@ -186,7 +186,6 @@ const runValidation = async () => {
   console.log(`Updated: ${counts.updated}`);
   console.log(`Skipped: ${counts.skipped}`);
   console.log(`Failed: ${counts.failed}`);
-  console.log("Note: validation is read-only; no documents were updated.");
 
   await mongoose.disconnect();
 };
