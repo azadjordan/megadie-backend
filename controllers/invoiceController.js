@@ -51,7 +51,7 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
 // @route   GET /api/invoices
 // @access  Private/Admin
 export const getInvoices = asyncHandler(async (req, res) => {
-  const { user } = req.query;
+  const { user, includeTotals } = req.query;
   const filter = {};
 
   if (user) {
@@ -68,7 +68,34 @@ export const getInvoices = asyncHandler(async (req, res) => {
     .sort({ createdAt: -1 })
     .lean(); // optional: makes result plain JS objects (faster)
 
-  res.json(invoices);
+  const wantsTotals =
+    !!filter.user &&
+    (String(includeTotals).toLowerCase() === "true" ||
+      String(includeTotals) === "1");
+
+  if (!wantsTotals) {
+    res.json(invoices);
+    return;
+  }
+
+  let unpaidTotal = 0;
+  let unpaidCount = 0;
+  for (const invoice of invoices) {
+    const amountDue = Number(invoice.amountDue) || 0;
+    const amountPaid = Number(invoice.amountPaid) || 0;
+    if (amountPaid < amountDue) {
+      unpaidTotal += amountDue - amountPaid;
+      unpaidCount += 1;
+    }
+  }
+
+  res.json({
+    invoices,
+    totals: {
+      unpaidAmount: roundToTwo(unpaidTotal),
+      unpaidCount,
+    },
+  });
 });
 
 
