@@ -6,6 +6,7 @@ import InvoicePDF from "../utils/InvoicePDF.js";
 import { renderToStream } from "@react-pdf/renderer";
 import { createElement } from "react";
 import { roundToTwo } from "../utils/rounding.js";
+import mongoose from "mongoose";
 
 // @desc    Generate PDF invoice using React PDF
 // @route   GET /api/invoices/:id/pdf
@@ -50,7 +51,18 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
 // @route   GET /api/invoices
 // @access  Private/Admin
 export const getInvoices = asyncHandler(async (req, res) => {
-  const invoices = await Invoice.find({})
+  const { user } = req.query;
+  const filter = {};
+
+  if (user) {
+    if (!mongoose.Types.ObjectId.isValid(user)) {
+      res.status(400);
+      throw new Error("Invalid user ID.");
+    }
+    filter.user = user;
+  }
+
+  const invoices = await Invoice.find(filter)
     .populate("user", "name email")
     .populate("order", "orderNumber totalPrice")
     .sort({ createdAt: -1 })

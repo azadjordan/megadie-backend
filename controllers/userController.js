@@ -1,5 +1,6 @@
 import asyncHandler from "../middleware/asyncHandler.js"
 import User from "../models/userModel.js"
+import Invoice from "../models/invoiceModel.js"
 import generateToken from "../utils/generateToken.js"
 
 // @desc    Auth user & get token
@@ -153,6 +154,11 @@ const deleteUser = asyncHandler(async(req,res) => {
         if(user.isAdmin){
             res.status(400)
             throw new Error('Cannot delete admin user')
+        }
+        const hasInvoices = await Invoice.exists({ user: user._id })
+        if (hasInvoices) {
+            res.status(400)
+            throw new Error('Cannot delete user with invoices')
         }
         await User.deleteOne({_id: user._id})
         res.status(200).json({message: 'User deleted successfully'})
