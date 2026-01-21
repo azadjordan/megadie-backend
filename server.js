@@ -44,6 +44,7 @@ const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:5174",
   "https://megadie-frontend.onrender.com",
+  "https://megadie-frontend-v2.onrender.com",
   "https://www.megadie.com", // if you’re using the custom domain
   "https://megadie.com",
   "https://api.megadie.com",
