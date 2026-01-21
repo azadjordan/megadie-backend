@@ -111,7 +111,7 @@ export const logoutUser = asyncHandler(async (req, res) => {
   res.clearCookie("jwt", {
     httpOnly: true,
     secure: isProd,
-    sameSite: "lax",
+    sameSite: isProd ? "none" : "lax",
     path: "/",
   });
 
@@ -615,3 +615,4 @@ export const updateUserPasswordByAdmin = asyncHandler(async (req, res) => {
     message: "Password updated successfully.",
   });
 });
+

@@ -11,10 +11,12 @@ const generateToken = (res, userId) => {
   res.cookie('jwt', token, {
     httpOnly: true,
     secure: isProd,     // ✅ HTTPS only in production
-    sameSite: 'lax',    // ✅ works for localhost + typical SPA flows
+    sameSite: isProd ? 'none' : 'lax',
     path: '/',          // ✅ ensures consistent clearing
     maxAge: 30 * 24 * 60 * 60 * 1000,
   });
 };
 
 export default generateToken;
+
+
