@@ -1,35 +1,46 @@
-// ✅ invoiceRoutes.js
+// routes/invoiceRoutes.js
 import express from "express";
+import { protect, admin } from "../middleware/authMiddleware.js";
+
+// Owner + shared (admin OR owner) endpoints
 import {
-  createInvoice,
-  getInvoices,
+  getMyInvoices,
+  getMyInvoiceSummary,
   getInvoiceById,
+  getInvoicePDF,
+  getStatementOfAccountPDF,
+} from "../controllers/invoiceController.js";
+
+// Admin-only endpoints
+import {
+  getInvoices,
+  getInvoicesSummary,
   updateInvoice,
   deleteInvoice,
-  getMyInvoices,
-  getInvoicePDF,
-} from "../controllers/invoiceController.js";
-import { protect, admin } from "../middleware/authMiddleware.js";
+  createInvoiceFromOrder,
+} from "../controllers/invoiceAdminController.js";
 
 const router = express.Router();
 
-// ✅ Generate a PDF version of an invoice
-router.get("/:id/pdf", protect, admin, getInvoicePDF);
+/* ----- Owner endpoints ----- */
+router.get("/my", protect, getMyInvoices);
+router.get("/my/summary", protect, getMyInvoiceSummary);
 
-// ✅ Create a new invoice (admin only)
-router.route("/").post(protect, admin, createInvoice);
+/* ----- Admin summary ----- */
+router.get("/summary", protect, admin, getInvoicesSummary);
+router.get("/soa/:userId", protect, admin, getStatementOfAccountPDF);
 
-// ✅ Get current user's own invoices
-router.get("/my", protect, getMyInvoices); // 👈 this MUST come before "/:id"
+/* ----- Admin or Owner ----- */
+router.get("/:id/pdf", protect, getInvoicePDF);
+router.get("/:id", protect, getInvoiceById);
 
-// ✅ Get all invoices (admin only)
-router.route("/").get(protect, admin, getInvoices);
+/* ----- Admin mutate ----- */
+router.post("/from-order/:orderId", protect, admin, createInvoiceFromOrder);
+router.put("/:id", protect, admin, updateInvoice);
+router.delete("/:id", protect, admin, deleteInvoice);
 
-// ✅ Get / update / delete a specific invoice
-router
-  .route("/:id")
-  .get(protect, getInvoiceById)
-  .put(protect, admin, updateInvoice)
-  .delete(protect, admin, deleteInvoice);
+/* ----- Admin list (filters + pagination) ----- */
+router.get("/", protect, admin, getInvoices);
+
 
 export default router;

@@ -24,6 +24,12 @@ import categoryRoutes from "./routes/categoryRoutes.js";
 import quoteRoutes from "./routes/quoteRoutes.js";
 import invoiceRoutes from "./routes/invoiceRoutes.js";
 import contactRoutes from "./routes/contactRoutes.js";
+import filterConfigRoutes from "./routes/filterConfigRoutes.js";
+import slotRoutes from "./routes/slotRoutes.js";
+import slotItemRoutes from "./routes/slotItemRoutes.js";
+import inventoryRoutes from "./routes/inventoryRoutes.js";
+import userPriceRoutes from "./routes/userPriceRoutes.js";
+import priceRuleRoutes from "./routes/priceRuleRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 // ✅ Initialize and connect to DB
@@ -56,12 +62,15 @@ app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
 // ✅ Log requests only in development
-if (process.env.NODE_ENV !== 'production') {
+// ✅ Log requests only in development (full URL)
+if (process.env.NODE_ENV !== "production") {
   app.use((req, res, next) => {
-    console.log(`PATH: [${req.path}]      METHOD: [${req.method}]`);
+    const fullUrl = `${req.protocol}://${req.get("host")}${req.originalUrl}`;
+    console.log(`URL: [${fullUrl}]      METHOD: [${req.method}]`);
     next();
   });
 }
+
 
 // ✅ Root endpoint
 app.get("/", (req, res) => {
@@ -77,6 +86,12 @@ app.use("/api/categories", categoryRoutes);
 app.use("/api/quotes", quoteRoutes);
 app.use("/api/invoices", invoiceRoutes);
 app.use("/api/contact", contactRoutes);
+app.use("/api/filter-configs", filterConfigRoutes);
+app.use("/api/slots", slotRoutes);
+app.use("/api/slot-items", slotItemRoutes);
+app.use("/api/inventory", inventoryRoutes);
+app.use("/api/user-prices", userPriceRoutes);
+app.use("/api/price-rules", priceRuleRoutes);
 
 // ✅ Error Handling
 app.use(notFound);

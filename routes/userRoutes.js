@@ -1,22 +1,50 @@
-import express from 'express'
-const router = express.Router()
+import express from "express";
+const router = express.Router();
+
 import {
-authUser,
-registerUser,
-logoutUser,
-getUserProfile,
-updateUserProfile,
-getUsers,
-deleteUser,
-getUserById,
-updateUser,
-} from "../controllers/userController.js"
-import {protect, admin} from '../middleware/authMiddleware.js'
+  authUser,
+  registerUser,
+  logoutUser,
+  getUserProfile,
+  updateUserProfile,
+  getUsers,
+  deleteUser,
+  getUserById,
+  updateUser,
+  updateUserPasswordByAdmin,
+  updateUserApprovalStatus,
 
-router.route('/').post(registerUser).get(protect, admin, getUsers)
-router.post('/logout', logoutUser)
-router.post('/auth', authUser) // login
-router.route('/account/profile').get(protect, getUserProfile).put(protect, updateUserProfile)
-router.route('/:id').delete(protect, admin, deleteUser).get(protect, admin, getUserById).put(protect, admin, updateUser)
+  forgotPassword,
+  resetPassword,
+} from "../controllers/userController.js";
 
-export default router
+import { protect, admin } from "../middleware/authMiddleware.js";
+
+// Public
+router.route("/").post(registerUser);
+router.post("/logout", logoutUser);
+router.post("/auth", authUser);
+
+// ✅ Public: forgot/reset password
+router.post("/forgot-password", forgotPassword);
+router.post("/reset-password/:token", resetPassword);
+
+// Self profile (protected)
+router
+  .route("/account/profile")
+  .get(protect, getUserProfile)
+  .put(protect, updateUserProfile);
+
+// Admin (protected)
+router.route("/").get(protect, admin, getUsers);
+
+router.put("/:id/password", protect, admin, updateUserPasswordByAdmin);
+router.put("/:id/approval", protect, admin, updateUserApprovalStatus);
+
+router
+  .route("/:id")
+  .get(protect, admin, getUserById)
+  .put(protect, admin, updateUser)
+  .delete(protect, admin, deleteUser);
+
+export default router;

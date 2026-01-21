@@ -1,21 +1,24 @@
 import express from "express";
+import { getProducts, getProductById } from "../controllers/productController.js";
 import {
-  getProducts,
   getProductsAdmin,     // ✅ Admin: list all with filters/pagination
-  getProductById,
+  getProductMeta,
   createProduct,
   updateProduct,
   deleteProduct,
-} from "../controllers/productController.js";
-import { protect, admin } from "../middleware/authMiddleware.js";
+} from "../controllers/productAdminController.js";
+import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
 // ✅ Public route for shop (filtered by users)
-router.route("/").get(getProducts);
+router.route("/").get(protect, requireApproved, getProducts);
 
 // ✅ Admin route for backend product management
 router.route("/admin").get(protect, admin, getProductsAdmin);
+
+// バ. Admin product meta (enums for create/edit UI)
+router.route("/meta").get(protect, admin, getProductMeta);
 
 // ✅ Admin can create product
 router.route("/").post(protect, admin, createProduct);
@@ -23,7 +26,7 @@ router.route("/").post(protect, admin, createProduct);
 // ✅ Individual product routes
 router
   .route("/:id")
-  .get(getProductById)
+  .get(protect, requireApproved, getProductById)
   .put(protect, admin, updateProduct)
   .delete(protect, admin, deleteProduct);
 

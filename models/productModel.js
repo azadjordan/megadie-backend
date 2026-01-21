@@ -1,142 +1,233 @@
 import mongoose from "mongoose";
-import Category from "./categoryModel.js";
+import {
+  PRODUCT_TYPES,
+  TAGS,            // ??.?,? global tag enum
+  SIZES,
+  GRADES,
+  VARIANTS,
+  FINISHES,
+  PACKING_UNITS,
+  ribbonCatalogCodes,
+  SKU_TOKENS,
+} from "../constants.js";
+
+/** Normalize for SKU */
+function sanitizeToken(value) {
+  if (!value) return "";
+  return String(value)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9./]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Mapping from verbose values ?+' short SKU codes
+ * Only affects the `sku` field, NOT the human-facing `name`.
+ */
+/** Helper: get a short code for a field, then sanitize it for SKU */
+function skuToken(field, value) {
+  if (!value) return "";
+  const map = SKU_TOKENS[field];
+  const mapped = map?.[value];
+  if (mapped) return mapped;
+  return sanitizeToken(value);
+}
+
+/** Build SKU + Name */
+async function buildSkuForDoc(doc) {
+  const Category = doc.model("Category");
+  const cat = await Category.findById(doc.category)
+    .select("key label productType")
+    .lean();
+
+  if (!cat) throw new Error("Invalid category");
+
+  // mirror productType from Category
+  doc.productType = cat.productType;
+
+  // ---------- SKU PARTS (short codes) ----------
+  const parts = [
+    skuToken("productType", doc.productType), // RIB
+    skuToken("categoryKey", cat.key),         // SAT / GRO
+    skuToken("size", doc.size),               // 25-MM
+    sanitizeToken(doc.color),                 // OFFWHITE
+    sanitizeToken(doc.catalogCode),           // 000
+    skuToken("variant", doc.variant),         // 100-YD
+    skuToken("grade", doc.grade),             // PREM
+    skuToken("finish", doc.finish),           // SF / DF
+    skuToken("packingUnit", doc.packingUnit), // ROLL
+  ].filter(Boolean);
+
+  const sku = parts.join("|") || "SKU";
+
+  // ---------- Human-facing name (full words) ----------
+  const nameParts = [
+    doc.productType,           // Ribbon
+    cat.label || cat.key,      // Satin / Grosgrain
+    doc.size,                  // 25 mm
+    doc.color,                 // OffWhite
+    doc.finish,                // Single Face
+    doc.variant,               // 100 Yards
+    doc.grade,                 // Premium
+  ].filter(Boolean);
+
+  doc.name = nameParts.join(" ");
+  return sku;
+}
 
 const productSchema = new mongoose.Schema(
   {
-    // === PRIMARY FIELDS ===
-    name: { type: String, required: true },
-    productType: {
-      type: String,
-      enum: ["Ribbon", "Creasing Matrix", "Double Face Tape"],
-      required: true,
-    },
+    name: { type: String, required: true, trim: true },
+
+    productType: { type: String, enum: PRODUCT_TYPES, required: true },
+
     category: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",
       required: true,
     },
-    size: {
+
+    size: { type: String, enum: SIZES, required: true },
+
+    priceRule: {
       type: String,
-      enum: [
-        "1-inch",
-        "1/2-inch",
-        "3/4-inch",
-        "0.4x1.5-mm",
-        "0.5x1.5-mm",
-        "0.5x1.6-mm",
-        "6-mm",
-        "9-mm",
-        "10-mm",
-        "12-mm",
-      ],
       required: true,
+      index: true,
     },
-    variant: {
+
+    color: { type: String, trim: true },
+    catalogCode: {
       type: String,
-      enum: ["100-yd", "150-yd", "35-yd", "50-m", "50-pcs"], // ✅ Added 50-pcs as a variant option
-      // not required ✅
+      trim: true,
+      validate: {
+        validator: function (value) {
+          if (!value) return true;
+          if (this.productType !== "Ribbon") return false;
+          return ribbonCatalogCodes.includes(String(value));
+        },
+        message:
+          "Catalog code must be a valid Ribbon catalog code from the approved list.",
+      },
     },
 
-    color: String,
-    code: String,
-    sort: { type: Number },
+    // dY"? Universal global tags
+    tags: {
+      type: [String],
+      default: [],
+      validate: {
+        validator: (arr) => arr.every((t) => TAGS.includes(t)),
+        message: (props) =>
+          `Invalid tag(s): ${props.value
+            .filter((t) => !TAGS.includes(t))
+            .join(", ")}`,
+      },
+      index: true,
+    },
 
-    displaySpecs: String, // Ex: "100-yd, A++, Code 117"
-    sku: { type: String, required: true, unique: true },
+    variant: { type: String, enum: VARIANTS },
+    cbm: { type: Number, min: 0, default: 0 },
 
-    // === OTHER FIELDS ===
-    moq: { type: Number, default: 1 },
+    grade: { type: String, enum: GRADES },
+
+    finish: { type: String, enum: FINISHES, trim: true },
+
+    packingUnit: { type: String, enum: PACKING_UNITS, required: true, trim: true },
+
+    sku: { type: String, required: true, unique: true, trim: true },
+
+    moq: { type: Number, default: 1, min: 1 },
     isAvailable: { type: Boolean, default: true },
-    origin: String,
-    price: { type: Number, default: 0 },
-    unit: String,
-    images: { type: [String], default: [] },
-    description: String,
-    quality: {
-      type: String,
-      enum: ["A++", "A", "B"],
+    isFeatured: { type: Boolean, default: false },
+    featuredRank: { type: Number, default: 0 },
+
+    images: {
+      type: [String],
+      default: [],
+      validate: {
+        validator: (arr) =>
+          Array.isArray(arr) &&
+          arr.every(
+            (s) =>
+              typeof s === "string" &&
+              s.length <= 2048 &&
+              (/^https?:\/\//i.test(s) ||
+                s.startsWith("/") ||
+                s.startsWith("data:"))
+          ),
+        message: "Each image must be a valid URL or path.",
+      },
     },
-    isActive: {
-      type: Boolean,
-      default: true,
-    },
+
+    description: { type: String, trim: true },
+    sort: { type: Number },
+    isActive: { type: Boolean, default: true },
   },
   { timestamps: true }
 );
 
-// Indexes for efficient queries
-productSchema.index({ productType: 1 });
-productSchema.index({ category: 1 });
-
-// === AUTO-GENERATION HOOK ===
 productSchema.pre("validate", async function (next) {
-  const categoryModel = mongoose.model("Category");
-  const categoryDoc = await categoryModel.findById(this.category).lean();
-  const categoryName = categoryDoc?.displayName || categoryDoc?.name || "uncat";
+  try {
+    if (!this.category) return next(new Error("Category is required"));
 
-  // First 2 capital letters of category name (still using raw name for SKU)
-  const categoryCode = (categoryDoc?.name || "uncat").slice(0, 2).toUpperCase();
+    const contributing = [
+      "category",
+      "productType",
+      "size",
+      "color",
+      "catalogCode",
+      "variant",
+      "grade",
+      "finish",
+      "packingUnit",
+    ];
 
-  if (
-    this.isModified("category") ||
-    this.isModified("size") ||
-    this.isModified("code")
-  ) {
-    const sizeCode =
-      this.size
-        ?.toUpperCase()
-        .replace(/[^A-Z0-9]/g, "")
-        .replace(/INCH/gi, "") || "NOSIZE";
+    const changed = contributing.some((f) => this.isModified(f));
 
-    const productCode =
-      this.code?.toUpperCase().replace(/\s+/g, "") || "NOCODE";
-    const randomSuffix = Date.now().toString().slice(-4);
+    if (!this.sku || changed) {
+      this.sku = await buildSkuForDoc(this);
+    }
 
-    this.sku = `${categoryCode}-${sizeCode}-${productCode}-${randomSuffix}`;
+    next();
+  } catch (err) {
+    next(err);
   }
-
-const capitalize = (str) =>
-  str
-    ?.split(" ")
-    .map((word) =>
-      word
-        .split("-")
-        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-        .join("-")
-    )
-    .join(" ");
-
-
-  // === Generate Product Name ===
-  const nameParts = [
-    categoryName, // Use displayName as-is
-    this.color && capitalize(this.color),
-    this.size,
-    this.variant || undefined,
-    this.productType && capitalize(this.productType),
-  ].filter(Boolean);
-
-  this.name = nameParts.join(" ");
-
-  // === Generate Display Specs (for Ribbons only) ===
-  if (
-    this.productType === "Ribbon" &&
-    (this.isModified("code") ||
-      this.isModified("quality") ||
-      this.isModified("unit") ||
-      !this.displaySpecs)
-  ) {
-    const specParts = [];
-
-    if (this.quality) specParts.push(`Quality ${this.quality}`);
-    if (this.code) specParts.push(`Code #${this.code}`);
-    if (this.unit) specParts.push(this.unit);
-
-    this.displaySpecs = specParts.join(", ");
-  }
-
-  next();
 });
+
+productSchema.set("toJSON", {
+  virtuals: true,
+  versionKey: false,
+  transform: (_doc, ret) => {
+    ret.id = ret._id;
+    delete ret._id;
+  },
+});
+
+productSchema.index({ productType: 1, category: 1, isActive: 1 });
+productSchema.index({
+  productType: 1,
+  category: 1,
+  size: 1,
+  tags: 1,
+  isActive: 1,
+});
+productSchema.index({ finish: 1 });
+productSchema.index({ sort: 1, productType: 1 });
+productSchema.index({ createdAt: -1, _id: 1 });
+productSchema.index({ size: 1 });
+productSchema.index({ catalogCode: 1 });
+productSchema.index({ productType: 1, isFeatured: 1, featuredRank: 1, createdAt: -1 });
 
 const Product = mongoose.model("Product", productSchema);
 export default Product;
+
+export const ENUMS = {
+  PRODUCT_TYPES,
+  TAGS,
+  SIZES,
+  GRADES,
+  VARIANTS,
+  FINISHES,
+  PACKING_UNITS,
+};
