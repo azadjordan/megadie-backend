@@ -34,4 +34,6 @@ coverage/
 .env*
 .env*
 .env*
+# Local seeders and scripts (never commit)
 seeders/
+scripts/
