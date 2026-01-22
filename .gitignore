@@ -1,24 +1,20 @@
 # Logs and temp files
-logs
+logs/
 *.log
 npm-debug.log*
 
 # Dependency directory
 node_modules/
 
-# Env files
-.env
-.env.development
-.env.production
-.env.local
-.env.*.local
+# Environment files (all variants)
+.env*
 
-# Build/output/temp
+# Build / output / temp
 dist/
 tmp/
 coverage/
 
-# IDE/editor junk
+# IDE / editor junk
 .vscode/
 .idea/
 .DS_Store
@@ -28,12 +24,10 @@ coverage/
 *.sln
 *.sw?
 
-# AWS credentials (if ever copied)
+# AWS credentials (never commit)
 .aws/
-.env*
-.env*
-.env*
 
-# Ignore seeders folder
-seeders/
-scripts/
+# Ignored project folders
+/seeders/
+/scripts/
+/SeedData/
