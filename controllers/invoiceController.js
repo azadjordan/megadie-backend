@@ -161,6 +161,7 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
     if (!inv?.order?.orderItems) return inv;
     const orderItems = inv.order.orderItems.map((it) => ({
       product: it?.product || it?.product?._id || null,
+      productName: it?.productName || it?.product?.name,
       sku: it?.sku,
       qty: it?.qty,
     }));
