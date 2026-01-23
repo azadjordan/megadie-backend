@@ -101,6 +101,7 @@ export const SKU_TOKENS = {
     "20 mm": "20-MM",
     "13 mm": "13-MM",
     "0.4 x 1.5 - 11mm": "04X15X11MM",
+    "0.4 x 1.5 - 12mm": "04X15X12MM",
     "0.4 x 1.5 - 9mm": "04X15X9MM",
     "0.5 x 1.6 - 11mm": "05X16X11MM",
     "6 mm": "6-MM",
