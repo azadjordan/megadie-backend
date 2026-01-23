@@ -41,7 +41,7 @@ export const TAGS = [
  */
 export const SIZES = [
   "25 mm", "20 mm", "13 mm",
- "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 9mm", "0.5 × 1.6 - 11mm",
+ "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 12mm", "0.5 × 1.6 - 11mm",
   "6 mm", "9 mm", "10 mm", "12 mm",
 ];
 
