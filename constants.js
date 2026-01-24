@@ -40,6 +40,7 @@ export const TAGS = [
  * Sizes shared across products
  */
 export const SIZES = [
+  "1 inch", "3/4 inch", "1/2 inch",
   "25 mm", "20 mm", "13 mm",
  "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 12mm", "0.5 × 1.6 - 11mm",
   "6 mm", "9 mm", "10 mm", "12 mm",
@@ -97,6 +98,9 @@ export const SKU_TOKENS = {
     plus: "PLUS",
   },
   size: {
+    "1 inch": "1-IN",
+    "3/4 inch": "3-4-IN",
+    "1/2 inch": "1-2-IN",
     "25 mm": "25-MM",
     "20 mm": "20-MM",
     "13 mm": "13-MM",

@@ -33,6 +33,82 @@ const normalizeSort = (raw, fallback = 0) => {
   return Number.isFinite(num) ? num : fallback;
 };
 
+const toObjectMap = (value) => {
+  if (!value) return {};
+  if (value instanceof Map) return Object.fromEntries(value);
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  return {};
+};
+
+const buildAllowedValueMeta = (field) => {
+  const metaByValue = new Map();
+
+  const upsert = (value, label, explanation) => {
+    const safeValue = String(value || "").trim();
+    if (!safeValue) return;
+    const current = metaByValue.get(safeValue) || { value: safeValue };
+    if (label) current.label = String(label);
+    if (explanation) current.explanation = String(explanation);
+    metaByValue.set(safeValue, current);
+  };
+
+  if (Array.isArray(field.allowedValueMeta)) {
+    field.allowedValueMeta.forEach((entry) => {
+      if (!entry) return;
+      upsert(entry.value, entry.label, entry.explanation);
+    });
+  }
+
+  const labels = toObjectMap(field.allowedValueLabels);
+  const explanations = toObjectMap(field.allowedValueExplanations);
+  const values = new Set([
+    ...Object.keys(labels || {}),
+    ...Object.keys(explanations || {}),
+  ]);
+  values.forEach((value) =>
+    upsert(value, labels?.[value], explanations?.[value])
+  );
+
+  return Array.from(metaByValue.values());
+};
+
+const normalizeFieldsForSave = (fields = []) =>
+  fields.map((field) => {
+    const next = { ...field };
+    if (field?.type === "enum") {
+      next.allowedValueMeta = buildAllowedValueMeta(field);
+    } else {
+      next.allowedValueMeta = [];
+    }
+    delete next.allowedValueLabels;
+    delete next.allowedValueExplanations;
+    return next;
+  });
+
+const attachAllowedValueMaps = (config) => {
+  if (!config) return config;
+  const fields = Array.isArray(config.fields) ? config.fields : [];
+  const hydratedFields = fields.map((field) => {
+    const labels = { ...toObjectMap(field.allowedValueLabels) };
+    const explanations = { ...toObjectMap(field.allowedValueExplanations) };
+    const meta = Array.isArray(field.allowedValueMeta)
+      ? field.allowedValueMeta
+      : [];
+    meta.forEach((entry) => {
+      if (!entry?.value) return;
+      const value = String(entry.value);
+      if (entry.label) labels[value] = String(entry.label);
+      if (entry.explanation) explanations[value] = String(entry.explanation);
+    });
+    return {
+      ...field,
+      allowedValueLabels: labels,
+      allowedValueExplanations: explanations,
+    };
+  });
+  return { ...config, fields: hydratedFields };
+};
+
 /**
  * Validate fields array (optional but keeps data clean)
  */
@@ -71,6 +147,37 @@ const validateFields = (fields) => {
         `Field "${field.key}" is enum, so allowedValues must be an array.`
       );
     }
+
+    if (
+      typeof field.allowedValueLabels !== "undefined" &&
+      (field.allowedValueLabels === null ||
+        Array.isArray(field.allowedValueLabels) ||
+        typeof field.allowedValueLabels !== "object")
+    ) {
+      throw new Error(
+        `Field "${field.key}" allowedValueLabels must be an object map.`
+      );
+    }
+
+    if (
+      typeof field.allowedValueExplanations !== "undefined" &&
+      (field.allowedValueExplanations === null ||
+        Array.isArray(field.allowedValueExplanations) ||
+        typeof field.allowedValueExplanations !== "object")
+    ) {
+      throw new Error(
+        `Field "${field.key}" allowedValueExplanations must be an object map.`
+      );
+    }
+
+    if (
+      typeof field.allowedValueMeta !== "undefined" &&
+      !Array.isArray(field.allowedValueMeta)
+    ) {
+      throw new Error(
+        `Field "${field.key}" allowedValueMeta must be an array of { value, label, explanation }.`
+      );
+    }
   }
 };
 
@@ -88,7 +195,7 @@ export const getFilterConfigs = asyncHandler(async (_req, res) => {
   res.status(200).json({
     success: true,
     message: "Filter configurations retrieved successfully.",
-    data: configs,
+    data: configs.map((config) => attachAllowedValueMaps(config)),
   });
 });
 
@@ -118,7 +225,7 @@ export const getFilterConfig = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Filter configuration retrieved successfully.",
-    data: config || { productType, sort: 0, fields: [] },
+    data: attachAllowedValueMaps(config) || { productType, sort: 0, fields: [] },
   });
 });
 
@@ -153,16 +260,18 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
   // Validate fields if provided (on create we default fields to [])
   validateFields(fields);
 
+  const normalizedFields = normalizeFieldsForSave(fields);
+
   const created = await FilterConfig.create({
     productType,
     sort: normalizeSort(sort, 0),
-    fields,
+    fields: normalizedFields,
   });
 
   res.status(201).json({
     success: true,
     message: "Filter configuration created successfully.",
-    data: created,
+    data: attachAllowedValueMaps(created.toObject()),
   });
 });
 
@@ -200,7 +309,7 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
   // ✅ Only update fields if provided
   if (typeof fields !== "undefined") {
     validateFields(fields);
-    existing.fields = fields;
+    existing.fields = normalizeFieldsForSave(fields);
     changes.push("fields");
   }
 
@@ -220,7 +329,7 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: `Filter configuration updated successfully (${changes.join(", ")}).`,
-    data: updated,
+    data: attachAllowedValueMaps(updated.toObject()),
   });
 });
 
@@ -251,6 +360,6 @@ export const deleteFilterConfig = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Filter configuration deleted successfully.",
-    data: deleted,
+    data: attachAllowedValueMaps(deleted),
   });
 });
