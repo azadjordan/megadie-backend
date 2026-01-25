@@ -10,30 +10,7 @@ import {
   ribbonCatalogCodes,
   SKU_TOKENS,
 } from "../constants.js";
-
-/** Normalize for SKU */
-function sanitizeToken(value) {
-  if (!value) return "";
-  return String(value)
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9./]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "");
-}
-
-/**
- * Mapping from verbose values ?+' short SKU codes
- * Only affects the `sku` field, NOT the human-facing `name`.
- */
-/** Helper: get a short code for a field, then sanitize it for SKU */
-function skuToken(field, value) {
-  if (!value) return "";
-  const map = SKU_TOKENS[field];
-  const mapped = map?.[value];
-  if (mapped) return mapped;
-  return sanitizeToken(value);
-}
+import { buildName, buildSku } from "../utils/productNaming.js";
 
 /** Build SKU + Name */
 async function buildSkuForDoc(doc) {
@@ -48,32 +25,32 @@ async function buildSkuForDoc(doc) {
   doc.productType = cat.productType;
 
   // ---------- SKU PARTS (short codes) ----------
-  const parts = [
-    skuToken("productType", doc.productType), // RIB
-    skuToken("categoryKey", cat.key),         // SAT / GRO
-    skuToken("size", doc.size),               // 25-MM
-    sanitizeToken(doc.color),                 // OFFWHITE
-    sanitizeToken(doc.catalogCode),           // 000
-    skuToken("variant", doc.variant),         // 100-YD
-    skuToken("grade", doc.grade),             // PREM
-    skuToken("finish", doc.finish),           // SF / DF
-    skuToken("packingUnit", doc.packingUnit), // ROLL
-  ].filter(Boolean);
-
-  const sku = parts.join("|") || "SKU";
+  const sku = buildSku(
+    {
+      productType: doc.productType,
+      categoryKey: cat.key,
+      size: doc.size,
+      color: doc.color,
+      catalogCode: doc.catalogCode,
+      variant: doc.variant,
+      grade: doc.grade,
+      finish: doc.finish,
+      packingUnit: doc.packingUnit,
+    },
+    SKU_TOKENS
+  );
 
   // ---------- Human-facing name (full words) ----------
-  const nameParts = [
-    doc.productType,           // Ribbon
-    cat.label || cat.key,      // Satin / Grosgrain
-    doc.size,                  // 25 mm
-    doc.color,                 // OffWhite
-    doc.finish,                // Single Face
-    doc.variant,               // 100 Yards
-    doc.grade,                 // Premium
-  ].filter(Boolean);
+  doc.name = buildName({
+    productType: doc.productType,
+    categoryLabel: cat.label || cat.key,
+    size: doc.size,
+    color: doc.color,
+    finish: doc.finish,
+    packingUnit: doc.packingUnit,
+    grade: doc.grade,
+  });
 
-  doc.name = nameParts.join(" ");
   return sku;
 }
 
@@ -127,7 +104,7 @@ const productSchema = new mongoose.Schema(
     },
 
     variant: { type: String, enum: VARIANTS },
-    cbm: { type: Number, min: 0, default: 0 },
+    cbm: { type: Number, min: 0, required: true },
 
     grade: { type: String, enum: GRADES },
 

@@ -195,6 +195,7 @@ export const getInventoryProducts = asyncHandler(async (req, res) => {
         id: "$_id",
         sku: 1,
         name: 1,
+        image: { $arrayElemAt: ["$images", 0] },
         productType: 1,
         category: {
           $ifNull: [

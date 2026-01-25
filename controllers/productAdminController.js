@@ -1,5 +1,6 @@
 // controllers/productAdminController.js
 import Product from "../models/productModel.js";
+import Category from "../models/categoryModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import PriceRule from "../models/priceRuleModel.js";
@@ -20,6 +21,7 @@ import {
   ribbonCatalogCodes,
   SKU_TOKENS,
 } from "../constants.js";
+import { buildName, buildSku } from "../utils/productNaming.js";
 
 const ensureValidPriceRule = async (res, rawRule) => {
   const rule = String(rawRule || "").trim();
@@ -57,6 +59,60 @@ export const getProductMeta = asyncHandler(async (_req, res) => {
       ribbonCatalogCodes,
       skuTokens: SKU_TOKENS,
     },
+  });
+});
+
+/* =========================
+   POST /api/products/preview
+   Private/Admin
+   Returns sku + name preview using backend logic
+   ========================= */
+export const previewProduct = asyncHandler(async (req, res) => {
+  const payload = { ...(req.body || {}) };
+  const categoryId = payload.category || payload.categoryId;
+  if (!categoryId) {
+    res.status(400);
+    throw new Error("Category is required for preview.");
+  }
+
+  const category = await Category.findById(categoryId)
+    .select("key label productType")
+    .lean();
+  if (!category) {
+    res.status(404);
+    throw new Error("Category not found.");
+  }
+
+  const productType = category.productType;
+  const sku = buildSku(
+    {
+      productType,
+      categoryKey: category.key,
+      size: payload.size,
+      color: payload.color,
+      catalogCode: payload.catalogCode,
+      variant: payload.variant,
+      grade: payload.grade,
+      finish: payload.finish,
+      packingUnit: payload.packingUnit,
+    },
+    SKU_TOKENS
+  );
+
+  const name = buildName({
+    productType,
+    categoryLabel: category.label || category.key,
+    size: payload.size,
+    color: payload.color,
+    finish: payload.finish,
+    packingUnit: payload.packingUnit,
+    grade: payload.grade,
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Preview generated successfully.",
+    data: { sku, name },
   });
 });
 

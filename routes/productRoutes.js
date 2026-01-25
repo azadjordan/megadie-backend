@@ -3,6 +3,7 @@ import { getProducts, getProductById } from "../controllers/productController.js
 import {
   getProductsAdmin,     // ✅ Admin: list all with filters/pagination
   getProductMeta,
+  previewProduct,
   createProduct,
   updateProduct,
   deleteProduct,
@@ -19,6 +20,9 @@ router.route("/admin").get(protect, admin, getProductsAdmin);
 
 // バ. Admin product meta (enums for create/edit UI)
 router.route("/meta").get(protect, admin, getProductMeta);
+
+// ? Admin preview (SKU + name)
+router.route("/preview").post(protect, admin, previewProduct);
 
 // ✅ Admin can create product
 router.route("/").post(protect, admin, createProduct);

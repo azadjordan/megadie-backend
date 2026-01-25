@@ -40,7 +40,7 @@ export const TAGS = [
  * Sizes shared across products
  */
 export const SIZES = [
-  "1 inch", "3/4 inch", "1/2 inch",
+  "1 inch", "3/4 inch", "5/8 inch", "1/2 inch",
   "25 mm", "20 mm", "13 mm",
  "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 12mm", "0.5 × 1.6 - 11mm",
   "6 mm", "9 mm", "10 mm", "12 mm",
@@ -49,6 +49,7 @@ export const SIZES = [
 export const GRADES = [
   "A",
   "A+",
+  "B+",
   "B",
   "B-",
   ];
@@ -100,6 +101,7 @@ export const SKU_TOKENS = {
   size: {
     "1 inch": "1-IN",
     "3/4 inch": "3-4-IN",
+    "5/8 inch": "5-8-IN",
     "1/2 inch": "1-2-IN",
     "25 mm": "25-MM",
     "20 mm": "20-MM",
@@ -116,6 +118,7 @@ export const SKU_TOKENS = {
   grade: {
     A: "A",
     "A+": "A+",
+    "B+": "B+",
     B: "B",
     "B-": "B-",
   },
@@ -177,4 +180,5 @@ export const ribbonCatalogCodes = [
   "839","840","846","847","855",
   "868","869","870"
 ];
+
 
