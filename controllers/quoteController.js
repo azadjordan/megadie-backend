@@ -49,6 +49,15 @@ const formatUnits = (value) => {
   return Number.isInteger(n) ? String(n) : String(n);
 };
 
+const buildSkuSummary = (items = [], productMetaMap) =>
+  (items || []).map((it) => {
+    const qty = Math.max(0, Number(it?.qty) || 0);
+    const productId = it?.product;
+    const meta = productMetaMap.get(String(productId));
+    const sku = meta?.sku ? String(meta.sku) : "Unknown SKU";
+    return `- ${escapeTelegramMarkdown(sku)} x ${formatUnits(qty)}`;
+  });
+
 const buildProductTypeSummary = (items = [], productMetaMap) => {
   const stats = new Map();
   let totalItems = 0;
@@ -434,12 +443,12 @@ export const createQuote = asyncHandler(async (req, res) => {
 
   const products = await Product.find(
     { _id: { $in: productIds } },
-    { _id: 1, name: 1, productType: 1 }
+    { _id: 1, name: 1, productType: 1, sku: 1 }
   ).lean();
   const productMetaMap = new Map(
     products.map((p) => [
       String(p._id),
-      { name: p.name, productType: p.productType },
+      { name: p.name, productType: p.productType, sku: p.sku },
     ])
   );
 
@@ -473,11 +482,25 @@ export const createQuote = asyncHandler(async (req, res) => {
   });
   const sanitized = sanitizeQuoteForOwner(populated);
 
+  const skuLines = buildSkuSummary(safeItems, productMetaMap);
   const { lines: productTypeLines, fallbackLine } = buildProductTypeSummary(
     safeItems,
     productMetaMap
   );
   const messageLines = ["🟣 Quote requested"];
+  const pushBlankLine = () => {
+    if (messageLines.length === 0) return;
+    if (messageLines[messageLines.length - 1] !== "") {
+      messageLines.push("");
+    }
+  };
+  const pushSection = (title, lines) => {
+    if (!lines || lines.length === 0) return;
+    pushBlankLine();
+    messageLines.push(title);
+    messageLines.push(...lines);
+    pushBlankLine();
+  };
   const addLine = (label, value) => {
     const cleaned = String(value || "").trim();
     if (!cleaned) return;
@@ -494,18 +517,18 @@ export const createQuote = asyncHandler(async (req, res) => {
     addLine("Note", note);
   }
 
-  if (productTypeLines.length > 0) {
-    messageLines.push("Product types:");
-    messageLines.push(...productTypeLines);
-  } else {
-    messageLines.push(fallbackLine);
+  const summaryLines =
+    productTypeLines.length > 0 ? productTypeLines : [fallbackLine];
+  pushSection("Summary:", summaryLines);
+  if (skuLines.length > 0) {
+    pushSection("Items:", skuLines);
   }
 
   const frontendBaseUrl = String(
     process.env.FRONTEND_URL || "https://www.megadie.com"
   ).replace(/\/$/, "");
   const quoteUrl = `${frontendBaseUrl}/admin/requests/${quote._id}`;
-  messageLines.push("");
+  pushBlankLine();
   messageLines.push(quoteUrl);
 
   void sendTelegramAlert(messageLines.join("\n"));

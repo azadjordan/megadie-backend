@@ -1,6 +1,9 @@
 // controllers/userController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import User from "../models/userModel.js";
+import Order from "../models/orderModel.js";
+import Invoice from "../models/invoiceModel.js";
+import Quote from "../models/quoteModel.js";
 import generateToken from "../utils/generateToken.js";
 import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 
@@ -409,7 +412,7 @@ export const getUsers = asyncHandler(async (req, res) => {
     filter.$and = andFilters;
   }
 
-  const [total, users] = await Promise.all([
+  const [total, usersRaw] = await Promise.all([
     User.countDocuments(filter),
     User.find(filter)
       .select("name email phoneNumber address isAdmin approvalStatus createdAt")
@@ -418,6 +421,50 @@ export const getUsers = asyncHandler(async (req, res) => {
       .limit(limit)
       .lean(),
   ]);
+
+  let users = usersRaw;
+  if (users.length) {
+    const userIds = users.map((u) => u._id);
+    const [orderAgg, invoiceAgg, quoteAgg] = await Promise.all([
+      Order.aggregate([
+        { $match: { user: { $in: userIds } } },
+        { $group: { _id: "$user", count: { $sum: 1 } } },
+      ]),
+      Invoice.aggregate([
+        { $match: { user: { $in: userIds } } },
+        { $group: { _id: "$user", count: { $sum: 1 } } },
+      ]),
+      Quote.aggregate([
+        { $match: { user: { $in: userIds } } },
+        { $group: { _id: "$user", count: { $sum: 1 } } },
+      ]),
+    ]);
+
+    const orderMap = new Map(orderAgg.map((row) => [String(row._id), row.count]));
+    const invoiceMap = new Map(
+      invoiceAgg.map((row) => [String(row._id), row.count])
+    );
+    const quoteMap = new Map(quoteAgg.map((row) => [String(row._id), row.count]));
+
+    users = users.map((u) => {
+      const id = String(u._id);
+      const ordersCount = orderMap.get(id) || 0;
+      const invoicesCount = invoiceMap.get(id) || 0;
+      const requestsCount = quoteMap.get(id) || 0;
+      const hasLinked =
+        ordersCount > 0 || invoicesCount > 0 || requestsCount > 0;
+      const approval = u.approvalStatus || "Approved";
+      return {
+        ...u,
+        linkCounts: {
+          orders: ordersCount,
+          invoices: invoicesCount,
+          requests: requestsCount,
+        },
+        canDelete: !u.isAdmin && approval === "Rejected" && !hasLinked,
+      };
+    });
+  }
 
   const totalPages = Math.max(1, Math.ceil(total / limit));
 
@@ -475,6 +522,23 @@ export const deleteUser = asyncHandler(async (req, res) => {
   if (user.isAdmin) {
     res.status(400);
     throw new Error("Cannot delete admin user.");
+  }
+
+  const approval = user.approvalStatus || "Approved";
+  if (approval !== "Rejected") {
+    res.status(400);
+    throw new Error("Only rejected users can be deleted.");
+  }
+
+  const [hasOrder, hasInvoice, hasQuote] = await Promise.all([
+    Order.exists({ user: user._id }),
+    Invoice.exists({ user: user._id }),
+    Quote.exists({ user: user._id }),
+  ]);
+
+  if (hasOrder || hasInvoice || hasQuote) {
+    res.status(400);
+    throw new Error("Cannot delete user with linked orders, invoices, or requests.");
   }
 
   await User.deleteOne({ _id: user._id });
