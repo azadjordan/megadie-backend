@@ -64,17 +64,35 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
   const minorUnitFactor = Number.isFinite(factor) && factor > 0 ? factor : 100;
   const fractionDigits = fractionDigitsFromFactor(minorUnitFactor);
 
-  const deliveryCharge = asNumber(order?.deliveryCharge ?? 0);
-  const extraFee = asNumber(order?.extraFee ?? 0);
-
   const orderItems = Array.isArray(order?.orderItems)
     ? order.orderItems
     : [];
+  const manualItems = Array.isArray(invoice?.invoiceItems)
+    ? invoice.invoiceItems
+    : [];
 
-  const subtotal = orderItems.reduce(
-    (sum, it) => sum + asNumber(it.unitPrice) * asNumber(it.qty),
-    0
-  );
+  const isManual =
+    invoice?.source === "Manual" ||
+    (!order && manualItems.length > 0);
+  const useOrderItems = !isManual;
+  const lineItems = useOrderItems ? orderItems : manualItems;
+
+  const deliveryCharge = useOrderItems ? asNumber(order?.deliveryCharge ?? 0) : 0;
+  const extraFee = useOrderItems ? asNumber(order?.extraFee ?? 0) : 0;
+
+  const manualSubtotalMinor = manualItems.reduce((sum, it) => {
+    const lineMinor = Number.isFinite(Number(it?.lineTotalMinor))
+      ? Number(it.lineTotalMinor)
+      : asNumber(it?.unitPriceMinor) * asNumber(it?.qty);
+    return sum + Math.max(0, lineMinor);
+  }, 0);
+
+  const subtotal = useOrderItems
+    ? orderItems.reduce(
+        (sum, it) => sum + asNumber(it.unitPrice) * asNumber(it.qty),
+        0
+      )
+    : minorToMajor(manualSubtotalMinor, minorUnitFactor);
 
   const invoiceAmount = Number.isFinite(Number(invoice?.amountMinor))
     ? minorToMajor(invoice.amountMinor, minorUnitFactor)
@@ -101,23 +119,46 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
 
   const companyName = company?.name || "Megadie";
   const companySite = company?.display || "Megadie.com";
+  const detailLabel = useOrderItems ? "Order #" : "Type";
+  const detailValue = useOrderItems ? order?.orderNumber : "Manual";
+  const itemHeader = useOrderItems ? "Product" : "Item";
+  const deliveryRowHtml = useOrderItems
+    ? `
+          <div class="totals-row">
+            <span>Delivery charge</span>
+            <span>${safeText(money(deliveryCharge, fractionDigits))}</span>
+          </div>
+          <div class="totals-row">
+            <span>Extra fee</span>
+            <span>${safeText(money(extraFee, fractionDigits))}</span>
+          </div>
+        `
+    : "";
 
   const rowsHtml =
-    orderItems.length === 0
+    lineItems.length === 0
       ? `
         <tr>
           <td colspan="3" class="empty">No items on this invoice.</td>
         </tr>
       `
-      : orderItems
+      : lineItems
           .map((item) => {
             const qty = asNumber(item?.qty);
-            const lineTotal = asNumber(item?.unitPrice) * qty;
-            const productLabel =
-              item?.productName ||
-              item?.product?.name ||
-              item?.sku ||
-              "Unnamed";
+            const lineTotal = useOrderItems
+              ? asNumber(item?.unitPrice) * qty
+              : minorToMajor(
+                  Number.isFinite(Number(item?.lineTotalMinor))
+                    ? Number(item.lineTotalMinor)
+                    : asNumber(item?.unitPriceMinor) * qty,
+                  minorUnitFactor
+                );
+            const productLabel = useOrderItems
+              ? item?.productName ||
+                item?.product?.name ||
+                item?.sku ||
+                "Unnamed"
+              : item?.description || "Item";
             return `
               <tr>
                 <td class="col-product">${safeText(productLabel)}</td>
@@ -284,8 +325,8 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
           <div class="info-card">
             <div class="info-title">Details</div>
             <div class="info-item">
-              <div class="info-label">Order #</div>
-              <div class="info-value">${safeText(order?.orderNumber)}</div>
+              <div class="info-label">${safeText(detailLabel)}</div>
+              <div class="info-value">${safeText(detailValue)}</div>
             </div>
             <div class="info-item">
               <div class="info-label">Due</div>
@@ -310,7 +351,7 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
           </colgroup>
           <thead>
             <tr>
-              <th>Product</th>
+              <th>${safeText(itemHeader)}</th>
               <th style="text-align:right;">Qty</th>
               <th style="text-align:right;">Total</th>
             </tr>
@@ -325,14 +366,7 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
             <span>Subtotal</span>
             <span>${safeText(money(subtotal, fractionDigits))}</span>
           </div>
-          <div class="totals-row">
-            <span>Delivery charge</span>
-            <span>${safeText(money(deliveryCharge, fractionDigits))}</span>
-          </div>
-          <div class="totals-row">
-            <span>Extra fee</span>
-            <span>${safeText(money(extraFee, fractionDigits))}</span>
-          </div>
+          ${deliveryRowHtml}
           <div class="totals-row total">
             <span>Invoice amount</span>
             <span>${safeText(money(invoiceAmount, fractionDigits))}</span>

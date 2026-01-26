@@ -4,6 +4,8 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Invoice from "../models/invoiceModel.js";
 import Order from "../models/orderModel.js";
 import Payment from "../models/paymentModel.js";
+import User from "../models/userModel.js";
+import Quote from "../models/quoteModel.js";
 
 /* -----------------------
    Helpers
@@ -244,6 +246,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
     Invoice.find(filter)
       .select(
         [
+          "source",
           "invoiceNumber",
           "status",
           "amountMinor",
@@ -408,6 +411,18 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
     orderUnlinked = (result?.matchedCount || 0) > 0;
   }
 
+  // Unlink manual invoice from quote (best-effort)
+  let quoteUnlinked = false;
+  if (invoice.source === "Manual") {
+    const quoteResult = await mongoose
+      .model("Quote")
+      .updateOne(
+        { manualInvoiceId: invoice._id },
+        { $set: { manualInvoiceId: null, manualInvoiceCreatedAt: null } }
+      );
+    quoteUnlinked = (quoteResult?.matchedCount || 0) > 0;
+  }
+
   // This will trigger model middleware (findOneAndDelete) and delete linked payments
   await Invoice.findByIdAndDelete(invoice._id);
 
@@ -419,6 +434,209 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
     message,
     paymentsDeleted,
     orderUnlinked,
+    quoteUnlinked,
+  });
+});
+
+/**
+ * @desc    Admin: create manual invoice (no order)
+ * @route   POST /api/invoices/manual
+ * @access  Private/Admin
+ *
+ * Body:
+ * - userId (or user)
+ * - dueDate (required)
+ * - currency (optional)
+ * - minorUnitFactor (optional)
+ * - adminNote (optional)
+ * - invoiceItems: [{ description, qty, unitPriceMinor }]
+ */
+export const createManualInvoice = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const quoteId = body.quoteId ? String(body.quoteId) : "";
+  let userId = body.userId || body.user;
+  let quote = null;
+
+  if (quoteId) {
+    if (!mongoose.Types.ObjectId.isValid(quoteId)) {
+      res.status(400);
+      throw new Error("Invalid quote id.");
+    }
+
+    quote = await Quote.findById(quoteId)
+      .select("status order manualInvoiceId user quoteNumber")
+      .lean();
+
+    if (!quote) {
+      res.status(404);
+      throw new Error("Quote not found.");
+    }
+
+    if (quote.order) {
+      res.status(409);
+      throw new Error("Quote already has an order.");
+    }
+
+    if (quote.manualInvoiceId) {
+      res.status(409);
+      throw new Error("Manual invoice already exists for this quote.");
+    }
+
+    if (quote.status === "Cancelled") {
+      res.status(409);
+      throw new Error("Cancelled quotes cannot be invoiced.");
+    }
+
+    if (quote.status === "Confirmed") {
+      res.status(409);
+      throw new Error("Confirmed quotes should be invoiced from orders.");
+    }
+
+    if (!["Processing", "Quoted"].includes(quote.status)) {
+      res.status(409);
+      throw new Error("Only Processing or Quoted quotes can be invoiced manually.");
+    }
+
+    userId = quote.user;
+  }
+
+  if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+    res.status(400);
+    throw new Error("Valid userId is required.");
+  }
+
+  const userExists = await User.exists({ _id: userId });
+  if (!userExists) {
+    res.status(404);
+    throw new Error("User not found.");
+  }
+
+  const rawDueDate = body.dueDate;
+  if (!rawDueDate) {
+    res.status(400);
+    throw new Error("Due date is required.");
+  }
+  const dueDate = parseDate(rawDueDate);
+  if (!dueDate) {
+    res.status(400);
+    throw new Error("Invalid due date.");
+  }
+
+  const minorUnitFactor = Object.prototype.hasOwnProperty.call(
+    body,
+    "minorUnitFactor"
+  )
+    ? Number(body.minorUnitFactor)
+    : 100;
+
+  if (!Number.isInteger(minorUnitFactor) || minorUnitFactor <= 0) {
+    res.status(400);
+    throw new Error("minorUnitFactor must be a positive integer.");
+  }
+
+  const currencyRaw = typeof body.currency === "string" ? body.currency.trim() : "";
+  const currency = currencyRaw ? currencyRaw.toUpperCase() : undefined;
+  const adminNote =
+    typeof body.adminNote === "string" ? body.adminNote.trim() : undefined;
+
+  if (!Array.isArray(body.invoiceItems) || body.invoiceItems.length === 0) {
+    res.status(400);
+    throw new Error("At least one invoice item is required.");
+  }
+
+  const cleanedItems = [];
+  for (let idx = 0; idx < body.invoiceItems.length; idx += 1) {
+    const row = body.invoiceItems[idx];
+    const description = String(row?.description || "").trim();
+    const qty = Number(row?.qty);
+    const unitPriceMinor = Number(row?.unitPriceMinor);
+
+    if (!description) {
+      res.status(400);
+      throw new Error(`Item ${idx + 1}: description is required.`);
+    }
+    if (!Number.isFinite(qty) || !Number.isInteger(qty) || qty <= 0) {
+      res.status(400);
+      throw new Error(`Item ${idx + 1}: qty must be a positive integer.`);
+    }
+    if (
+      !Number.isFinite(unitPriceMinor) ||
+      !Number.isInteger(unitPriceMinor) ||
+      unitPriceMinor < 0
+    ) {
+      res.status(400);
+      throw new Error(
+        `Item ${idx + 1}: unitPriceMinor must be a non-negative integer.`
+      );
+    }
+
+    const lineTotalMinor = qty * unitPriceMinor;
+
+    cleanedItems.push({
+      description,
+      qty,
+      unitPriceMinor,
+      lineTotalMinor,
+    });
+  }
+
+  const amountMinor = cleanedItems.reduce(
+    (sum, item) => sum + (Number(item.lineTotalMinor) || 0),
+    0
+  );
+
+  const manualInvoiceId = quoteId ? new mongoose.Types.ObjectId() : undefined;
+
+  if (quoteId) {
+    const linkResult = await Quote.updateOne(
+      {
+        _id: quoteId,
+        manualInvoiceId: null,
+        order: null,
+        status: { $in: ["Processing", "Quoted"] },
+      },
+      {
+        $set: {
+          manualInvoiceId,
+          manualInvoiceCreatedAt: new Date(),
+        },
+      }
+    );
+
+    if (!linkResult?.matchedCount) {
+      res.status(409);
+      throw new Error("Quote is no longer eligible for manual invoicing.");
+    }
+  }
+
+  let invoice = null;
+  try {
+    invoice = await Invoice.create({
+      ...(manualInvoiceId ? { _id: manualInvoiceId } : {}),
+      user: userId,
+      source: "Manual",
+      order: null,
+      invoiceItems: cleanedItems,
+      amountMinor,
+      minorUnitFactor,
+      ...(currency ? { currency } : {}),
+      ...(dueDate ? { dueDate } : {}),
+      ...(adminNote ? { adminNote } : {}),
+    });
+  } catch (err) {
+    if (quoteId && manualInvoiceId) {
+      await Quote.updateOne(
+        { _id: quoteId, manualInvoiceId },
+        { $set: { manualInvoiceId: null, manualInvoiceCreatedAt: null } }
+      );
+    }
+    throw err;
+  }
+
+  res.status(201).json({
+    success: true,
+    message: "Manual invoice created.",
+    data: invoice,
   });
 });
 
@@ -510,6 +728,7 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
         {
           user: order.user,
           order: order._id,
+          source: "Order",
           amountMinor,
           minorUnitFactor,
           ...(currency ? { currency } : {}),

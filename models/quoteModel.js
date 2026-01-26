@@ -45,6 +45,13 @@ const quoteSchema = new mongoose.Schema(
 
     // ✅ Link to Order (set when admin creates an order from this quote)
     order: { type: mongoose.Schema.Types.ObjectId, ref: "Order", default: null },
+    // ✅ Optional manual invoice link (locks quote edits when set)
+    manualInvoiceId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Invoice",
+      default: null,
+    },
+    manualInvoiceCreatedAt: { type: Date, default: null },
 
     requestedItems: {
       type: [requestedItemSchema],

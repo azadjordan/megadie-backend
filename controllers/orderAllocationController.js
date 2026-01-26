@@ -4,6 +4,7 @@ import Order from "../models/orderModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
+import { logInventoryMovement } from "../utils/inventoryMovement.js";
 
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -269,6 +270,20 @@ export const upsertOrderAllocation = asyncHandler(async (req, res) => {
 
   await recomputeAllocationStatus(orderId);
 
+  const deltaQty = qtyValue - existingQty;
+  if (deltaQty !== 0) {
+    await logInventoryMovement({
+      type: deltaQty > 0 ? "RESERVE" : "RELEASE",
+      product: productId,
+      slot: slotId,
+      order: orderId,
+      allocation: updated?._id || null,
+      qty: Math.abs(deltaQty),
+      actor: req.user?._id || null,
+      note: note ? String(note).trim() : undefined,
+    });
+  }
+
   res.status(200).json({
     success: true,
     message: "Order allocation saved.",
@@ -333,6 +348,17 @@ export const deleteOrderAllocation = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Allocation does not belong to this order.");
   }
+
+  await logInventoryMovement({
+    type: "RELEASE",
+    product: allocation.product,
+    slot: allocation.slot,
+    order: allocation.order,
+    allocation: allocation._id,
+    qty: Number(allocation.qty) || 0,
+    actor: req.user?._id || null,
+    note: allocation.note || undefined,
+  });
 
   await allocation.deleteOne();
   await recomputeAllocationStatus(orderId);
@@ -571,6 +597,21 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
         if (deltaCbm) {
           addDelta(slotKey, -deltaCbm);
         }
+
+        await logInventoryMovement(
+          {
+            type: "DEDUCT",
+            product: productKey,
+            slot: slotKey,
+            order: orderId,
+            allocation: allocation._id,
+            qty: qtyValue,
+            unitCbm: unitCbm || undefined,
+            cbm: deltaCbm || undefined,
+            actor: req.user?._id || null,
+          },
+          session
+        );
 
         const nextQty = Number(slotItem.qty || 0) - qtyValue;
         if (nextQty <= 0) {

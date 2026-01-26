@@ -309,6 +309,13 @@ const ensureQuoteEditable = (res, quote) => {
       "Quote is locked because an order already exists for it."
     );
   }
+  if (quote.manualInvoiceId) {
+    throwHttpError(
+      res,
+      409,
+      "Quote is locked because a manual invoice was created."
+    );
+  }
 };
 
 const parseNonNegativeNumber = (res, raw, message) => {
@@ -536,6 +543,10 @@ export const cancelQuoteByUser = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Quote already has an order and cannot be cancelled.");
   }
+  if (quote.manualInvoiceId) {
+    res.status(409);
+    throw new Error("Manual invoice created — quote locked.");
+  }
 
   if (!["Processing", "Quoted"].includes(quote.status)) {
     res.status(409);
@@ -612,6 +623,10 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
   if (quote.status !== "Quoted") {
     res.status(409);
     throw new Error("Only Quoted quotes can be confirmed.");
+  }
+  if (quote.manualInvoiceId) {
+    res.status(409);
+    throw new Error("Manual invoice created — quote locked.");
   }
 
   const items = quote.requestedItems || [];
@@ -695,6 +710,10 @@ export const updateQuoteQuantitiesByUser = asyncHandler(async (req, res) => {
   if (quote.order) {
     res.status(409);
     throw new Error("Quote already has an order.");
+  }
+  if (quote.manualInvoiceId) {
+    res.status(409);
+    throw new Error("Manual invoice created — quote locked.");
   }
 
   if (quote.clientQtyEditLocked) {
@@ -1595,6 +1614,8 @@ export const getQuotes = asyncHandler(async (req, res) => {
           "requestedItems.availabilityStatus",
           "user",
           "order",
+          "manualInvoiceId",
+          "manualInvoiceCreatedAt",
         ].join(" ")
       )
       .populate("user", "name email")

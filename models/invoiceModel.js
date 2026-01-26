@@ -12,6 +12,16 @@ import crypto from "crypto";
  * - Only Cancelled invoices can be deleted; deleting a Cancelled invoice deletes linked payments
  */
 
+const invoiceItemSchema = new mongoose.Schema(
+  {
+    description: { type: String, required: true, trim: true },
+    qty: { type: Number, required: true, min: 1 },
+    unitPriceMinor: { type: Number, required: true, min: 0 },
+    lineTotalMinor: { type: Number, required: true, min: 0 },
+  },
+  { _id: false }
+);
+
 const invoiceSchema = new mongoose.Schema(
   {
     user: {
@@ -21,12 +31,20 @@ const invoiceSchema = new mongoose.Schema(
       index: true,
     },
 
-    // One-to-one with Order
+    source: {
+      type: String,
+      enum: ["Order", "Manual"],
+      default: "Order",
+      index: true,
+    },
+
+    invoiceItems: { type: [invoiceItemSchema], default: [] },
+
+    // One-to-one with Order (required only for Order source)
     order: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Order",
-      required: true,
-      unique: true,
+      default: null,
     },
 
     /**
@@ -130,6 +148,26 @@ invoiceSchema.pre("validate", async function (next) {
     // Basic sanity for minorUnitFactor (keep it integer-ish)
     if (this.minorUnitFactor && !Number.isInteger(this.minorUnitFactor)) {
       return next(new Error("minorUnitFactor must be an integer."));
+    }
+
+    if (!this.source) {
+      this.source = "Order";
+    }
+
+    if (this.source === "Manual") {
+      if (this.order) {
+        return next(new Error("Manual invoices cannot be linked to an order."));
+      }
+      if (!Array.isArray(this.invoiceItems) || this.invoiceItems.length === 0) {
+        return next(new Error("Manual invoices must include invoice items."));
+      }
+    } else {
+      if (!this.order) {
+        return next(new Error("Order invoices must be linked to an order."));
+      }
+      if (Array.isArray(this.invoiceItems) && this.invoiceItems.length > 0) {
+        return next(new Error("Order invoices cannot include manual items."));
+      }
     }
 
     // Generate invoiceNumber if missing
@@ -250,6 +288,10 @@ invoiceSchema.index({ status: 1, createdAt: -1 });
 invoiceSchema.index({ paymentStatus: 1, createdAt: -1 });
 invoiceSchema.index({ user: 1, paymentStatus: 1, createdAt: -1 });
 invoiceSchema.index({ currency: 1, createdAt: -1 });
+invoiceSchema.index(
+  { order: 1 },
+  { unique: true, partialFilterExpression: { order: { $type: "objectId" } } }
+);
 
 const Invoice =
   mongoose.models.Invoice || mongoose.model("Invoice", invoiceSchema);

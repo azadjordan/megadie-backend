@@ -18,6 +18,7 @@ import {
   updateInvoice,
   deleteInvoice,
   createInvoiceFromOrder,
+  createManualInvoice,
 } from "../controllers/invoiceAdminController.js";
 
 const router = express.Router();
@@ -36,6 +37,7 @@ router.get("/:id", protect, getInvoiceById);
 
 /* ----- Admin mutate ----- */
 router.post("/from-order/:orderId", protect, admin, createInvoiceFromOrder);
+router.post("/manual", protect, admin, createManualInvoice);
 router.put("/:id", protect, admin, updateInvoice);
 router.delete("/:id", protect, admin, deleteInvoice);
 

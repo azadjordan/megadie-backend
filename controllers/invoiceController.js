@@ -121,6 +121,8 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
     Invoice.find(q)
       .select(
         [
+          "source",
+          "invoiceItems",
           "invoiceNumber",
           "status",
           "amountMinor",
@@ -352,6 +354,8 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
   const invoice = await Invoice.findById(id)
     .select(
       [
+        "source",
+        "invoiceItems",
         "invoiceNumber",
         "status",
         "amountMinor",

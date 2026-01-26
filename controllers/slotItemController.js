@@ -4,6 +4,7 @@ import SlotItem from "../models/slotItemModel.js";
 import Slot from "../models/slotModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
+import { logInventoryMovement, getUnitCbm } from "../utils/inventoryMovement.js";
 
 const hasReservedAllocations = async (slotId, productIds, session = null) => {
   if (!productIds || productIds.length === 0) return false;
@@ -172,6 +173,20 @@ export const adjustSlotItem = asyncHandler(async (req, res) => {
         await applySlotOccupancyDelta(slotId, deltaCbm, session);
       }
 
+      const unitCbm = getUnitCbm(deltaCbm, deltaValue);
+      await logInventoryMovement(
+        {
+          type: "ADJUST_IN",
+          product: productId,
+          slot: slotId,
+          qty: deltaValue,
+          unitCbm: unitCbm || undefined,
+          cbm: deltaCbm || undefined,
+          actor: req.user?._id || null,
+        },
+        session
+      );
+
       const populated = await SlotItem.findById(saved._id)
         .populate("product", "name sku")
         .populate("slot", "label store unit position")
@@ -308,6 +323,21 @@ export const moveSlotItems = asyncHandler(async (req, res) => {
           targetByProduct.set(productKey, item);
         }
 
+        const unitCbm = getUnitCbm(itemCbm, qtyValue);
+        await logInventoryMovement(
+          {
+            type: "MOVE",
+            product: item.product,
+            fromSlot: fromSlotId,
+            toSlot: toSlotId,
+            qty: qtyValue,
+            unitCbm: unitCbm || undefined,
+            cbm: itemCbm || undefined,
+            actor: req.user?._id || null,
+          },
+          session
+        );
+
         movedCount += 1;
       }
 
@@ -392,6 +422,25 @@ export const clearSlotItems = asyncHandler(async (req, res) => {
         res.status(409);
         throw new Error(
           "Reserved allocations must be cleared before clearing stock."
+        );
+      }
+
+      for (const item of slotItems) {
+        const qtyValue = Number(item.qty) || 0;
+        if (qtyValue <= 0) continue;
+        const itemCbm = Number(item.cbm) || 0;
+        const unitCbm = getUnitCbm(itemCbm, qtyValue);
+        await logInventoryMovement(
+          {
+            type: "ADJUST_OUT",
+            product: item.product,
+            slot: slotId,
+            qty: qtyValue,
+            unitCbm: unitCbm || undefined,
+            cbm: itemCbm || undefined,
+            actor: req.user?._id || null,
+          },
+          session
         );
       }
 

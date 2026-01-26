@@ -4,6 +4,7 @@ import asyncHandler from "../middleware/asyncHandler.js";
 import Product from "../models/productModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
+import InventoryMovement from "../models/inventoryMovementModel.js";
 import {
   buildProductFilter,
   parsePagination,
@@ -448,6 +449,271 @@ export const getInventoryAllocations = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Inventory allocations retrieved successfully.",
+    data: rows,
+    pagination: {
+      page,
+      limit,
+      total,
+      totalPages,
+      hasPrev: page > 1,
+      hasNext: page < totalPages,
+    },
+  });
+});
+
+/* =========================
+   GET /api/inventory/movements
+   Private/Admin
+   Returns inventory movement ledger
+   Query: type, q, productId, slotId, orderId, actorId, dateFrom, dateTo
+   ========================= */
+export const getInventoryMovements = asyncHandler(async (req, res) => {
+  const { page, limit, skip } = parsePagination(req, {
+    defaultLimit: 25,
+    maxLimit: 100,
+  });
+
+  const typeRaw = String(req.query.type || "").trim();
+  const searchRaw = String(req.query.q || "").trim();
+  const productId = String(req.query.productId || "").trim();
+  const slotId = String(req.query.slotId || "").trim();
+  const orderId = String(req.query.orderId || "").trim();
+  const actorId = String(req.query.actorId || "").trim();
+  const dateFromRaw = req.query.dateFrom ? String(req.query.dateFrom).trim() : "";
+  const dateToRaw = req.query.dateTo ? String(req.query.dateTo).trim() : "";
+
+  const allowedTypes = new Set([
+    "ADJUST_IN",
+    "ADJUST_OUT",
+    "MOVE",
+    "RESERVE",
+    "RELEASE",
+    "DEDUCT",
+  ]);
+
+  const andFilters = [];
+
+  if (typeRaw && typeRaw !== "all") {
+    if (!allowedTypes.has(typeRaw)) {
+      res.status(400);
+      throw new Error("Invalid movement type filter.");
+    }
+    andFilters.push({ type: typeRaw });
+  }
+
+  if (productId) {
+    if (!mongoose.isValidObjectId(productId)) {
+      res.status(400);
+      throw new Error("Invalid product id.");
+    }
+    andFilters.push({ product: new mongoose.Types.ObjectId(productId) });
+  }
+
+  if (orderId) {
+    if (!mongoose.isValidObjectId(orderId)) {
+      res.status(400);
+      throw new Error("Invalid order id.");
+    }
+    andFilters.push({ order: new mongoose.Types.ObjectId(orderId) });
+  }
+
+  if (actorId) {
+    if (!mongoose.isValidObjectId(actorId)) {
+      res.status(400);
+      throw new Error("Invalid actor id.");
+    }
+    andFilters.push({ actor: new mongoose.Types.ObjectId(actorId) });
+  }
+
+  if (slotId) {
+    if (!mongoose.isValidObjectId(slotId)) {
+      res.status(400);
+      throw new Error("Invalid slot id.");
+    }
+    const slotObjectId = new mongoose.Types.ObjectId(slotId);
+    andFilters.push({
+      $or: [
+        { slot: slotObjectId },
+        { fromSlot: slotObjectId },
+        { toSlot: slotObjectId },
+      ],
+    });
+  }
+
+  if (dateFromRaw || dateToRaw) {
+    const range = {};
+    if (dateFromRaw) {
+      const dateFrom = new Date(dateFromRaw);
+      if (Number.isNaN(dateFrom.getTime())) {
+        res.status(400);
+        throw new Error("Invalid dateFrom value.");
+      }
+      range.$gte = dateFrom;
+    }
+    if (dateToRaw) {
+      const dateTo = new Date(dateToRaw);
+      if (Number.isNaN(dateTo.getTime())) {
+        res.status(400);
+        throw new Error("Invalid dateTo value.");
+      }
+      range.$lte = dateTo;
+    }
+    andFilters.push({ eventAt: range });
+  }
+
+  const match = andFilters.length ? { $and: andFilters } : {};
+
+  const pipeline = [
+    { $match: match },
+    {
+      $lookup: {
+        from: "products",
+        localField: "product",
+        foreignField: "_id",
+        as: "product",
+      },
+    },
+    { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "slots",
+        localField: "slot",
+        foreignField: "_id",
+        as: "slot",
+      },
+    },
+    { $unwind: { path: "$slot", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "slots",
+        localField: "fromSlot",
+        foreignField: "_id",
+        as: "fromSlot",
+      },
+    },
+    { $unwind: { path: "$fromSlot", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "slots",
+        localField: "toSlot",
+        foreignField: "_id",
+        as: "toSlot",
+      },
+    },
+    { $unwind: { path: "$toSlot", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "orders",
+        localField: "order",
+        foreignField: "_id",
+        as: "order",
+      },
+    },
+    { $unwind: { path: "$order", preserveNullAndEmptyArrays: true } },
+    {
+      $lookup: {
+        from: "users",
+        localField: "actor",
+        foreignField: "_id",
+        as: "actor",
+      },
+    },
+    { $unwind: { path: "$actor", preserveNullAndEmptyArrays: true } },
+  ];
+
+  if (searchRaw) {
+    const regex = new RegExp(escapeRegex(searchRaw), "i");
+    pipeline.push({
+      $match: {
+        $or: [
+          { "product.name": regex },
+          { "product.sku": regex },
+          { "slot.label": regex },
+          { "slot.store": regex },
+          { "slot.unit": regex },
+          { "fromSlot.label": regex },
+          { "fromSlot.store": regex },
+          { "fromSlot.unit": regex },
+          { "toSlot.label": regex },
+          { "toSlot.store": regex },
+          { "toSlot.unit": regex },
+          { "order.orderNumber": regex },
+          { "actor.name": regex },
+          { "actor.email": regex },
+          { note: regex },
+        ],
+      },
+    });
+  }
+
+  pipeline.push(
+    { $sort: { eventAt: -1, _id: -1 } },
+    {
+      $facet: {
+        rows: [
+          { $skip: skip },
+          { $limit: limit },
+          {
+            $project: {
+              _id: 0,
+              id: "$_id",
+              type: 1,
+              qty: 1,
+              note: 1,
+              eventAt: 1,
+              createdAt: 1,
+              product: {
+                id: "$product._id",
+                name: "$product.name",
+                sku: "$product.sku",
+              },
+              slot: {
+                id: "$slot._id",
+                label: "$slot.label",
+                store: "$slot.store",
+                unit: "$slot.unit",
+                position: "$slot.position",
+              },
+              fromSlot: {
+                id: "$fromSlot._id",
+                label: "$fromSlot.label",
+                store: "$fromSlot.store",
+                unit: "$fromSlot.unit",
+                position: "$fromSlot.position",
+              },
+              toSlot: {
+                id: "$toSlot._id",
+                label: "$toSlot.label",
+                store: "$toSlot.store",
+                unit: "$toSlot.unit",
+                position: "$toSlot.position",
+              },
+              order: {
+                id: "$order._id",
+                orderNumber: "$order.orderNumber",
+                status: "$order.status",
+              },
+              actor: {
+                id: "$actor._id",
+                name: "$actor.name",
+                email: "$actor.email",
+              },
+            },
+          },
+        ],
+        total: [{ $count: "count" }],
+      },
+    }
+  );
+
+  const [result] = await InventoryMovement.aggregate(pipeline);
+  const rows = result?.rows ?? [];
+  const total = result?.total?.[0]?.count ?? 0;
+  const totalPages = Math.max(Math.ceil(total / limit), 1);
+
+  res.status(200).json({
+    success: true,
+    message: "Inventory movements retrieved successfully.",
     data: rows,
     pagination: {
       page,

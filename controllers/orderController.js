@@ -335,6 +335,10 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("An order has already been created for this quote.");
   }
+  if (quote.manualInvoiceId) {
+    res.status(409);
+    throw new Error("Manual invoice created — quote locked.");
+  }
 
   // -------------------------
   // 3. Resolve product SKUs (snapshot)
