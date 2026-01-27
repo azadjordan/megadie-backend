@@ -8,7 +8,7 @@
     "start": "node server.js",
     "server": "nodemon server.js",
     "dev": "npm run server",
-    "postinstall": "npx playwright install --with-deps chromium"
+    "postinstall": "npx playwright install chromium"
   },
   "author": "Azad Kurdi",
   "license": "MIT",
