@@ -153,8 +153,8 @@ export const getInvoicesSummary = asyncHandler(async (req, res) => {
  */
 export const getInvoices = asyncHandler(async (req, res) => {
   const page = Math.max(1, toInt(req.query.page, 1));
-  const limitRaw = toInt(req.query.limit, 5);
-  const limit = Math.min(Math.max(1, limitRaw), 5);
+  const limitRaw = toInt(req.query.limit, 20);
+  const limit = Math.min(Math.max(1, limitRaw), 20);
   const sortKey = req.query.sort ? String(req.query.sort) : "newest";
   const sort = SORT_MAP[sortKey] || SORT_MAP.newest;
 

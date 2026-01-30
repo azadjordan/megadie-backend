@@ -235,8 +235,8 @@ export const getMyOrders = asyncHandler(async (req, res) => {
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
-    defaultLimit: 5,
-    maxLimit: 5,
+    defaultLimit: 20,
+    maxLimit: 20,
   });
 
   const filter = {};
@@ -665,6 +665,39 @@ export const updateOrder = asyncHandler(async (req, res) => {
   ) {
     res.status(400);
     throw new Error("Invoice required before setting Shipping status.");
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
+    nextStatus === "Processing" &&
+    prevStatus !== "Processing"
+  ) {
+    if (prevStatus === "Delivered") {
+      res.status(409);
+      throw new Error("Delivered orders cannot be moved back to Processing.");
+    }
+    if (order.stockFinalizedAt) {
+      res.status(409);
+      throw new Error("Stock finalized orders cannot be moved back to Processing.");
+    }
+    if (order.invoice) {
+      res.status(409);
+      throw new Error("Remove the invoice before moving this order back to Processing.");
+    }
+
+    const hasBlockingAllocations = await OrderAllocation.exists({
+      order: order._id,
+      $or: [
+        { status: { $in: ["Reserved", "Deducted"] } },
+        { status: { $exists: false } },
+      ],
+    });
+    if (hasBlockingAllocations) {
+      res.status(409);
+      throw new Error(
+        "Remove reserved or deducted allocations before moving this order back to Processing."
+      );
+    }
   }
 
   // Delivered stamp (first time)

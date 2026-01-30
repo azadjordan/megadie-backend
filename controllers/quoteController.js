@@ -1582,13 +1582,13 @@ export const deleteQuote = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   GET /api/quotes/admin?page=1&limit=5&status=Processing&search=abc
+   GET /api/quotes/admin?page=1&limit=20&status=Processing&search=abc
    Private/Admin
    Get all quotes (paginated, newest first)
    ========================= */
 export const getQuotes = asyncHandler(async (req, res) => {
   const page = Math.max(1, Number(req.query.page) || 1);
-  const limit = Math.min(5, Math.max(1, Number(req.query.limit) || 5));
+  const limit = Math.min(20, Math.max(1, Number(req.query.limit) || 20));
   const skip = (page - 1) * limit;
 
   const filter = {};

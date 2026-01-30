@@ -144,8 +144,8 @@ export const addPaymentToInvoice = asyncHandler(async (req, res) => {
  */
 export const getPaymentsAdmin = asyncHandler(async (req, res) => {
   const page = Math.max(1, toInt(req.query.page, 1));
-  const limitRaw = toInt(req.query.limit, 5);
-  const limit = Math.min(Math.max(1, limitRaw), 5);
+  const limitRaw = toInt(req.query.limit, 20);
+  const limit = Math.min(Math.max(1, limitRaw), 20);
   const skip = (page - 1) * limit;
 
   const method = req.query.method ? String(req.query.method) : null;
