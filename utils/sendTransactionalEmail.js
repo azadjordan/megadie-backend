@@ -1,35 +1,36 @@
 // utils/sendTransactionalEmail.js
 import { Resend } from "resend";
 
-/**
- * Startup-friendly:
- * - doesn't crash server if RESEND_API_KEY is missing
- * - instantiates Resend only when sending
- */
 export default async function sendTransactionalEmail({
   to,
   subject,
   html,
   text,
-  replyTo, // optional
+  replyTo,
 }) {
   const apiKey = (process.env.RESEND_API_KEY || "").trim();
   if (!apiKey) {
-    console.warn("⚠️ RESEND_API_KEY missing — email not sent");
-    return;
+    throw new Error("RESEND_API_KEY missing — email not sent");
   }
 
-  const from = (process.env.EMAIL_FROM || "Megadie <onboarding@resend.dev>").trim();
+  const from = (process.env.EMAIL_FROM || "").trim();
+  if (!from) {
+    throw new Error("EMAIL_FROM missing — email not sent");
+  }
 
   const resend = new Resend(apiKey);
 
-  await resend.emails.send({
+  const result = await resend.emails.send({
     from,
     to,
     subject,
-    // only include fields if provided
     ...(typeof text === "string" ? { text } : {}),
     ...(typeof html === "string" ? { html } : {}),
     ...(replyTo ? { reply_to: replyTo } : {}),
   });
+
+  // Helpful in Render logs for debugging
+  console.log("Resend accepted email", { to, id: result?.data?.id ?? result?.id });
+
+  return result;
 }

@@ -18,6 +18,8 @@ const userSchema = new mongoose.Schema(
     phoneNumber: {
       type: String,
       trim: true,
+      unique: true,
+      sparse: true,
       required: function requiredPhoneOnCreate() {
         return this.isNew;
       },

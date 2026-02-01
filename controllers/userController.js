@@ -139,19 +139,48 @@ export const registerUser = asyncHandler(async (req, res) => {
     throw new Error("Phone number is required.");
   }
 
-  const userExists = await User.findOne({ email });
-  if (userExists) {
+  const userByEmail = await User.findOne({ email }).select("_id").lean();
+  if (userByEmail) {
     res.status(409);
-    throw new Error("Email already registered.");
+    throw new Error(
+      "An account with this email already exists. Try signing in or resetting your password."
+    );
   }
 
-  const user = await User.create({
-    name,
-    phoneNumber,
-    email,
-    password,
-    approvalStatus: "Pending",
-  });
+  const userByPhone = await User.findOne({ phoneNumber }).select("_id").lean();
+  if (userByPhone) {
+    res.status(409);
+    throw new Error(
+      "This phone number is already registered. Use a different number or contact support."
+    );
+  }
+
+  let user;
+  try {
+    user = await User.create({
+      name,
+      phoneNumber,
+      email,
+      password,
+      approvalStatus: "Pending",
+    });
+  } catch (err) {
+    if (err?.code === 11000) {
+      res.status(409);
+      if (err?.keyPattern?.email) {
+        throw new Error(
+          "An account with this email already exists. Try signing in or resetting your password."
+        );
+      }
+      if (err?.keyPattern?.phoneNumber) {
+        throw new Error(
+          "This phone number is already registered. Use a different number or contact support."
+        );
+      }
+      throw new Error("Duplicate user details.");
+    }
+    throw err;
+  }
 
   if (!user) {
     res.status(400);
@@ -200,11 +229,9 @@ export const registerUser = asyncHandler(async (req, res) => {
 export const forgotPassword = asyncHandler(async (req, res) => {
   const email = (req.body.email || "").trim().toLowerCase();
 
-  // Always respond the same to avoid revealing if an account exists
   const genericResponse = {
     success: true,
-    message:
-      "If you are a registered user, a password reset link has been sent.",
+    message: "If you are a registered user, a password reset link has been sent.",
   };
 
   if (!email) return res.status(200).json(genericResponse);
@@ -212,43 +239,43 @@ export const forgotPassword = asyncHandler(async (req, res) => {
   const user = await User.findOne({ email });
   if (!user) return res.status(200).json(genericResponse);
 
-  // Generate raw token for URL, store only hash in DB
   const rawToken = crypto.randomBytes(32).toString("hex");
   const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const expires = new Date(Date.now() + 1000 * 60 * 30);
 
-  user.passwordResetTokenHash = tokenHash;
-  user.passwordResetExpires = new Date(Date.now() + 1000 * 60 * 30); // 30 mins
-  await user.save();
-
-  const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(
-    /\/$/,
-    ""
-  );
+  const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:5173").replace(/\/$/, "");
   const resetUrl = `${frontendUrl}/reset-password/${rawToken}`;
 
-  // IMPORTANT:
-  // - Avoid clickable <a href="..."> to reduce Resend click-tracking redirects (resend-clicks.com)
-  // - Use copy/paste URL instead (still works great, fewer Gmail warnings)
-  await sendTransactionalEmail({
-    to: user.email,
-    subject: "Reset your Megadie password",
-    text:
-      `You requested a password reset.\n\n` +
-      `Copy/paste this link into your browser:\n${resetUrl}\n\n` +
-      `This link expires in 30 minutes.\n\n` +
-      `If you didn't request this, you can ignore this email.`,
-    html: `
-      <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-        <p>You requested a password reset.</p>
-        <p><strong>Copy/paste this link into your browser:</strong></p>
-        <p style="word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
-          ${resetUrl}
-        </p>
-        <p style="color:#666;">This link expires in 30 minutes.</p>
-        <p style="color:#666;">If you didn’t request this, you can ignore this email.</p>
-      </div>
-    `,
-  });
+  try {
+    await sendTransactionalEmail({
+      to: user.email,
+      subject: "Reset your Megadie password",
+      text:
+        `You requested a password reset.\n\n` +
+        `Copy/paste this link into your browser:\n${resetUrl}\n\n` +
+        `This link expires in 30 minutes.\n\n` +
+        `If you didn't request this, you can ignore this email.`,
+      html: `
+        <div style="font-family: Arial, sans-serif; line-height: 1.6;">
+          <p>You requested a password reset.</p>
+          <p><strong>Copy/paste this link into your browser:</strong></p>
+          <p style="word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;">
+            ${resetUrl}
+          </p>
+          <p style="color:#666;">This link expires in 30 minutes.</p>
+          <p style="color:#666;">If you didn’t request this, you can ignore this email.</p>
+        </div>
+      `,
+    });
+
+    // Only overwrite token AFTER successful send
+    user.passwordResetTokenHash = tokenHash;
+    user.passwordResetExpires = expires;
+    await user.save();
+  } catch (err) {
+    console.error("Forgot-password email failed", { email: user.email, err });
+    // Do not save new token — keeps previous link valid
+  }
 
   return res.status(200).json(genericResponse);
 });
