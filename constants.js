@@ -42,7 +42,7 @@ export const TAGS = [
 export const SIZES = [
   "1 inch", "3/4 inch", "5/8 inch", "1/2 inch",
   "25 mm", "20 mm", "13 mm",
- "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 12mm", "0.5 × 1.6 - 11mm",
+ "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 12mm", "0.5 Ã— 1.6 - 11mm",
   "6 mm", "9 mm", "10 mm", "12 mm",
 ];
 
@@ -143,14 +143,14 @@ export const SKU_TOKENS = {
 
 /** 
  * SLOT SYSTEM 
- * Stores → AE1 / AE2
+ * Stores â†’ AE1 / AE2
  * Units include FLOOR
  */
 export const SLOT_STORES = ["AE1", "AE2"];
 
 export const SLOT_UNITS = [
-  "A","B","C","D","E","F","G","H","I","J","K","L","M","N",
-  "FLOOR", // ← NEW
+  "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R",
+  "FLOOR", // â† NEW
 ];
 
 export const SLOT_POSITIONS = [
