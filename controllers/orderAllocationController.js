@@ -18,9 +18,9 @@ const resolveId = (value) => {
   return String(value);
 };
 
-const parsePositiveNumber = (res, value, message) => {
+const parsePositiveInteger = (res, value, message) => {
   const n = Number(value);
-  if (!Number.isFinite(n) || n <= 0) {
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n <= 0) {
     res.status(400);
     throw new Error(message);
   }
@@ -146,10 +146,10 @@ export const upsertOrderAllocation = asyncHandler(async (req, res) => {
     throw new Error("Invalid slot id.");
   }
 
-  const qtyValue = parsePositiveNumber(
+  const qtyValue = parsePositiveInteger(
     res,
     qty,
-    "Reserve qty must be a positive number."
+    "Reserve qty must be a positive integer."
   );
 
   const order = await Order.findById(orderId).select(
@@ -578,9 +578,9 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
         }
 
         const qtyValue = Number(allocation.qty) || 0;
-        if (qtyValue <= 0) {
+        if (qtyValue <= 0 || !Number.isInteger(qtyValue)) {
           res.status(400);
-          throw new Error("Allocation qty must be a positive number.");
+          throw new Error("Allocation qty must be a positive integer.");
         }
 
         if (Number(slotItem.qty || 0) < qtyValue) {

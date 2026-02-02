@@ -118,9 +118,13 @@ export const adjustSlotItem = asyncHandler(async (req, res) => {
   }
 
   const deltaValue = Number(deltaQty);
-  if (!Number.isFinite(deltaValue) || deltaValue <= 0) {
+  if (
+    !Number.isFinite(deltaValue) ||
+    !Number.isInteger(deltaValue) ||
+    deltaValue <= 0
+  ) {
     res.status(400);
-    throw new Error("deltaQty must be a positive number.");
+    throw new Error("deltaQty must be a positive integer.");
   }
 
   const session = await mongoose.startSession();
@@ -208,11 +212,11 @@ export const adjustSlotItem = asyncHandler(async (req, res) => {
 
 /* =========================
    POST /api/slot-items/move
-   Moves full quantities for selected slot items to another slot
-   Body: { fromSlotId, toSlotId, slotItemIds }
+   Moves slot items to another slot (full or partial quantities)
+   Body: { fromSlotId, toSlotId, slotItemIds } OR { fromSlotId, toSlotId, moves: [{ slotItemId, qty }] }
    ========================= */
 export const moveSlotItems = asyncHandler(async (req, res) => {
-  const { fromSlotId, toSlotId, slotItemIds } = req.body || {};
+  const { fromSlotId, toSlotId, slotItemIds, moves } = req.body || {};
 
   if (!mongoose.isValidObjectId(fromSlotId)) {
     res.status(400);
@@ -226,20 +230,53 @@ export const moveSlotItems = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Source and target slots must be different.");
   }
-  if (!Array.isArray(slotItemIds) || slotItemIds.length === 0) {
-    res.status(400);
-    throw new Error("Provide at least one slot item to move.");
-  }
 
-  const uniqueIds = Array.from(
-    new Set(slotItemIds.map((value) => String(value)))
-  );
-  const invalidId = uniqueIds.find(
-    (value) => !mongoose.isValidObjectId(value)
-  );
-  if (invalidId) {
-    res.status(400);
-    throw new Error("One or more slot item ids are invalid.");
+  const hasMoves = Array.isArray(moves) && moves.length > 0;
+  const moveMap = new Map();
+  let uniqueIds = [];
+
+  if (hasMoves) {
+    for (const entry of moves) {
+      const itemId = String(
+        entry?.slotItemId || entry?.slotItem || entry?.id || ""
+      );
+      const qtyValue = Number(entry?.qty);
+      if (!mongoose.isValidObjectId(itemId)) {
+        res.status(400);
+        throw new Error("One or more slot item ids are invalid.");
+      }
+      if (
+        !Number.isFinite(qtyValue) ||
+        !Number.isInteger(qtyValue) ||
+        qtyValue <= 0
+      ) {
+        res.status(400);
+        throw new Error("Move qty must be a positive integer.");
+      }
+      if (moveMap.has(itemId)) {
+        res.status(400);
+        throw new Error("Duplicate slot item ids are not allowed.");
+      }
+      moveMap.set(itemId, qtyValue);
+    }
+
+    uniqueIds = Array.from(moveMap.keys());
+  } else {
+    if (!Array.isArray(slotItemIds) || slotItemIds.length === 0) {
+      res.status(400);
+      throw new Error("Provide at least one slot item to move.");
+    }
+
+    uniqueIds = Array.from(
+      new Set(slotItemIds.map((value) => String(value)))
+    );
+    const invalidId = uniqueIds.find(
+      (value) => !mongoose.isValidObjectId(value)
+    );
+    if (invalidId) {
+      res.status(400);
+      throw new Error("One or more slot item ids are invalid.");
+    }
   }
 
   const session = await mongoose.startSession();
@@ -307,32 +344,63 @@ export const moveSlotItems = asyncHandler(async (req, res) => {
           continue;
         }
 
-        const productKey = String(item.product);
-        const existingTarget = targetByProduct.get(productKey);
-
-        addDelta(fromSlotId, -itemCbm);
-        addDelta(toSlotId, itemCbm);
-
-        if (existingTarget) {
-          existingTarget.qty = Number(existingTarget.qty || 0) + qtyValue;
-          await existingTarget.save({ session });
-          await item.deleteOne({ session });
-        } else {
-          item.slot = toSlotId;
-          await item.save({ session });
-          targetByProduct.set(productKey, item);
+        const itemId = String(item._id);
+        const qtyToMove = hasMoves ? moveMap.get(itemId) : qtyValue;
+        if (!Number.isFinite(qtyToMove) || qtyToMove <= 0) {
+          continue;
+        }
+        if (qtyToMove > qtyValue) {
+          res.status(400);
+          throw new Error(
+            "Move qty exceeds on-hand qty for one or more items."
+          );
         }
 
+        const productKey = String(item.product);
+        const existingTarget = targetByProduct.get(productKey);
         const unitCbm = getUnitCbm(itemCbm, qtyValue);
+        const movedCbm = unitCbm * qtyToMove;
+
+        if (movedCbm) {
+          addDelta(fromSlotId, -movedCbm);
+          addDelta(toSlotId, movedCbm);
+        }
+
+        if (existingTarget) {
+          existingTarget.qty = Number(existingTarget.qty || 0) + qtyToMove;
+          await existingTarget.save({ session });
+        } else {
+          if (qtyToMove === qtyValue) {
+            item.slot = toSlotId;
+            await item.save({ session });
+            targetByProduct.set(productKey, item);
+          } else {
+            const movedItem = new SlotItem({
+              product: item.product,
+              slot: toSlotId,
+              qty: qtyToMove,
+            });
+            const saved = await movedItem.save({ session });
+            targetByProduct.set(productKey, saved);
+          }
+        }
+
+        if (qtyToMove < qtyValue) {
+          item.qty = qtyValue - qtyToMove;
+          await item.save({ session });
+        } else if (qtyToMove === qtyValue && existingTarget) {
+          await item.deleteOne({ session });
+        }
+
         await logInventoryMovement(
           {
             type: "MOVE",
             product: item.product,
             fromSlot: fromSlotId,
             toSlot: toSlotId,
-            qty: qtyValue,
+            qty: qtyToMove,
             unitCbm: unitCbm || undefined,
-            cbm: itemCbm || undefined,
+            cbm: movedCbm || undefined,
             actor: req.user?._id || null,
           },
           session

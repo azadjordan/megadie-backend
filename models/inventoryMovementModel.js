@@ -15,7 +15,15 @@ const movementSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    qty: { type: Number, required: true, min: 0 },
+    qty: {
+      type: Number,
+      required: true,
+      min: 0,
+      validate: {
+        validator: Number.isInteger,
+        message: "qty must be a whole number",
+      },
+    },
 
     // Primary slot (single-slot movements)
     slot: { type: mongoose.Schema.Types.ObjectId, ref: "Slot", index: true },

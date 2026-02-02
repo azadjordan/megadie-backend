@@ -7,7 +7,15 @@ const orderAllocationSchema = new mongoose.Schema(
     product: { type: mongoose.Schema.Types.ObjectId, ref: "Product", required: true, index: true },
     slot:    { type: mongoose.Schema.Types.ObjectId, ref: "Slot", required: true, index: true },
 
-    qty: { type: Number, required: true, min: 1 },
+    qty: {
+      type: Number,
+      required: true,
+      min: 1,
+      validate: {
+        validator: Number.isInteger,
+        message: "qty must be a whole number",
+      },
+    },
 
     status: {
       type: String,

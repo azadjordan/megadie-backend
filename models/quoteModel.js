@@ -11,7 +11,16 @@ const requestedItemSchema = new mongoose.Schema(
     productName: { type: String, trim: true },
 
     // ✅ Admin UI needs to allow qty = 0
-    qty: { type: Number, required: true, default: 0, min: [0, "Quantity must be at least 0"] },
+    qty: {
+      type: Number,
+      required: true,
+      default: 0,
+      min: [0, "Quantity must be at least 0"],
+      validate: {
+        validator: Number.isInteger,
+        message: "Quantity must be a whole number",
+      },
+    },
 
     // ✅ unitPrice can be 0
     unitPrice: { type: Number, required: true, default: 0, min: [0, "Unit price cannot be negative"] },

@@ -338,6 +338,17 @@ const parseNonNegativeNumber = (res, raw, message) => {
   return n;
 };
 
+const parseNonNegativeInteger = (res, raw, message) => {
+  if (raw === "" || raw === null || raw === undefined) {
+    throwHttpError(res, 400, message);
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isInteger(n) || n < 0) {
+    throwHttpError(res, 400, message);
+  }
+  return n;
+};
+
 const buildIncomingItemsMap = (
   res,
   requestedItems,
@@ -411,7 +422,11 @@ export const createQuote = asyncHandler(async (req, res) => {
 
   // Sanitize: qty can be 0 in your schema
   const safeItems = requestedItems.map((it) => {
-    const qty = Math.max(0, Number(it.qty) || 0);
+    const qty = parseNonNegativeInteger(
+      res,
+      it?.qty,
+      "Quantity must be a non-negative integer."
+    );
     return {
       product: it.product,
       qty,
@@ -790,9 +805,9 @@ export const updateQuoteQuantitiesByUser = asyncHandler(async (req, res) => {
     }
 
     const qty = Number(rawQty);
-    if (!Number.isFinite(qty) || qty < 0) {
+    if (!Number.isFinite(qty) || !Number.isInteger(qty) || qty < 0) {
       res.status(400);
-      throw new Error("Quantity must be a non-negative number.");
+      throw new Error("Quantity must be a non-negative integer.");
     }
 
     incomingById.set(productId, { ...it, qty });
@@ -917,10 +932,10 @@ export const updateQuoteQuantitiesByAdmin = asyncHandler(async (req, res) => {
   const updatedItems = currentItems.map((existing, idx) => {
     const productId = String(existing.product);
     const incoming = incomingById.get(productId);
-    const qty = parseNonNegativeNumber(
+    const qty = parseNonNegativeInteger(
       res,
       incoming?.qty,
-      `Invalid qty for item #${idx + 1}. Must be >= 0.`
+      `Invalid qty for item #${idx + 1}. Must be a non-negative integer.`
     );
     const availableNow = totalsMap.get(productId) || 0;
     const nextQty = Math.min(Math.max(0, qty), availableNow);

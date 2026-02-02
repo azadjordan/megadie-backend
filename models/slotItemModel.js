@@ -8,7 +8,15 @@ const slotItemSchema = new mongoose.Schema(
     slot:    { type: mongoose.Schema.Types.ObjectId, ref: "Slot", required: true, index: true },
 
     // Quantity currently stored in this slot for this product
-    qty: { type: Number, required: true, min: 0 },
+    qty: {
+      type: Number,
+      required: true,
+      min: 0,
+      validate: {
+        validator: Number.isInteger,
+        message: "qty must be a whole number",
+      },
+    },
 
     // TOTAL CBM for this row (always recalculated = qty * product.cbm)
     cbm: { type: Number, required: true, min: 0 },
@@ -22,8 +30,12 @@ slotItemSchema.index({ product: 1, slot: 1 }, { unique: true });
 // Always recalc total CBM before validate (simple, reliable)
 slotItemSchema.pre("validate", async function (next) {
   try {
-    if (typeof this.qty !== "number" || this.qty < 0) {
-      return next(new Error("qty must be a non-negative number"));
+    if (
+      typeof this.qty !== "number" ||
+      !Number.isInteger(this.qty) ||
+      this.qty < 0
+    ) {
+      return next(new Error("qty must be a non-negative whole number"));
     }
 
     const Product = this.model("Product");

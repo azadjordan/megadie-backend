@@ -15,7 +15,15 @@ import crypto from "crypto";
 const invoiceItemSchema = new mongoose.Schema(
   {
     description: { type: String, required: true, trim: true },
-    qty: { type: Number, required: true, min: 1 },
+    qty: {
+      type: Number,
+      required: true,
+      min: 1,
+      validate: {
+        validator: Number.isInteger,
+        message: "qty must be a whole number",
+      },
+    },
     unitPriceMinor: { type: Number, required: true, min: 0 },
     lineTotalMinor: { type: Number, required: true, min: 0 },
   },
