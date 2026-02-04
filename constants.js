@@ -1,4 +1,4 @@
-// Shared enums & UI constants
+
 
 export const FILTER_FIELD_TYPES = ["enum", "boolean", "range", "text"];
 export const FILTER_UI_TYPES    = ["chips", "select", "checkbox", "slider", "search"];
@@ -9,13 +9,9 @@ export const PRODUCT_TYPES = [
   "Double Face Tape",
 ];
 
-/**
- * GLOBAL TAG ENUMS
- * Used by all product types.
- * Ribbon color families are now just part of the global tag set.
- */
+
 export const TAGS = [
-  // Ribbon color groups
+  
   "Red",
   "Pink",
   "Orange",
@@ -29,20 +25,24 @@ export const TAGS = [
   "Beige/OffWhite",
   "Brown",
 
-  // Example future global tags
+  
   "Transparent",
   "Opaque",
   "Matte",
   "Glossy",
 ];
 
-/**
- * Sizes shared across products
- */
+
+export const CRM_SIZES = [
+  "0.4 x 1.5",
+  "0.5 x 1.5",
+  "0.5 x 1.6",
+];
+
 export const SIZES = [
   "1 inch", "3/4 inch", "5/8 inch", "1/2 inch",
   "25 mm", "20 mm", "13 mm",
- "0.4 x 1.5 - 11mm", "0.4 x 1.5 - 12mm", "0.5 Ã— 1.6 - 11mm",
+  ...CRM_SIZES,
   "6 mm", "9 mm", "10 mm", "12 mm",
 ];
 
@@ -54,18 +54,14 @@ export const GRADES = [
   "B-",
   ];
 
-/**
- * Generic finish / construction axis:
- * - For ribbons: "Single Face", "Double Face"
- * - For other product types: Matte, Glossy, Embossed, etc.
- */
+
 export const FINISHES = [
   "Single Face",
   "Double Face",
-  // Future-proofing:
-  // "Matte",
-  // "Glossy",
-  // "Embossed",
+  
+  
+  
+  
 ];
 
 export const VARIANTS = [
@@ -83,7 +79,7 @@ export const PACKING_UNITS = [
   "50m Roll",
 ];
 
-// SKU short tokens for enum-like fields (others are sanitized directly)
+
 export const SKU_TOKENS = {
   productType: {
     Ribbon: "RIB",
@@ -97,6 +93,7 @@ export const SKU_TOKENS = {
     paper: "PAP",
     pro: "PRO",
     plus: "PLUS",
+    go: "GO",
   },
   size: {
     "1 inch": "1-IN",
@@ -106,10 +103,9 @@ export const SKU_TOKENS = {
     "25 mm": "25-MM",
     "20 mm": "20-MM",
     "13 mm": "13-MM",
-    "0.4 x 1.5 - 11mm": "04X15X11MM",
-    "0.4 x 1.5 - 12mm": "04X15X12MM",
-    "0.4 x 1.5 - 9mm": "04X15X9MM",
-    "0.5 x 1.6 - 11mm": "05X16X11MM",
+    "0.4 x 1.5": "04X15",
+    "0.5 x 1.5": "05X15",
+    "0.5 x 1.6": "05X16",
     "6 mm": "6-MM",
     "9 mm": "9-MM",
     "10 mm": "10-MM",
@@ -141,25 +137,19 @@ export const SKU_TOKENS = {
 };
 
 
-/** 
- * SLOT SYSTEM 
- * Stores â†’ AE1 / AE2
- * Units include FLOOR
- */
+
 export const SLOT_STORES = ["AE1", "AE2"];
 
 export const SLOT_UNITS = [
   "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R",
-  "FLOOR", // â† NEW
+  "FLOOR", 
 ];
 
 export const SLOT_POSITIONS = [
   1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
 ];
 
-/**
- * Ribbon catalog code list
- */
+
 export const ribbonCatalogCodes = [
   "000","007","009","012","017",
   "028","029","030","077","105",
@@ -181,5 +171,7 @@ export const ribbonCatalogCodes = [
   "868","869","870",
   "028B","029B","030B"
 ];
+
+
 
 
