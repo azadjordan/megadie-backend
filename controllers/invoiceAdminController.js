@@ -672,9 +672,11 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
       throw new Error("Order not found.");
     }
 
-    if (order.status !== "Processing") {
+    if (!["Shipping", "Delivered"].includes(order.status)) {
       res.status(400);
-      throw new Error("Invoices can only be created for Processing orders.");
+      throw new Error(
+        "Invoices can only be created for Shipping or Delivered orders."
+      );
     }
 
     if (order.invoice) {

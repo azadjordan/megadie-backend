@@ -163,13 +163,13 @@ export const upsertOrderAllocation = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Stock finalized. Allocations are locked.");
   }
+  if (order.invoice) {
+    res.status(409);
+    throw new Error("Remove the invoice before unreserving allocations.");
+  }
   if (["Delivered", "Cancelled"].includes(order.status)) {
     res.status(409);
     throw new Error("Allocations are locked for delivered or cancelled orders.");
-  }
-  if (!order.invoice) {
-    res.status(409);
-    throw new Error("Invoice required before reserving stock.");
   }
   if (order.status !== "Shipping") {
     res.status(409);
@@ -327,10 +327,6 @@ export const deleteOrderAllocation = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Allocations are locked for delivered or cancelled orders.");
   }
-  if (!order.invoice) {
-    res.status(409);
-    throw new Error("Invoice required before reserving stock.");
-  }
   if (order.status !== "Shipping") {
     res.status(409);
     throw new Error("Reservations are allowed only when the order is Shipping.");
@@ -394,17 +390,17 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
         res.status(404);
         throw new Error("Order not found.");
       }
-      if (["Delivered", "Cancelled"].includes(order.status)) {
+      if (order.status === "Cancelled") {
         res.status(409);
-        throw new Error("Allocations are locked for delivered or cancelled orders.");
+        throw new Error("Allocations are locked for cancelled orders.");
+      }
+      if (order.status !== "Delivered") {
+        res.status(409);
+        throw new Error("Finalize is allowed only when the order is Delivered.");
       }
       if (!order.invoice) {
         res.status(409);
         throw new Error("Invoice required before finalizing stock.");
-      }
-      if (order.status !== "Shipping") {
-        res.status(409);
-        throw new Error("Finalize is allowed only when the order is Shipping.");
       }
 
       const allocations = await OrderAllocation.find({ order: orderId })

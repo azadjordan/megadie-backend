@@ -7,6 +7,7 @@ import Payment from "../models/paymentModel.js";
 import Product from "../models/productModel.js";
 import User from "../models/userModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
+import { logInventoryMovement } from "../utils/inventoryMovement.js";
 
 /* =========================
    Helpers (pagination)
@@ -428,19 +429,13 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
         throw new Error("Order must be Shipping before delivery.");
       }
 
-      const hasInvoice = !!order.invoice;
       const triesDeliveryCharge = Object.prototype.hasOwnProperty.call(
         body,
         "deliveryCharge"
       );
       const triesExtraFee = Object.prototype.hasOwnProperty.call(body, "extraFee");
 
-      if (!hasInvoice) {
-        res.status(409);
-        throw new Error("Invoice required before delivery.");
-      }
-
-      if (hasInvoice && (triesDeliveryCharge || triesExtraFee)) {
+      if (order.invoice && (triesDeliveryCharge || triesExtraFee)) {
         res.status(400);
         throw new Error(
           "Cannot modify deliveryCharge or extraFee because an invoice already exists for this order."
@@ -482,60 +477,55 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
       }
       order.deliveredBy = deliveredBy;
 
-      if (!order.stockFinalizedAt) {
-        const allocations = await OrderAllocation.find({ order: order._id })
-          .select("product qty status")
-          .lean()
-          .session(session);
+      const allocations = await OrderAllocation.find({ order: order._id })
+        .select("product qty status")
+        .lean()
+        .session(session);
 
-        if (!allocations.length) {
+      const activeAllocations = allocations.filter(
+        (row) => !row.status || row.status === "Reserved" || row.status === "Deducted"
+      );
+
+      if (!activeAllocations.length) {
+        res.status(409);
+        throw new Error(
+          "Order has no reservations. Reserve all items before delivery."
+        );
+      }
+
+      const reservedAllocations = activeAllocations.filter(
+        (row) => !row.status || row.status === "Reserved"
+      );
+      const deductedAllocations = activeAllocations.filter(
+        (row) => row.status === "Deducted"
+      );
+
+      if (reservedAllocations.length && deductedAllocations.length) {
+        res.status(409);
+        throw new Error(
+          "Order allocations are partially deducted. Resolve before delivery."
+        );
+      }
+
+      const allocatedTotals = new Map();
+      for (const row of activeAllocations) {
+        const key = String(row.product);
+        allocatedTotals.set(
+          key,
+          (allocatedTotals.get(key) || 0) + (Number(row.qty) || 0)
+        );
+      }
+
+      for (const item of order.orderItems || []) {
+        const productId = String(item.product);
+        const orderedQty = Number(item.qty) || 0;
+        const allocatedQty = allocatedTotals.get(productId) || 0;
+        if (allocatedQty !== orderedQty) {
           res.status(409);
           throw new Error(
-            "Order has no allocations. Finalize allocations before delivery."
+            "All items must be fully reserved before delivery."
           );
         }
-
-        const hasReservedAllocations = allocations.some(
-          (row) => !row.status || row.status === "Reserved"
-        );
-        if (hasReservedAllocations) {
-          res.status(409);
-          throw new Error(
-            "Order has reserved allocations. Finalize allocations before delivery."
-          );
-        }
-
-        const deductedTotals = new Map();
-        for (const row of allocations) {
-          if (row.status !== "Deducted") continue;
-          const key = String(row.product);
-          deductedTotals.set(
-            key,
-            (deductedTotals.get(key) || 0) + (Number(row.qty) || 0)
-          );
-        }
-
-        for (const item of order.orderItems || []) {
-          const productId = String(item.product);
-          const orderedQty = Number(item.qty) || 0;
-          const deductedQty = deductedTotals.get(productId) || 0;
-          if (deductedQty !== orderedQty) {
-            res.status(409);
-            throw new Error(
-              "Order allocations are not finalized. Finalize allocations before delivery."
-            );
-          }
-        }
-
-        order.stockFinalizedAt = new Date();
-        const expiresAt = new Date(
-          order.stockFinalizedAt.getTime() + 60 * 24 * 60 * 60 * 1000
-        );
-        await OrderAllocation.updateMany(
-          { order: order._id },
-          { $set: { expiresAt } },
-          { session }
-        );
       }
 
       if (order.quote) {
@@ -569,6 +559,123 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
 });
 
 /* =========================
+   POST /api/orders/:id/cancel
+   Private/Admin
+   Cancel an order and cleanup:
+   - Cancel + delete invoice and payments (if present)
+   - Unreserve all allocations
+   - Set status to Cancelled
+   ========================= */
+export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
+  const { id: orderId } = req.params;
+
+  if (!mongoose.isValidObjectId(orderId)) {
+    res.status(400);
+    throw new Error("Invalid order id.");
+  }
+
+  const session = await mongoose.startSession();
+  const summary = {
+    orderId,
+    invoiceDeleted: false,
+    paymentsDeleted: 0,
+    allocationsDeleted: 0,
+  };
+
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findById(orderId).session(session);
+      if (!order) {
+        res.status(404);
+        throw new Error("Order not found.");
+      }
+
+      if (order.stockFinalizedAt) {
+        res.status(409);
+        throw new Error("Stock finalized orders cannot be cancelled.");
+      }
+
+      const allocations = await OrderAllocation.find({ order: orderId })
+        .select("product slot qty status note")
+        .lean()
+        .session(session);
+
+      const hasDeducted = allocations.some(
+        (row) => row?.status === "Deducted"
+      );
+      if (hasDeducted) {
+        res.status(409);
+        throw new Error(
+          "Order has deducted allocations. Reverse stock finalization before cancelling."
+        );
+      }
+
+      if (order.invoice) {
+        const invoice = await Invoice.findById(order.invoice).session(session);
+        if (invoice) {
+          if (invoice.status !== "Cancelled") {
+            invoice.status = "Cancelled";
+            invoice.cancelReason =
+              invoice.cancelReason || "Cancelled with order";
+            if (!invoice.cancelledAt) invoice.cancelledAt = new Date();
+            await invoice.save({ session });
+          }
+
+          const paymentResult = await Payment.deleteMany({
+            invoice: invoice._id,
+          }).session(session);
+          summary.paymentsDeleted = paymentResult?.deletedCount || 0;
+
+          await Invoice.deleteOne({ _id: invoice._id }).session(session);
+          summary.invoiceDeleted = true;
+        }
+
+        order.invoice = null;
+      }
+
+      const releaseAllocations = allocations.filter(
+        (row) => !row?.status || row.status === "Reserved"
+      );
+      for (const allocation of releaseAllocations) {
+        await logInventoryMovement(
+          {
+            type: "RELEASE",
+            product: allocation.product,
+            slot: allocation.slot,
+            order: orderId,
+            allocation: allocation._id,
+            qty: Number(allocation.qty) || 0,
+            actor: req.user?._id || null,
+            note: allocation.note || undefined,
+          },
+          session
+        );
+      }
+
+      const deleteResult = await OrderAllocation.deleteMany({
+        order: orderId,
+      }).session(session);
+      summary.allocationsDeleted = deleteResult?.deletedCount || 0;
+
+      order.status = "Cancelled";
+      order.deliveredAt = null;
+      order.allocationStatus = "Unallocated";
+      order.allocatedAt = null;
+
+      await order.save({ session });
+    });
+  } finally {
+    session.endSession();
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Order cancelled and cleaned up.",
+    data: summary,
+  });
+});
+
+/* =========================
    PUT /api/orders/:id
    Private/Admin
    Update allowed top-level fields; orderItems are immutable
@@ -591,6 +698,10 @@ export const updateOrder = asyncHandler(async (req, res) => {
   if (req.body?.status === "Delivered") {
     res.status(400);
     throw new Error("Use /api/orders/:id/deliver to mark an order as Delivered.");
+  }
+  if (req.body?.status === "Cancelled") {
+    res.status(409);
+    throw new Error("Use /api/orders/:id/cancel to cancel orders.");
   }
 
   const hasInvoice = !!order.invoice;
@@ -625,46 +736,11 @@ export const updateOrder = asyncHandler(async (req, res) => {
 
   if (
     Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
-    nextStatus === "Cancelled"
-  ) {
-    if (prevStatus === "Delivered") {
-      res.status(409);
-      throw new Error("Delivered orders cannot be cancelled.");
-    }
-    if (order.stockFinalizedAt) {
-      res.status(409);
-      throw new Error("Stock finalized orders cannot be cancelled.");
-    }
-
-    const hasBlockingAllocations = await OrderAllocation.exists({
-      order: order._id,
-      $or: [
-        { status: { $in: ["Reserved", "Deducted"] } },
-        { status: { $exists: false } },
-      ],
-    });
-    if (hasBlockingAllocations) {
-      res.status(409);
-      throw new Error("Remove allocations before cancelling this order.");
-    }
-  }
-
-  if (
-    Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
     nextStatus === "Shipping" &&
     prevStatus !== "Processing"
   ) {
     res.status(409);
     throw new Error("Only Processing orders can be set to Shipping.");
-  }
-
-  if (
-    Object.prototype.hasOwnProperty.call(req.body || {}, "status") &&
-    nextStatus === "Shipping" &&
-    !order.invoice
-  ) {
-    res.status(400);
-    throw new Error("Invoice required before setting Shipping status.");
   }
 
   if (
@@ -675,6 +751,10 @@ export const updateOrder = asyncHandler(async (req, res) => {
     if (prevStatus === "Delivered") {
       res.status(409);
       throw new Error("Delivered orders cannot be moved back to Processing.");
+    }
+    if (prevStatus !== "Cancelled") {
+      res.status(409);
+      throw new Error("Only Cancelled orders can be moved back to Processing.");
     }
     if (order.stockFinalizedAt) {
       res.status(409);

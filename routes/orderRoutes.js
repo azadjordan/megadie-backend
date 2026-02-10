@@ -8,6 +8,7 @@ import {
   deleteOrder,
   updateOrder,
   markOrderDelivered,
+  cancelOrderAndCleanup,
 } from "../controllers/orderController.js";
 import {
   getOrderAllocations,
@@ -30,6 +31,8 @@ router.post("/from-quote/:quoteId", protect, admin, createOrderFromQuote);
 
 // Mark order as delivered (admin)
 router.put("/:id/deliver", protect, admin, markOrderDelivered);
+// Cancel order and cleanup (admin)
+router.post("/:id/cancel", protect, admin, cancelOrderAndCleanup);
 
 // Order allocations (admin)
 router.get("/:id/allocations", protect, admin, getOrderAllocations);
