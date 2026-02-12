@@ -94,9 +94,10 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
       )
     : minorToMajor(manualSubtotalMinor, minorUnitFactor);
 
+  const computedTotal = subtotal + deliveryCharge + extraFee;
   const invoiceAmount = Number.isFinite(Number(invoice?.amountMinor))
     ? minorToMajor(invoice.amountMinor, minorUnitFactor)
-    : subtotal + deliveryCharge + extraFee;
+    : computedTotal;
 
   const paymentsArray = Array.isArray(invoice?.payments) ? invoice.payments : [];
   const receivedPaymentsTotal = paymentsArray.reduce((sum, p) => {

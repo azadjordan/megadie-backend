@@ -973,6 +973,113 @@ export const updateQuoteQuantitiesByAdmin = asyncHandler(async (req, res) => {
 });
 
 /* =========================
+   PUT /api/quotes/admin/:id/items
+   Private/Admin
+   Replace quote items (add/remove/update) with availability snapshot
+   ========================= */
+export const updateQuoteItemsByAdmin = asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  const quote = await Quote.findById(id);
+
+  if (!quote) {
+    res.status(404);
+    throw new Error("Quote not found.");
+  }
+
+  ensureQuoteEditable(res, quote);
+
+  const { requestedItems } = req.body || {};
+  if (!Array.isArray(requestedItems) || requestedItems.length === 0) {
+    throwHttpError(res, 400, "Quote must contain at least one item.");
+  }
+
+  const incomingRows = [];
+  const seenProducts = new Set();
+
+  for (let i = 0; i < requestedItems.length; i += 1) {
+    const row = requestedItems[i] || {};
+    const rawProduct = row.product || row.productId;
+    if (!rawProduct) {
+      throwHttpError(res, 400, "Each item must include a product id.");
+    }
+    const productId = String(rawProduct);
+    if (!mongoose.Types.ObjectId.isValid(productId)) {
+      throwHttpError(res, 400, "Invalid product in requested items.");
+    }
+    if (seenProducts.has(productId)) {
+      throwHttpError(res, 400, "Duplicate product in requested items.");
+    }
+
+    const qty = parseNonNegativeInteger(
+      res,
+      row.qty,
+      `Invalid qty for item #${i + 1}. Must be a non-negative integer.`
+    );
+
+    seenProducts.add(productId);
+    incomingRows.push({ productId, qty });
+  }
+
+  const productIds = incomingRows.map((row) => row.productId);
+  const products = await Product.find(
+    { _id: { $in: productIds } },
+    { _id: 1, name: 1 }
+  ).lean();
+
+  if (products.length !== productIds.length) {
+    throwHttpError(res, 400, "One or more products were not found.");
+  }
+
+  const productMetaMap = new Map(
+    products.map((product) => [String(product._id), product])
+  );
+  const existingById = new Map(
+    (quote.requestedItems || []).map((it) => [String(it.product), it])
+  );
+  const totalsMap = await getAvailabilityTotalsByProduct(productIds);
+
+  const updatedItems = incomingRows.map((row, idx) => {
+    const productMeta = productMetaMap.get(row.productId);
+    if (!productMeta) {
+      throwHttpError(res, 400, `Invalid product for item #${idx + 1}.`);
+    }
+    const existing = existingById.get(row.productId);
+    const availableNow = totalsMap.get(row.productId) || 0;
+    const nextQty = Math.min(Math.max(0, row.qty), availableNow);
+    const nextShortage = Math.max(0, nextQty - availableNow);
+    const nextStatus = getAvailabilityStatus(nextQty, availableNow);
+
+    return {
+      product: productMeta._id,
+      productName: productMeta.name || existing?.productName || "",
+      qty: nextQty,
+      priceRule: existing?.priceRule ?? null,
+      unitPrice: existing ? Math.max(0, Number(existing.unitPrice) || 0) : 0,
+      availableNow,
+      shortage: nextShortage,
+      availabilityStatus: nextStatus,
+    };
+  });
+
+  const filteredItems = updatedItems.filter((it) => Number(it.qty) > 0);
+  if (!filteredItems.length) {
+    throwHttpError(res, 409, "At least one item must remain in the quote.");
+  }
+
+  quote.requestedItems = filteredItems;
+  quote.availabilityCheckedAt = new Date();
+
+  await quote.save();
+
+  const populated = await populateAdminQuote(quote._id);
+  res.status(200).json({
+    success: true,
+    message: "Quote items updated.",
+    data: populated,
+  });
+});
+
+/* =========================
    PUT /api/quotes/admin/:id/pricing
    Private/Admin
    Update pricing only (unit prices + charges)

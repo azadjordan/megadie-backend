@@ -45,7 +45,7 @@ export const getInventoryProducts = asyncHandler(async (req, res) => {
       : null;
   if (q) {
     const regex = { $regex: escapeRegex(q), $options: "i" };
-    const search = [{ sku: regex }];
+    const search = [{ sku: regex }, { name: regex }];
     if (filter.$or) {
       filter.$and = filter.$and || [];
       filter.$and.push({ $or: filter.$or }, { $or: search });

@@ -22,7 +22,6 @@ const router = express.Router();
 
 // ✅ Get all orders (admin)
 router.get("/", protect, admin, getOrders);
-
 // ✅ Get my orders (user)
 router.get("/my", protect, getMyOrders);
 
@@ -48,3 +47,4 @@ router
   .delete(protect, admin, deleteOrder);
 
 export default router;
+

@@ -664,7 +664,7 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
 
   try {
     const order = await Order.findById(orderId)
-      .select("user status totalPrice invoice")
+      .select("user status totalPrice invoice orderItems deliveryCharge extraFee")
       .session(session);
 
     if (!order) {
@@ -702,7 +702,16 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
       throw new Error("minorUnitFactor must be a positive integer.");
     }
 
-    const amountMinor = toMinorUnits(order.totalPrice, minorUnitFactor);
+    const orderItems = Array.isArray(order.orderItems) ? order.orderItems : [];
+    const itemsTotal = orderItems.reduce((sum, item) => {
+      const qty = Number(item?.qty) || 0;
+      const unitPrice = Number(item?.unitPrice) || 0;
+      return sum + qty * unitPrice;
+    }, 0);
+    const deliveryCharge = Number(order.deliveryCharge) || 0;
+    const extraFee = Number(order.extraFee) || 0;
+    const computedTotal = itemsTotal + deliveryCharge + extraFee;
+    const amountMinor = toMinorUnits(computedTotal, minorUnitFactor);
     if (!Number.isFinite(amountMinor) || amountMinor < 0) {
       res.status(400);
       throw new Error("Order total is invalid for invoice creation.");

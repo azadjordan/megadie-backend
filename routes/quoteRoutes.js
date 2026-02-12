@@ -16,6 +16,7 @@ import {
 
   // Admin step endpoints
   updateQuoteOwnerByAdmin,
+  updateQuoteItemsByAdmin,
   updateQuoteQuantitiesByAdmin,
   updateQuotePricingByAdmin,
   assignUserPricesByAdmin,
@@ -50,6 +51,7 @@ router.route("/admin").get(protect, admin, getQuotes);
 // Admin-only step endpoints
 // NOTE: Put these BEFORE "/:id" routes to avoid path conflicts.
 router.put("/admin/:id/owner", protect, admin, updateQuoteOwnerByAdmin);
+router.put("/admin/:id/items", protect, admin, updateQuoteItemsByAdmin);
 router.put(
   "/admin/:id/quantities",
   protect,
