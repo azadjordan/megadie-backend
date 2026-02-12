@@ -282,8 +282,8 @@ export const getOrders = asyncHandler(async (req, res) => {
     Order.countDocuments(filter),
     Order.find(filter)
       .populate("user", "name email")
-      // ✅ populate invoice number for UI
-      .populate("invoice", "invoiceNumber")
+        // ✅ populate invoice number + payment status for UI
+        .populate("invoice", "invoiceNumber paymentStatus")
       .sort(sort)
       .skip(skip)
       .limit(limit)
