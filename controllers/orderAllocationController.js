@@ -163,10 +163,6 @@ export const upsertOrderAllocation = asyncHandler(async (req, res) => {
     res.status(409);
     throw new Error("Stock finalized. Allocations are locked.");
   }
-  if (order.invoice) {
-    res.status(409);
-    throw new Error("Remove the invoice before unreserving allocations.");
-  }
   if (["Delivered", "Cancelled"].includes(order.status)) {
     res.status(409);
     throw new Error("Allocations are locked for delivered or cancelled orders.");
@@ -284,9 +280,14 @@ export const upsertOrderAllocation = asyncHandler(async (req, res) => {
     });
   }
 
+  const warning = order.invoice
+    ? "Invoice exists for this order. Verify shipment documents after reservation changes."
+    : "";
+
   res.status(200).json({
     success: true,
     message: "Order allocation saved.",
+    ...(warning ? { warning } : {}),
     data: updated,
   });
 });
@@ -359,9 +360,14 @@ export const deleteOrderAllocation = asyncHandler(async (req, res) => {
   await allocation.deleteOne();
   await recomputeAllocationStatus(orderId);
 
+  const warning = order.invoice
+    ? "Invoice exists for this order. Verify shipment documents after reservation changes."
+    : "";
+
   res.status(200).json({
     success: true,
     message: "Allocation deleted.",
+    ...(warning ? { warning } : {}),
     data: { id: allocationId },
   });
 });
