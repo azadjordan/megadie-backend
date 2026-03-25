@@ -89,13 +89,15 @@ const renderStatementOfAccountHtml = ({
   invoices,
   summary,
   generatedAt,
+  cutoffDateLabel,
 }) => {
   const list = Array.isArray(invoices) ? invoices : [];
   const currency = summary?.currency || "AED";
   const factor = summary?.minorUnitFactor || 100;
   const unpaidTotal = summary?.totalDueMinor ?? 0;
   const overdueTotal = summary?.overdueTotalMinor ?? 0;
-  const asOf = formatDateTime(generatedAt || new Date());
+  const generatedLabel = formatDateTime(generatedAt || new Date());
+  const hasCutoffDate = Boolean(cutoffDateLabel);
   const openCount = list.length;
   const overdueCount = list.reduce(
     (sum, inv) => (isOverdue(inv) ? sum + 1 : sum),
@@ -108,7 +110,7 @@ const renderStatementOfAccountHtml = ({
     list.length === 0
       ? `
         <tr>
-          <td colspan="5" class="empty">No unpaid invoices at this time.</td>
+          <td colspan="5" class="empty">No unpaid invoices match this statement scope.</td>
         </tr>
       `
       : list
@@ -285,7 +287,12 @@ const renderStatementOfAccountHtml = ({
           </div>
           <div class="title-block">
             <div class="doc-title">Statement of Account</div>
-            <div class="meta">As of ${safeText(asOf)}</div>
+            <div class="meta">Generated ${safeText(generatedLabel)}</div>
+            <div class="meta">
+              ${hasCutoffDate
+                ? `Includes invoices issued on or before ${safeText(cutoffDateLabel)}`
+                : "Includes all currently unpaid invoices"}
+            </div>
           </div>
         </header>
         <div class="accent"></div>
@@ -304,7 +311,7 @@ const renderStatementOfAccountHtml = ({
             )}</div>
           </div>
           <div class="summary-card">
-            <div class="summary-label">Open invoices</div>
+            <div class="summary-label">Unpaid invoices</div>
             <div class="summary-value">${safeText(openLabel)}</div>
           </div>
         </div>
@@ -332,7 +339,7 @@ const renderStatementOfAccountHtml = ({
 
         <section class="section">
           <div class="section-head">
-            <div class="section-title">Open invoices</div>
+            <div class="section-title">Unpaid invoices</div>
             <div class="section-rule"></div>
           </div>
           <table>

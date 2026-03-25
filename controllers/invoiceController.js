@@ -441,15 +441,21 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
 
 /**
  * @desc    Get SOA PDF for a user (admin only)
- * @route   GET /api/invoices/soa/:userId
+ * @route   GET /api/invoices/soa/:userId?to=YYYY-MM-DD
  * @access  Private/Admin
  */
 export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const { userId } = req.params;
+  const to = parseBoundedDate(req.query.to, "end");
 
   if (!mongoose.Types.ObjectId.isValid(userId)) {
     res.status(400);
     throw new Error("Invalid user id.");
+  }
+
+  if (req.query.to && !to) {
+    res.status(400);
+    throw new Error("Invalid 'to' date.");
   }
 
   const client = await User.findById(userId)
@@ -460,12 +466,18 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     throw new Error("User not found.");
   }
 
-  const invoices = await Invoice.find({
+  const invoiceFilter = {
     user: userId,
     status: "Issued",
     paymentStatus: { $ne: "Paid" },
     balanceDueMinor: { $gt: 0 },
-  })
+  };
+
+  if (to) {
+    invoiceFilter.createdAt = { $lte: to };
+  }
+
+  const invoices = await Invoice.find(invoiceFilter)
     .select(
       [
         "invoiceNumber",
@@ -500,6 +512,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     invoices,
     summary: { totalDueMinor, overdueTotalMinor, currency, minorUnitFactor },
     generatedAt: new Date(),
+    cutoffDateLabel: req.query.to ? String(req.query.to).slice(0, 10) : "",
   });
 
   const safeName = String(client.name || "client")
@@ -507,7 +520,9 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     .replace(/[^A-Za-z0-9_-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
-  const dateTag = new Date().toISOString().slice(0, 10);
+  const dateTag = req.query.to
+    ? String(req.query.to).slice(0, 10)
+    : new Date().toISOString().slice(0, 10);
   const fileName = `soa-${safeName || client._id}-${dateTag}.pdf`;
 
   let browser;
@@ -536,4 +551,3 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     }
   }
 });
-
