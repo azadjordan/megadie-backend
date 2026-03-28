@@ -441,11 +441,12 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
 
 /**
  * @desc    Get SOA PDF for a user (admin only)
- * @route   GET /api/invoices/soa/:userId?to=YYYY-MM-DD
+ * @route   GET /api/invoices/soa/:userId?from=YYYY-MM-DD&to=YYYY-MM-DD
  * @access  Private/Admin
  */
 export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const { userId } = req.params;
+  const from = parseBoundedDate(req.query.from, "start");
   const to = parseBoundedDate(req.query.to, "end");
 
   if (!mongoose.Types.ObjectId.isValid(userId)) {
@@ -453,9 +454,17 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     throw new Error("Invalid user id.");
   }
 
+  if (req.query.from && !from) {
+    res.status(400);
+    throw new Error("Invalid 'from' date.");
+  }
   if (req.query.to && !to) {
     res.status(400);
     throw new Error("Invalid 'to' date.");
+  }
+  if (from && to && from.getTime() > to.getTime()) {
+    res.status(400);
+    throw new Error("'from' date must be before or equal to 'to' date.");
   }
 
   const client = await User.findById(userId)
@@ -473,8 +482,10 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     balanceDueMinor: { $gt: 0 },
   };
 
-  if (to) {
-    invoiceFilter.createdAt = { $lte: to };
+  if (from || to) {
+    invoiceFilter.createdAt = {};
+    if (from) invoiceFilter.createdAt.$gte = from;
+    if (to) invoiceFilter.createdAt.$lte = to;
   }
 
   const invoices = await Invoice.find(invoiceFilter)
@@ -512,6 +523,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     invoices,
     summary: { totalDueMinor, overdueTotalMinor, currency, minorUnitFactor },
     generatedAt: new Date(),
+    fromDateLabel: req.query.from ? String(req.query.from).slice(0, 10) : "",
     cutoffDateLabel: req.query.to ? String(req.query.to).slice(0, 10) : "",
   });
 
@@ -520,10 +532,13 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     .replace(/[^A-Za-z0-9_-]+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-+|-+$/g, "");
+  const fromTag = req.query.from ? String(req.query.from).slice(0, 10) : "";
   const dateTag = req.query.to
     ? String(req.query.to).slice(0, 10)
     : new Date().toISOString().slice(0, 10);
-  const fileName = `soa-${safeName || client._id}-${dateTag}.pdf`;
+  const fileName = fromTag
+    ? `soa-${safeName || client._id}-${fromTag}-to-${dateTag}.pdf`
+    : `soa-${safeName || client._id}-${dateTag}.pdf`;
 
   let browser;
   try {

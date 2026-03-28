@@ -89,6 +89,7 @@ const renderStatementOfAccountHtml = ({
   invoices,
   summary,
   generatedAt,
+  fromDateLabel,
   cutoffDateLabel,
 }) => {
   const list = Array.isArray(invoices) ? invoices : [];
@@ -97,7 +98,15 @@ const renderStatementOfAccountHtml = ({
   const unpaidTotal = summary?.totalDueMinor ?? 0;
   const overdueTotal = summary?.overdueTotalMinor ?? 0;
   const generatedLabel = formatDateTime(generatedAt || new Date());
+  const hasFromDate = Boolean(fromDateLabel);
   const hasCutoffDate = Boolean(cutoffDateLabel);
+  const scopeLabel = hasFromDate && hasCutoffDate
+    ? `Includes invoices issued between ${safeText(fromDateLabel)} and ${safeText(
+        cutoffDateLabel
+      )}`
+    : hasCutoffDate
+    ? `Includes invoices issued on or before ${safeText(cutoffDateLabel)}`
+    : "Includes all currently unpaid invoices";
   const openCount = list.length;
   const overdueCount = list.reduce(
     (sum, inv) => (isOverdue(inv) ? sum + 1 : sum),
@@ -288,11 +297,7 @@ const renderStatementOfAccountHtml = ({
           <div class="title-block">
             <div class="doc-title">Statement of Account</div>
             <div class="meta">Generated ${safeText(generatedLabel)}</div>
-            <div class="meta">
-              ${hasCutoffDate
-                ? `Includes invoices issued on or before ${safeText(cutoffDateLabel)}`
-                : "Includes all currently unpaid invoices"}
-            </div>
+            <div class="meta">${scopeLabel}</div>
           </div>
         </header>
         <div class="accent"></div>
