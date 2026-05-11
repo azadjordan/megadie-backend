@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import OrderAllocation from "../models/orderAllocationModel.js";
 import SlotItem from "../models/slotItemModel.js";
 
 export function getAvailabilityStatus(requestedQty, availableNow) {
@@ -18,12 +19,35 @@ export async function getAvailabilityTotalsByProduct(productIds) {
 
   if (ids.length === 0) return new Map();
 
-  const rows = await SlotItem.aggregate([
-    { $match: { product: { $in: ids }, qty: { $gt: 0 } } },
-    { $group: { _id: "$product", availableNow: { $sum: "$qty" } } },
+  // availableNow means physical on-hand stock minus active order reservations.
+  // Quotes do not reserve stock; only existing order allocations reduce availability.
+  const [stockRows, reservedRows] = await Promise.all([
+    SlotItem.aggregate([
+      { $match: { product: { $in: ids }, qty: { $gt: 0 } } },
+      { $group: { _id: "$product", onHand: { $sum: "$qty" } } },
+    ]),
+    OrderAllocation.aggregate([
+      {
+        $match: {
+          product: { $in: ids },
+          $or: [{ status: "Reserved" }, { status: { $exists: false } }],
+        },
+      },
+      { $group: { _id: "$product", reserved: { $sum: "$qty" } } },
+    ]),
   ]);
 
   const map = new Map();
-  for (const r of rows) map.set(String(r._id), Number(r.availableNow) || 0);
+  const reservedByProduct = new Map(
+    reservedRows.map((row) => [String(row._id), Number(row.reserved) || 0])
+  );
+
+  for (const row of stockRows) {
+    const productId = String(row._id);
+    const onHand = Number(row.onHand) || 0;
+    const reserved = reservedByProduct.get(productId) || 0;
+    map.set(productId, Math.max(0, onHand - reserved));
+  }
+
   return map;
 }
