@@ -64,6 +64,10 @@ function applyApprovalStatus(user, nextStatus, actorId) {
   user.rejectedBy = null;
 }
 
+function assignAdminNote(user, value) {
+  user.adminNote = String(value ?? "");
+}
+
 const USER_SORT_MAP = {
   newest: { createdAt: -1 },
   oldest: { createdAt: 1 },
@@ -414,7 +418,12 @@ export const getUsers = asyncHandler(async (req, res) => {
   if (search) {
     const regex = new RegExp(escapeRegex(search), "i");
     andFilters.push({
-      $or: [{ name: regex }, { email: regex }, { phoneNumber: regex }],
+      $or: [
+        { name: regex },
+        { email: regex },
+        { phoneNumber: regex },
+        { adminNote: regex },
+      ],
     });
   }
 
@@ -442,7 +451,7 @@ export const getUsers = asyncHandler(async (req, res) => {
   const [total, usersRaw] = await Promise.all([
     User.countDocuments(filter),
     User.find(filter)
-      .select("name email phoneNumber address isAdmin approvalStatus createdAt")
+      .select("name email phoneNumber address isAdmin approvalStatus adminNote createdAt")
       .sort(sort)
       .skip(skip)
       .limit(limit)
@@ -594,6 +603,9 @@ export const updateUser = asyncHandler(async (req, res) => {
   if (req.body.phoneNumber != null) user.phoneNumber = req.body.phoneNumber;
   if (req.body.address != null) user.address = req.body.address;
   if (req.body.isAdmin != null) user.isAdmin = Boolean(req.body.isAdmin);
+  if (Object.prototype.hasOwnProperty.call(req.body, "adminNote")) {
+    assignAdminNote(user, req.body.adminNote);
+  }
 
   if (req.body.approvalStatus != null) {
     const nextStatus = String(req.body.approvalStatus);
@@ -623,6 +635,7 @@ export const updateUser = asyncHandler(async (req, res) => {
         address: updatedUser.address,
         isAdmin: updatedUser.isAdmin,
         approvalStatus: updatedUser.approvalStatus,
+        adminNote: updatedUser.adminNote,
       },
     });
   } catch (err) {
@@ -664,6 +677,10 @@ export const updateUserApprovalStatus = asyncHandler(async (req, res) => {
     }
   }
 
+  if (Object.prototype.hasOwnProperty.call(req.body || {}, "adminNote")) {
+    assignAdminNote(user, req.body.adminNote);
+  }
+
   const updatedUser = await user.save();
 
   return res.status(200).json({
@@ -674,6 +691,7 @@ export const updateUserApprovalStatus = asyncHandler(async (req, res) => {
       approvalStatus: updatedUser.approvalStatus,
       approvedAt: updatedUser.approvedAt,
       rejectedAt: updatedUser.rejectedAt,
+      adminNote: updatedUser.adminNote,
     },
   });
 });
@@ -706,4 +724,3 @@ export const updateUserPasswordByAdmin = asyncHandler(async (req, res) => {
     message: "Password updated successfully.",
   });
 });
-

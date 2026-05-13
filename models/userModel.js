@@ -35,6 +35,7 @@ const userSchema = new mongoose.Schema(
     approvedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     rejectedAt: { type: Date },
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    adminNote: { type: String, trim: true, maxlength: 2000, default: "" },
 
     /* =========================
        Forgot Password (Email)
