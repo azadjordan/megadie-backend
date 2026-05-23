@@ -8,6 +8,7 @@ import {
   getMyQuotes,
   getQuotePDF,
   getQuoteShare,
+  mergeQuotesByAdmin,
 
   // User actions
   cancelQuoteByUser,
@@ -47,6 +48,7 @@ router.get("/:id/share", protect, admin, getQuoteShare);
 
 // Get all quotes (admin only)
 router.route("/admin").get(protect, admin, getQuotes);
+router.post("/admin/merge", protect, admin, mergeQuotesByAdmin);
 
 // Admin-only step endpoints
 // NOTE: Put these BEFORE "/:id" routes to avoid path conflicts.

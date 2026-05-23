@@ -20,6 +20,7 @@ import { getAvailabilityTotalsByProduct, getAvailabilityStatus } from "../utils/
 // ✅ Keep in sync with quoteModel enum
 const ALLOWED_STATUSES = ["Processing", "Quoted", "Confirmed", "Cancelled"];
 const allowedStatusesSet = new Set(ALLOWED_STATUSES);
+const MERGEABLE_STATUSES = new Set(["Processing", "Quoted"]);
 
 // ✅ Basic status transitions (adjust if your business rules change)
 const ALLOWED_TRANSITIONS = {
@@ -325,6 +326,13 @@ const ensureQuoteEditable = (res, quote) => {
       "Quote is locked because a manual invoice was created."
     );
   }
+  if (quote.mergedIntoQuote) {
+    throwHttpError(
+      res,
+      409,
+      "Quote is locked because it was merged into another quote."
+    );
+  }
 };
 
 const parseNonNegativeNumber = (res, raw, message) => {
@@ -404,7 +412,71 @@ const populateAdminQuote = (quoteId) =>
   Quote.findById(quoteId)
     .populate("user", "name email phoneNumber")
     .populate("requestedItems.product", "sku name priceRule")
-    .populate("order", "orderNumber");
+    .populate("order", "orderNumber")
+    .populate("mergedIntoQuote", "quoteNumber status")
+    .populate("mergedFromQuotes", "quoteNumber status");
+
+const getQuoteProductId = (item) => {
+  const product = item?.product?._id || item?.product;
+  return product ? String(product) : "";
+};
+
+const getQuoteUserId = (quote) => {
+  const user = quote?.user?._id || quote?.user;
+  return user ? String(user) : "";
+};
+
+const getQuoteRefId = (quote) => {
+  const id = quote?._id || quote?.id;
+  return id ? String(id) : "";
+};
+
+const getQuoteLabel = (quote) =>
+  quote?.quoteNumber || (getQuoteRefId(quote) ? getQuoteRefId(quote).slice(-6).toUpperCase() : "quote");
+
+const validateMergeableQuote = (res, quote) => {
+  if (!MERGEABLE_STATUSES.has(quote.status)) {
+    throwHttpError(
+      res,
+      409,
+      `Quote ${getQuoteLabel(quote)} cannot be merged because its status is ${quote.status}.`
+    );
+  }
+
+  if (quote.order) {
+    throwHttpError(
+      res,
+      409,
+      `Quote ${getQuoteLabel(quote)} already has an order.`
+    );
+  }
+
+  if (quote.manualInvoiceId) {
+    throwHttpError(
+      res,
+      409,
+      `Quote ${getQuoteLabel(quote)} has a manual invoice.`
+    );
+  }
+
+  if (quote.mergedIntoQuote) {
+    throwHttpError(
+      res,
+      409,
+      `Quote ${getQuoteLabel(quote)} was already merged into another quote.`
+    );
+  }
+};
+
+const addUniqueObjectIdStrings = (values = []) =>
+  Array.from(
+    new Set(
+      values
+        .filter(Boolean)
+        .map((value) => String(value?._id || value))
+        .filter((value) => mongoose.Types.ObjectId.isValid(value))
+    )
+  );
 
 
 /* =========================
@@ -554,6 +626,239 @@ export const createQuote = asyncHandler(async (req, res) => {
     success: true,
     message: "Quote created successfully.",
     data: sanitized,
+  });
+});
+
+/* =========================
+   POST /api/quotes/admin/merge
+   Private/Admin
+   Merge multiple active quotes for the same owner
+   ========================= */
+export const mergeQuotesByAdmin = asyncHandler(async (req, res) => {
+  const body = req.body || {};
+  const rawQuoteIds = Array.isArray(body.quoteIds) ? body.quoteIds : [];
+  const quoteIds = addUniqueObjectIdStrings(rawQuoteIds);
+  const targetQuoteId = body.targetQuoteId ? String(body.targetQuoteId) : "";
+
+  if (quoteIds.length < 2) {
+    throwHttpError(res, 400, "Select at least two quotes to merge.");
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(targetQuoteId)) {
+    throwHttpError(res, 400, "Valid targetQuoteId is required.");
+  }
+
+  if (!quoteIds.includes(targetQuoteId)) {
+    throwHttpError(res, 400, "Target quote must be included in quoteIds.");
+  }
+
+  if (quoteIds.length !== rawQuoteIds.length) {
+    throwHttpError(res, 400, "Quote ids must be valid and unique.");
+  }
+
+  const objectIds = quoteIds.map((id) => new mongoose.Types.ObjectId(id));
+  const session = await mongoose.startSession();
+  let targetIdForResponse = targetQuoteId;
+
+  try {
+    await session.withTransaction(async () => {
+      const quotes = await Quote.find({ _id: { $in: objectIds } }).session(
+        session
+      );
+
+      if (quotes.length !== quoteIds.length) {
+        throwHttpError(res, 404, "One or more quotes were not found.");
+      }
+
+      const quotesById = new Map(
+        quotes.map((quote) => [String(quote._id), quote])
+      );
+      const targetQuote = quotesById.get(targetQuoteId);
+
+      if (!targetQuote) {
+        throwHttpError(res, 404, "Target quote not found.");
+      }
+
+      const userIds = new Set(quotes.map((quote) => getQuoteUserId(quote)));
+      if (userIds.size !== 1) {
+        throwHttpError(
+          res,
+          409,
+          "Only quotes from the same customer can be merged."
+        );
+      }
+
+      for (const quote of quotes) {
+        validateMergeableQuote(res, quote);
+      }
+
+      const orderedQuotes = [
+        targetQuote,
+        ...quoteIds
+          .filter((id) => id !== targetQuoteId)
+          .map((id) => quotesById.get(id))
+          .filter(Boolean),
+      ];
+
+      const combinedByProduct = new Map();
+      for (const quote of orderedQuotes) {
+        for (const item of quote.requestedItems || []) {
+          const productId = getQuoteProductId(item);
+          if (!productId || !mongoose.Types.ObjectId.isValid(productId)) {
+            throwHttpError(
+              res,
+              400,
+              `Quote ${getQuoteLabel(quote)} contains an invalid product.`
+            );
+          }
+
+          const qty = Math.max(0, Number(item.qty) || 0);
+          if (qty <= 0) continue;
+
+          const existing = combinedByProduct.get(productId);
+          if (existing) {
+            existing.qty += qty;
+          } else {
+            combinedByProduct.set(productId, {
+              product: new mongoose.Types.ObjectId(productId),
+              productName: item.productName || item.product?.name || "",
+              qty,
+              priceRule: item.priceRule || null,
+              unitPrice: Math.max(0, Number(item.unitPrice) || 0),
+            });
+          }
+        }
+      }
+
+      const productIds = Array.from(combinedByProduct.keys());
+      if (!productIds.length) {
+        throwHttpError(res, 409, "Merged quote must contain at least one item.");
+      }
+
+      const [products, totalsMap] = await Promise.all([
+        Product.find(
+          { _id: { $in: productIds } },
+          { _id: 1, name: 1 }
+        )
+          .session(session)
+          .lean(),
+        getAvailabilityTotalsByProduct(productIds),
+      ]);
+
+      if (products.length !== productIds.length) {
+        throwHttpError(res, 400, "One or more quote products were not found.");
+      }
+
+      const productNameById = new Map(
+        products.map((product) => [String(product._id), product.name || ""])
+      );
+
+      const mergedItems = productIds.map((productId) => {
+        const item = combinedByProduct.get(productId);
+        const qty = Math.max(0, Number(item.qty) || 0);
+        const availableNow = totalsMap.get(productId) || 0;
+        const shortage = Math.max(0, qty - availableNow);
+        const availabilityStatus = getAvailabilityStatus(qty, availableNow);
+
+        return {
+          product: item.product,
+          productName: productNameById.get(productId) || item.productName || "",
+          qty,
+          priceRule: item.priceRule || null,
+          unitPrice: Math.max(0, Number(item.unitPrice) || 0),
+          availableNow,
+          shortage,
+          availabilityStatus,
+        };
+      });
+
+      const now = new Date();
+      const sourceQuotes = orderedQuotes.filter(
+        (quote) => String(quote._id) !== targetQuoteId
+      );
+      const previousMergedFrom = addUniqueObjectIdStrings(
+        targetQuote.mergedFromQuotes || []
+      );
+      const sourceLineage = sourceQuotes.flatMap((quote) => [
+        String(quote._id),
+        ...(quote.mergedFromQuotes || []).map((id) => String(id?._id || id)),
+      ]);
+      const mergedFrom = addUniqueObjectIdStrings([
+        ...previousMergedFrom,
+        ...sourceLineage,
+      ]).filter((id) => id !== targetQuoteId);
+      const previousSnapshots = Array.isArray(targetQuote.mergedFromQuoteSnapshots)
+        ? targetQuote.mergedFromQuoteSnapshots
+        : [];
+      const snapshotById = new Map(
+        previousSnapshots
+          .map((snapshot) => {
+            const id = String(snapshot?.quote?._id || snapshot?.quote || "");
+            if (!id) return null;
+            return [
+              id,
+              {
+                quote: new mongoose.Types.ObjectId(id),
+                quoteNumber: snapshot.quoteNumber || "",
+                status: snapshot.status || "",
+              },
+            ];
+          })
+          .filter(Boolean)
+      );
+
+      for (const quote of sourceQuotes) {
+        snapshotById.set(String(quote._id), {
+          quote: quote._id,
+          quoteNumber: quote.quoteNumber || "",
+          status: quote.status || "",
+        });
+
+        for (const snapshot of quote.mergedFromQuoteSnapshots || []) {
+          const snapshotId = String(snapshot?.quote?._id || snapshot?.quote || "");
+          if (!snapshotId || snapshotId === targetQuoteId) continue;
+          snapshotById.set(snapshotId, {
+            quote: new mongoose.Types.ObjectId(snapshotId),
+            quoteNumber: snapshot.quoteNumber || "",
+            status: snapshot.status || "",
+          });
+        }
+      }
+
+      targetQuote.requestedItems = mergedItems;
+      targetQuote.status = "Processing";
+      targetQuote.availabilityCheckedAt = now;
+      targetQuote.clientQtyEditLocked = false;
+      targetQuote.mergedIntoQuote = null;
+      targetQuote.mergedFromQuotes = mergedFrom.map(
+        (id) => new mongoose.Types.ObjectId(id)
+      );
+      targetQuote.mergedFromQuoteSnapshots = Array.from(snapshotById.values());
+      targetQuote.mergedAt = now;
+      targetQuote.mergedBy = req.user._id;
+
+      await targetQuote.save({ session });
+
+      for (const quote of sourceQuotes) {
+        quote.status = "Cancelled";
+        quote.mergedIntoQuote = targetQuote._id;
+        quote.mergedAt = now;
+        quote.mergedBy = req.user._id;
+        await quote.save({ session });
+      }
+
+      targetIdForResponse = String(targetQuote._id);
+    });
+  } finally {
+    session.endSession();
+  }
+
+  const populated = await populateAdminQuote(targetIdForResponse);
+
+  res.status(200).json({
+    success: true,
+    message: "Quotes merged successfully.",
+    data: populated,
   });
 });
 
@@ -1556,6 +1861,7 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
     Quote.countDocuments(filter),
     Quote.find(filter)
       .populate("requestedItems.product", "name")
+      .populate("mergedIntoQuote", "quoteNumber status")
       .sort(sort)
       .skip(skip)
       .limit(limit),
@@ -1688,9 +1994,10 @@ export const deleteQuote = asyncHandler(async (req, res) => {
     throw new Error("Only admins can delete quotes.");
   }
 
-  if (quote.status !== "Cancelled") {
+  const isMergedSource = Boolean(quote.mergedIntoQuote);
+  if (quote.status !== "Cancelled" && !isMergedSource) {
     res.status(400);
-    throw new Error("Only quotes with status 'Cancelled' can be deleted.");
+    throw new Error("Only cancelled or merged-source quotes can be deleted.");
   }
 
   const snapshot = { quoteId: quote._id, status: quote.status };
@@ -1748,6 +2055,7 @@ export const getQuotes = asyncHandler(async (req, res) => {
           "quoteNumber",
           "status",
           "createdAt",
+          "updatedAt",
           "deliveryCharge",
           "extraFee",
           "totalPrice",
@@ -1761,11 +2069,21 @@ export const getQuotes = asyncHandler(async (req, res) => {
           "order",
           "manualInvoiceId",
           "manualInvoiceCreatedAt",
+          "mergedIntoQuote",
+          "mergedFromQuotes",
+          "mergedFromQuoteSnapshots",
+          "mergedAt",
+          "mergedBy",
+          "requestedItems.product",
+          "requestedItems.productName",
         ].join(" ")
       )
       .populate("user", "name email")
       // optional: show order number in admin list
       .populate("order", "orderNumber status")
+      .populate("requestedItems.product", "sku name")
+      .populate("mergedIntoQuote", "quoteNumber status")
+      .populate("mergedFromQuotes", "quoteNumber status")
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit),
@@ -1809,7 +2127,9 @@ export const getQuoteById = asyncHandler(async (req, res) => {
   const quote = await Quote.findById(req.params.id)
     .populate("user", "name email")
     .populate("requestedItems.product", "name sku priceRule")
-    .populate("order", "orderNumber status");
+    .populate("order", "orderNumber status")
+    .populate("mergedIntoQuote", "quoteNumber status")
+    .populate("mergedFromQuotes", "quoteNumber status");
 
   if (!quote) {
     res.status(404);
@@ -1869,12 +2189,3 @@ export const getQuoteById = asyncHandler(async (req, res) => {
    Private/Admin
    Update status only
    ========================= */
-
-
-
-
-
-
-
-
-

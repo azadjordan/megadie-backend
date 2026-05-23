@@ -12,7 +12,8 @@ const envFile =
   process.env.NODE_ENV === "production"
     ? ".env.production"
     : ".env.development";
-dotenv.config({ path: envFile });
+dotenv.config();
+dotenv.config({ path: envFile, override: true });
 
 // ✅ Import routes and middlewares
 import connectDB from "./config/db.js";

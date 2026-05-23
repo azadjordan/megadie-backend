@@ -91,6 +91,33 @@ const quoteSchema = new mongoose.Schema(
     adminToClientNote: { type: String },
 
     clientQtyEditLocked: { type: Boolean, default: false },
+
+    mergedIntoQuote: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Quote",
+      default: null,
+      index: true,
+    },
+    mergedFromQuotes: {
+      type: [{ type: mongoose.Schema.Types.ObjectId, ref: "Quote" }],
+      default: [],
+    },
+    mergedFromQuoteSnapshots: {
+      type: [
+        {
+          quote: { type: mongoose.Schema.Types.ObjectId, ref: "Quote" },
+          quoteNumber: { type: String, trim: true },
+          status: { type: String, trim: true },
+        },
+      ],
+      default: [],
+    },
+    mergedAt: { type: Date, default: null },
+    mergedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
   },
   {
     timestamps: true,
