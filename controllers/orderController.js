@@ -25,6 +25,18 @@ const parsePagination = (req, { defaultLimit = 20, maxLimit = 100 } = {}) => {
 const escapeRegex = (text = "") =>
   String(text).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const ADMIN_ORDER_INVOICE_SELECT = [
+  "invoiceNumber",
+  "status",
+  "paymentStatus",
+  "amountMinor",
+  "paidTotalMinor",
+  "balanceDueMinor",
+  "currency",
+  "minorUnitFactor",
+  "dueDate",
+].join(" ");
+
 // Remove all pricing fields for client/owner responses
 const sanitizeOrderForClient = (order) => {
   if (!order) return order;
@@ -282,8 +294,7 @@ export const getOrders = asyncHandler(async (req, res) => {
     Order.countDocuments(filter),
     Order.find(filter)
       .populate("user", "name email")
-        // ✅ populate invoice number + payment status for UI
-        .populate("invoice", "invoiceNumber paymentStatus")
+      .populate("invoice", ADMIN_ORDER_INVOICE_SELECT)
       .sort(sort)
       .skip(skip)
       .limit(limit)
