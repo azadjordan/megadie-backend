@@ -1,5 +1,9 @@
 import express from "express";
-import { getProducts, getProductById } from "../controllers/productController.js";
+import {
+  getProducts,
+  getProductById,
+  getProductsAvailability,
+} from "../controllers/productController.js";
 import {
   getProductsAdmin,     // ✅ Admin: list all with filters/pagination
   getProductMeta,
@@ -23,6 +27,11 @@ router.route("/meta").get(protect, admin, getProductMeta);
 
 // ? Admin preview (SKU + name)
 router.route("/preview").post(protect, admin, previewProduct);
+
+// ✅ Batch availability snapshots for cart review
+router
+  .route("/availability")
+  .post(protect, requireApproved, getProductsAvailability);
 
 // ✅ Admin can create product
 router.route("/").post(protect, admin, createProduct);

@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import Product from "../models/productModel.js";
 import FilterConfig from "../models/filterConfigModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
+import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
 
 /* =========================
    Helper utilities
@@ -205,13 +206,25 @@ export const getProducts = asyncHandler(async (req, res) => {
     Product.countDocuments(filter),
     Product.find(filter)
       .select(
-        "name productType category size color catalogCode variant grade finish packingUnit images sku priceRule sort"
+        "name productType category size color catalogCode variant grade finish packingUnit images sku priceRule sort moq isAvailable"
       )
       .sort(sortWithFeatured)
       .skip(skip)
       .limit(limit)
       .lean(),
   ])
+
+  const availabilityCheckedAt = new Date()
+  const totalsMap = await getAvailabilityTotalsByProduct(
+    products.map((product) => product._id)
+  )
+  const productsWithAvailability = products.map((product) => ({
+    ...product,
+    availability: {
+      availableNow: totalsMap.get(String(product._id)) || 0,
+      checkedAt: availabilityCheckedAt,
+    },
+  }))
 
   const totalPages = Math.max(Math.ceil(total / limit), 1)
 
@@ -226,9 +239,79 @@ export const getProducts = asyncHandler(async (req, res) => {
       hasPrev: page > 1,
       hasNext: page < totalPages,
     },
-    data: products,
+    data: productsWithAvailability,
   })
 })
+
+/* =========================
+   POST /api/products/availability
+   Public
+   Batch availability snapshots for cart review
+   ========================= */
+export const getProductsAvailability = asyncHandler(async (req, res) => {
+  const rawProductIds = Array.isArray(req.body?.productIds)
+    ? req.body.productIds
+    : [];
+
+  const productIds = Array.from(
+    new Set(
+      rawProductIds
+        .map((id) => (id == null ? "" : String(id).trim()))
+        .filter(Boolean)
+    )
+  );
+
+  if (productIds.length > 100) {
+    res.status(400);
+    throw new Error("Too many products requested.");
+  }
+
+  const validProductIds = productIds.filter((id) =>
+    mongoose.Types.ObjectId.isValid(id)
+  );
+
+  const objectIds = validProductIds.map(
+    (id) => new mongoose.Types.ObjectId(id)
+  );
+
+  const [products, totalsMap] = await Promise.all([
+    objectIds.length
+      ? Product.find({ _id: { $in: objectIds } })
+          .select("_id isActive isAvailable")
+          .lean()
+      : [],
+    getAvailabilityTotalsByProduct(validProductIds),
+  ]);
+
+  const productById = new Map(
+    products.map((product) => [String(product._id), product])
+  );
+  const availabilityCheckedAt = new Date();
+
+  const data = productIds.map((productId) => {
+    const product = productById.get(productId);
+    const isRequestable =
+      Boolean(product) &&
+      product.isActive !== false &&
+      product.isAvailable !== false;
+
+    return {
+      productId,
+      exists: Boolean(product),
+      isAvailable: isRequestable,
+      availability: {
+        availableNow: product ? totalsMap.get(productId) || 0 : 0,
+        checkedAt: availabilityCheckedAt,
+      },
+    };
+  });
+
+  res.status(200).json({
+    success: true,
+    message: "Product availability retrieved successfully.",
+    data,
+  });
+});
 
 /* =========================
    GET /api/products/:id
@@ -244,6 +327,13 @@ export const getProductById = asyncHandler(async (req, res) => {
     res.status(404);
     throw new Error("Product not found.");
   }
+
+  const availabilityCheckedAt = new Date();
+  const totalsMap = await getAvailabilityTotalsByProduct([product._id]);
+  product.availability = {
+    availableNow: totalsMap.get(String(product._id)) || 0,
+    checkedAt: availabilityCheckedAt,
+  };
 
   // Normalize _id → id
   product.id = product._id;
