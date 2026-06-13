@@ -1,9 +1,12 @@
 // controllers/productController.js
 import mongoose from "mongoose";
 import Product from "../models/productModel.js";
-import FilterConfig from "../models/filterConfigModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
+import {
+  getCachedCategoryIdsByKeys,
+  getCachedFilterConfig,
+} from "../utils/productFilterCache.js";
 
 /* =========================
    Helper utilities
@@ -150,14 +153,7 @@ export const buildProductFilter = async (req, { forAdmin = false } = {}) => {
   if (req.query.categoryKeys) {
     const keys = parseStringList(req.query.categoryKeys);
     if (keys.length) {
-      const Category = mongoose.model("Category");
-      const cats = await Category.find({
-        key: { $in: keys },
-        ...(productType ? { productType } : {}),
-      })
-        .select("_id")
-        .lean();
-      idsFromKeys = cats.map((c) => c._id);
+      idsFromKeys = await getCachedCategoryIdsByKeys({ productType, keys });
     }
   }
 
@@ -169,7 +165,7 @@ export const buildProductFilter = async (req, { forAdmin = false } = {}) => {
   // Load FilterConfig for this productType (if any)
   let filterConfigDoc = null;
   if (productType) {
-    filterConfigDoc = await FilterConfig.findOne({ productType }).lean();
+    filterConfigDoc = await getCachedFilterConfig(productType);
   }
 
   // Apply config-driven filters (size, color, grade, finish, tags, isAvailable, catalogCode, etc.)

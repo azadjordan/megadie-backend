@@ -2,6 +2,7 @@
 import asyncHandler from "../middleware/asyncHandler.js";
 import Category from "../models/categoryModel.js";
 import Product from "../models/productModel.js";
+import { clearProductFilterCache } from "../utils/productFilterCache.js";
 
 /* =========================
    GET /api/categories
@@ -141,6 +142,7 @@ export const createCategory = asyncHandler(async (req, res) => {
     isActive: isActiveValue,
     sort: sortValue,
   });
+  clearProductFilterCache();
 
   res.status(201).json({
     success: true,
@@ -223,6 +225,7 @@ export const updateCategory = asyncHandler(async (req, res) => {
   }
 
   const updated = await category.save();
+  clearProductFilterCache();
 
   const changedKeys = Object.keys(changes);
   const message = changedKeys.length
@@ -256,6 +259,7 @@ export const deleteCategory = asyncHandler(async (req, res) => {
   }
 
   await category.deleteOne();
+  clearProductFilterCache();
 
   res.status(200).json({
     success: true,

@@ -195,6 +195,56 @@ productSchema.index({ createdAt: -1, _id: 1 });
 productSchema.index({ size: 1 });
 productSchema.index({ catalogCode: 1 });
 productSchema.index({ productType: 1, isFeatured: 1, featuredRank: 1, createdAt: -1 });
+productSchema.index({
+  productType: 1,
+  isActive: 1,
+  isFeatured: -1,
+  featuredRank: 1,
+  sort: 1,
+  createdAt: -1,
+  _id: 1,
+});
+productSchema.index({
+  productType: 1,
+  isActive: 1,
+  category: 1,
+  isFeatured: -1,
+  featuredRank: 1,
+  sort: 1,
+  createdAt: -1,
+  _id: 1,
+});
+productSchema.index({
+  productType: 1,
+  isActive: 1,
+  size: 1,
+  isFeatured: -1,
+  featuredRank: 1,
+  sort: 1,
+  createdAt: -1,
+  _id: 1,
+});
+productSchema.index({
+  productType: 1,
+  isActive: 1,
+  category: 1,
+  size: 1,
+  isFeatured: -1,
+  featuredRank: 1,
+  sort: 1,
+  createdAt: -1,
+  _id: 1,
+});
+productSchema.index({
+  productType: 1,
+  isActive: 1,
+  catalogCode: 1,
+  isFeatured: -1,
+  featuredRank: 1,
+  sort: 1,
+  createdAt: -1,
+  _id: 1,
+});
 
 const Product = mongoose.model("Product", productSchema);
 export default Product;

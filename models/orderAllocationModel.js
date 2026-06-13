@@ -42,6 +42,7 @@ orderAllocationSchema.index({ order: 1, product: 1, slot: 1 }, { unique: true })
 // Common queries
 orderAllocationSchema.index({ order: 1, createdAt: -1 });
 orderAllocationSchema.index({ product: 1, createdAt: -1 });
+orderAllocationSchema.index({ product: 1, status: 1 });
 orderAllocationSchema.index({ slot: 1, createdAt: -1 });
 orderAllocationSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 

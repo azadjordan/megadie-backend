@@ -6,6 +6,7 @@ import {
   FILTER_FIELD_TYPES,
   FILTER_UI_TYPES,
 } from "../constants.js";
+import { clearProductFilterCache } from "../utils/productFilterCache.js";
 
 /* =========================
    Helpers
@@ -267,6 +268,7 @@ export const createFilterConfig = asyncHandler(async (req, res) => {
     sort: normalizeSort(sort, 0),
     fields: normalizedFields,
   });
+  clearProductFilterCache();
 
   res.status(201).json({
     success: true,
@@ -325,6 +327,7 @@ export const updateFilterConfig = asyncHandler(async (req, res) => {
   }
 
   const updated = await existing.save();
+  clearProductFilterCache();
 
   res.status(200).json({
     success: true,
@@ -356,6 +359,7 @@ export const deleteFilterConfig = asyncHandler(async (req, res) => {
       `Filter configuration not found for productType "${productType}".`
     );
   }
+  clearProductFilterCache();
 
   res.status(200).json({
     success: true,
