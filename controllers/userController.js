@@ -337,7 +337,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
    Private — Get my profile
    ========================= */
 export const getUserProfile = asyncHandler(async (req, res) => {
-  const user = await User.findById(req.user._id);
+  const user = req.user;
 
   if (!user) {
     res.status(404);
