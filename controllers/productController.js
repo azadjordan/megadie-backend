@@ -193,6 +193,10 @@ export const getProducts = asyncHandler(async (req, res) => {
   const filter = await buildProductFilter(req, { forAdmin: false })
   const sort = buildSort(productType)
   const featuredFirst = String(req.query.featuredFirst || "").toLowerCase()
+  const includeAvailability =
+    !["false", "0", "no"].includes(
+      String(req.query.includeAvailability || "").toLowerCase()
+    )
   const sortWithFeatured =
     featuredFirst === "true" || featuredFirst === "1"
       ? { isFeatured: -1, featuredRank: 1, ...sort }
@@ -210,17 +214,24 @@ export const getProducts = asyncHandler(async (req, res) => {
       .lean(),
   ])
 
-  const availabilityCheckedAt = new Date()
-  const totalsMap = await getAvailabilityTotalsByProduct(
-    products.map((product) => product._id)
-  )
-  const productsWithAvailability = products.map((product) => ({
+  let data = products.map((product) => ({
     ...product,
-    availability: {
-      availableNow: totalsMap.get(String(product._id)) || 0,
-      checkedAt: availabilityCheckedAt,
-    },
+    availability: null,
   }))
+
+  if (includeAvailability) {
+    const availabilityCheckedAt = new Date()
+    const totalsMap = await getAvailabilityTotalsByProduct(
+      products.map((product) => product._id)
+    )
+    data = products.map((product) => ({
+      ...product,
+      availability: {
+        availableNow: totalsMap.get(String(product._id)) || 0,
+        checkedAt: availabilityCheckedAt,
+      },
+    }))
+  }
 
   const totalPages = Math.max(Math.ceil(total / limit), 1)
 
@@ -235,7 +246,7 @@ export const getProducts = asyncHandler(async (req, res) => {
       hasPrev: page > 1,
       hasNext: page < totalPages,
     },
-    data: productsWithAvailability,
+    data,
   })
 })
 
