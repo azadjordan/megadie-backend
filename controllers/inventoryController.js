@@ -660,6 +660,7 @@ export const getInventoryMovements = asyncHandler(async (req, res) => {
               type: 1,
               qty: 1,
               note: 1,
+              meta: 1,
               eventAt: 1,
               createdAt: 1,
               product: {

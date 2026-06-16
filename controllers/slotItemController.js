@@ -20,6 +20,22 @@ const hasReservedAllocations = async (slotId, productIds, session = null) => {
   return Boolean(exists);
 };
 
+const getReservedQty = async (slotId, productId, session = null) => {
+  const query = OrderAllocation.find({
+    slot: slotId,
+    product: productId,
+    $or: [{ status: "Reserved" }, { status: { $exists: false } }],
+  })
+    .select("qty")
+    .lean();
+  if (session) {
+    query.session(session);
+  }
+
+  const rows = await query;
+  return rows.reduce((sum, row) => sum + (Number(row.qty) || 0), 0);
+};
+
 /* =========================
    GET /api/slot-items/by-product/:productId
    Lists all slot items for a product (for picking UI)
@@ -42,13 +58,20 @@ export const getSlotItemsByProduct = asyncHandler(async (req, res) => {
     .sort({ qty: 1, createdAt: -1 })
     .lean();
 
-  if (orderId) {
-    const reservedRows = await OrderAllocation.find({
+  const slotIds = items
+    .map((item) => item.slot?._id || item.slot)
+    .filter(Boolean);
+  if (slotIds.length) {
+    const reservedFilter = {
       product: productId,
-      slot: { $in: items.map((item) => item.slot?._id || item.slot).filter(Boolean) },
-      order: { $ne: orderId },
+      slot: { $in: slotIds },
       $or: [{ status: "Reserved" }, { status: { $exists: false } }],
-    })
+    };
+    if (orderId) {
+      reservedFilter.order = { $ne: orderId };
+    }
+
+    const reservedRows = await OrderAllocation.find(reservedFilter)
       .select("slot qty")
       .lean();
 
@@ -91,11 +114,46 @@ export const getSlotItemsBySlot = asyncHandler(async (req, res) => {
     .populate("product", "name sku catalogCode")
     .sort({ qty: -1, updatedAt: -1 })
     .lean();
+  const productIds = items
+    .map((item) => item.product?._id || item.product)
+    .filter(Boolean);
+
+  let rows = items;
+  if (productIds.length) {
+    const reservedRows = await OrderAllocation.find({
+      slot: slotId,
+      product: { $in: productIds },
+      $or: [{ status: "Reserved" }, { status: { $exists: false } }],
+    })
+      .select("product qty")
+      .lean();
+
+    const reservedByProduct = new Map();
+    for (const row of reservedRows) {
+      const productKey = String(row.product);
+      const qtyValue = Number(row.qty) || 0;
+      reservedByProduct.set(
+        productKey,
+        (reservedByProduct.get(productKey) || 0) + qtyValue
+      );
+    }
+
+    rows = items.map((item) => {
+      const productKey = String(item.product?._id || item.product);
+      const reservedQty = reservedByProduct.get(productKey) || 0;
+      const onHand = Number(item.qty) || 0;
+      return {
+        ...item,
+        reservedQty,
+        availableQty: Math.max(0, onHand - reservedQty),
+      };
+    });
+  }
 
   res.status(200).json({
     success: true,
     message: "Slot items retrieved successfully.",
-    data: items,
+    data: rows,
   });
 });
 
@@ -206,6 +264,164 @@ export const adjustSlotItem = asyncHandler(async (req, res) => {
   res.status(responseStatus).json({
     success: true,
     message: "Stock adjusted successfully.",
+    data: responseData,
+  });
+});
+
+/* =========================
+   POST /api/slot-items/correct-count
+   Sets the actual counted qty for a product in a slot
+   Body: { productId, slotId, actualQty, note }
+   ========================= */
+export const correctSlotItemCount = asyncHandler(async (req, res) => {
+  const { productId, slotId, actualQty, note } = req.body || {};
+
+  if (!mongoose.isValidObjectId(productId)) {
+    res.status(400);
+    throw new Error("Invalid product id.");
+  }
+
+  if (!mongoose.isValidObjectId(slotId)) {
+    res.status(400);
+    throw new Error("Invalid slot id.");
+  }
+
+  const actualValue = Number(actualQty);
+  if (
+    !Number.isFinite(actualValue) ||
+    !Number.isInteger(actualValue) ||
+    actualValue < 0
+  ) {
+    res.status(400);
+    throw new Error("actualQty must be a non-negative integer.");
+  }
+
+  const cleanNote = typeof note === "string" ? note.trim() : "";
+  const session = await mongoose.startSession();
+  let responseData = null;
+  let responseStatus = 200;
+
+  try {
+    await session.withTransaction(async () => {
+      const slot = await Slot.findById(slotId)
+        .select("_id label cbm")
+        .session(session);
+      if (!slot) {
+        res.status(404);
+        throw new Error("Slot not found.");
+      }
+
+      let item = await SlotItem.findOne({
+        product: productId,
+        slot: slotId,
+      }).session(session);
+
+      const previousQty = Number(item?.qty || 0);
+      const previousCbm = Number(item?.cbm || 0);
+      const reservedQty = await getReservedQty(slotId, productId, session);
+
+      if (actualValue < reservedQty) {
+        res.status(409);
+        throw new Error(
+          `Actual qty cannot be below reserved qty (${reservedQty}).`
+        );
+      }
+
+      const deltaQty = actualValue - previousQty;
+      if (deltaQty < 0 && !cleanNote) {
+        res.status(400);
+        throw new Error("Note is required when reducing stock.");
+      }
+
+      if (deltaQty === 0) {
+        responseData = {
+          slotItem: item,
+          previousQty,
+          actualQty: actualValue,
+          deltaQty,
+          reservedQty,
+          movementType: null,
+        };
+        return;
+      }
+
+      if (!item) {
+        item = new SlotItem({
+          product: productId,
+          slot: slotId,
+          qty: actualValue,
+        });
+      } else {
+        item.qty = actualValue;
+      }
+
+      const wasNew = item.isNew;
+      let saved = null;
+      let nextCbm = 0;
+      if (actualValue === 0) {
+        if (item && !item.isNew) {
+          await item.deleteOne({ session });
+        }
+      } else {
+        saved = await item.save({ session });
+        nextCbm = Number(saved.cbm || 0);
+      }
+
+      const deltaCbm = nextCbm - previousCbm;
+      if (deltaCbm) {
+        await applySlotOccupancyDelta(slotId, deltaCbm, session);
+      }
+
+      const movementQty = Math.abs(deltaQty);
+      const movementCbm = Math.abs(deltaCbm);
+      const movementType = deltaQty > 0 ? "ADJUST_IN" : "ADJUST_OUT";
+      const unitCbm = getUnitCbm(movementCbm, movementQty);
+
+      await logInventoryMovement(
+        {
+          type: movementType,
+          product: productId,
+          slot: slotId,
+          qty: movementQty,
+          unitCbm: unitCbm || undefined,
+          cbm: movementCbm || undefined,
+          actor: req.user?._id || null,
+          note: cleanNote || undefined,
+          meta: {
+            correction: true,
+            previousQty,
+            actualQty: actualValue,
+            deltaQty,
+            reservedQty,
+          },
+        },
+        session
+      );
+
+      const populated = saved
+        ? await SlotItem.findById(saved._id)
+            .populate("product", "name sku")
+            .populate("slot", "label store unit position")
+            .session(session)
+        : null;
+
+      responseStatus = wasNew ? 201 : 200;
+      responseData = {
+        slotItem: populated || saved || null,
+        previousQty,
+        actualQty: actualValue,
+        deltaQty,
+        reservedQty,
+        movementType,
+      };
+    });
+  } finally {
+    session.endSession();
+  }
+
+  res.status(responseStatus).json({
+    success: true,
+    message: "Stock count corrected successfully.",
     data: responseData,
   });
 });
