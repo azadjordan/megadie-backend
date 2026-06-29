@@ -25,6 +25,9 @@ const userSchema = new mongoose.Schema(
       },
     },
     address: { type: String, trim: true },
+    secondaryPhoneNumber: { type: String, trim: true },
+    deliveryGoogleMapsUrl: { type: String, trim: true },
+    deliveryNotes: { type: String, trim: true, maxlength: 1000, default: "" },
     approvalStatus: {
       type: String,
       enum: ["Pending", "Approved", "Rejected"],

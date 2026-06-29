@@ -37,6 +37,16 @@ const ADMIN_ORDER_INVOICE_SELECT = [
   "dueDate",
 ].join(" ");
 
+const ORDER_USER_DELIVERY_SELECT = [
+  "name",
+  "email",
+  "phoneNumber",
+  "secondaryPhoneNumber",
+  "address",
+  "deliveryGoogleMapsUrl",
+  "deliveryNotes",
+].join(" ");
+
 // Remove all pricing fields for client/owner responses
 const sanitizeOrderForClient = (order) => {
   if (!order) return order;
@@ -167,7 +177,7 @@ export const deleteOrder = asyncHandler(async (req, res) => {
    ========================= */
 export const getOrderById = asyncHandler(async (req, res) => {
   const order = await Order.findById(req.params.id)
-    .populate("user", "name email")
+    .populate("user", ORDER_USER_DELIVERY_SELECT)
     .populate("quote", "quoteNumber")
     .populate("invoice", "invoiceNumber")
     .populate("orderItems.product", "name sku size");
@@ -293,7 +303,7 @@ export const getOrders = asyncHandler(async (req, res) => {
   const [total, orders] = await Promise.all([
     Order.countDocuments(filter),
     Order.find(filter)
-      .populate("user", "name email")
+      .populate("user", ORDER_USER_DELIVERY_SELECT)
       .populate("invoice", ADMIN_ORDER_INVOICE_SELECT)
       .sort(sort)
       .skip(skip)
