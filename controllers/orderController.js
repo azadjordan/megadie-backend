@@ -47,6 +47,22 @@ const ORDER_USER_DELIVERY_SELECT = [
   "deliveryNotes",
 ].join(" ");
 
+const ORDER_PAYMENT_FILTER_VALUES = new Set([
+  "noInvoice",
+  "notFullyPaid",
+  "Unpaid",
+  "PartiallyPaid",
+  "Paid",
+]);
+
+const ORDER_INVOICE_PAYMENT_STATUSES = ["Unpaid", "PartiallyPaid", "Paid"];
+
+const addFilterCondition = (filter, condition) => {
+  if (!condition || Object.keys(condition).length === 0) return;
+  filter.$and = filter.$and || [];
+  filter.$and.push(condition);
+};
+
 // Remove all pricing fields for client/owner responses
 const sanitizeOrderForClient = (order) => {
   if (!order) return order;
@@ -254,12 +270,12 @@ export const getMyOrders = asyncHandler(async (req, res) => {
    GET /api/orders
    Private/Admin
    Paginated list of orders with optional filters
-   Query: status, search (matches user name/email or order number)
+   Query: status, paymentStatus, search (matches user name/email or order number)
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
     defaultLimit: 20,
-    maxLimit: 20,
+    maxLimit: 100,
   });
 
   const filter = {};
@@ -286,16 +302,45 @@ export const getOrders = asyncHandler(async (req, res) => {
       .lean();
 
     const userIds = users.map((u) => u._id);
-    filter.$or = [{ orderNumber: searchRegex }];
+    const searchFilter = { $or: [{ orderNumber: searchRegex }] };
     if (userIds.length) {
-      filter.$or.push({ user: { $in: userIds } });
+      searchFilter.$or.push({ user: { $in: userIds } });
     }
+    addFilterCondition(filter, searchFilter);
   } else if (req.query.user) {
     if (!mongoose.isValidObjectId(req.query.user)) {
       res.status(400);
       throw new Error("Invalid user id.");
     }
     filter.user = req.query.user;
+  }
+
+  const paymentStatus = req.query.paymentStatus
+    ? String(req.query.paymentStatus).trim()
+    : "";
+  if (paymentStatus) {
+    if (!ORDER_PAYMENT_FILTER_VALUES.has(paymentStatus)) {
+      res.status(400);
+      throw new Error(
+        `Invalid paymentStatus. Allowed: ${Array.from(
+          ORDER_PAYMENT_FILTER_VALUES
+        ).join(", ")}.`
+      );
+    }
+
+    if (paymentStatus === "noInvoice") {
+      addFilterCondition(filter, { invoice: null });
+    } else if (paymentStatus === "notFullyPaid") {
+      const invoiceIds = await Invoice.distinct("_id", {
+        paymentStatus: { $in: ["Unpaid", "PartiallyPaid"] },
+      });
+      addFilterCondition(filter, {
+        $or: [{ invoice: null }, { invoice: { $in: invoiceIds } }],
+      });
+    } else if (ORDER_INVOICE_PAYMENT_STATUSES.includes(paymentStatus)) {
+      const invoiceIds = await Invoice.distinct("_id", { paymentStatus });
+      addFilterCondition(filter, { invoice: { $in: invoiceIds } });
+    }
   }
 
   const sort = { createdAt: -1, _id: -1 };
