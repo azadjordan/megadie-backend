@@ -353,6 +353,9 @@ export const getUserProfile = asyncHandler(async (req, res) => {
       email: user.email,
       phoneNumber: user.phoneNumber,
       address: user.address,
+      secondaryPhoneNumber: user.secondaryPhoneNumber,
+      deliveryGoogleMapsUrl: user.deliveryGoogleMapsUrl,
+      deliveryNotes: user.deliveryNotes,
       isAdmin: user.isAdmin,
       approvalStatus: user.approvalStatus,
     },
@@ -374,6 +377,11 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
   user.name = req.body.name ?? user.name;
   user.phoneNumber = req.body.phoneNumber ?? user.phoneNumber;
   user.address = req.body.address ?? user.address;
+  user.secondaryPhoneNumber =
+    req.body.secondaryPhoneNumber ?? user.secondaryPhoneNumber;
+  user.deliveryGoogleMapsUrl =
+    req.body.deliveryGoogleMapsUrl ?? user.deliveryGoogleMapsUrl;
+  user.deliveryNotes = req.body.deliveryNotes ?? user.deliveryNotes;
 
   const updatedUser = await user.save();
 
@@ -386,6 +394,9 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
       email: updatedUser.email,
       phoneNumber: updatedUser.phoneNumber,
       address: updatedUser.address,
+      secondaryPhoneNumber: updatedUser.secondaryPhoneNumber,
+      deliveryGoogleMapsUrl: updatedUser.deliveryGoogleMapsUrl,
+      deliveryNotes: updatedUser.deliveryNotes,
       isAdmin: updatedUser.isAdmin,
       approvalStatus: updatedUser.approvalStatus,
     },
@@ -451,7 +462,9 @@ export const getUsers = asyncHandler(async (req, res) => {
   const [total, usersRaw] = await Promise.all([
     User.countDocuments(filter),
     User.find(filter)
-      .select("name email phoneNumber address isAdmin approvalStatus adminNote createdAt")
+      .select(
+        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote createdAt"
+      )
       .sort(sort)
       .skip(skip)
       .limit(limit)
@@ -602,6 +615,13 @@ export const updateUser = asyncHandler(async (req, res) => {
   if (req.body.email != null) user.email = req.body.email.trim().toLowerCase();
   if (req.body.phoneNumber != null) user.phoneNumber = req.body.phoneNumber;
   if (req.body.address != null) user.address = req.body.address;
+  if (req.body.secondaryPhoneNumber != null) {
+    user.secondaryPhoneNumber = req.body.secondaryPhoneNumber;
+  }
+  if (req.body.deliveryGoogleMapsUrl != null) {
+    user.deliveryGoogleMapsUrl = req.body.deliveryGoogleMapsUrl;
+  }
+  if (req.body.deliveryNotes != null) user.deliveryNotes = req.body.deliveryNotes;
   if (req.body.isAdmin != null) user.isAdmin = Boolean(req.body.isAdmin);
   if (Object.prototype.hasOwnProperty.call(req.body, "adminNote")) {
     assignAdminNote(user, req.body.adminNote);
@@ -633,6 +653,9 @@ export const updateUser = asyncHandler(async (req, res) => {
         email: updatedUser.email,
         phoneNumber: updatedUser.phoneNumber,
         address: updatedUser.address,
+        secondaryPhoneNumber: updatedUser.secondaryPhoneNumber,
+        deliveryGoogleMapsUrl: updatedUser.deliveryGoogleMapsUrl,
+        deliveryNotes: updatedUser.deliveryNotes,
         isAdmin: updatedUser.isAdmin,
         approvalStatus: updatedUser.approvalStatus,
         adminNote: updatedUser.adminNote,
@@ -642,6 +665,10 @@ export const updateUser = asyncHandler(async (req, res) => {
     if (err.code === 11000 && err.keyPattern?.email) {
       res.status(409);
       throw new Error("Email already in use.");
+    }
+    if (err.code === 11000 && err.keyPattern?.phoneNumber) {
+      res.status(409);
+      throw new Error("Phone number already in use.");
     }
     throw err;
   }
