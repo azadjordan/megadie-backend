@@ -274,7 +274,7 @@ export const getMyOrders = asyncHandler(async (req, res) => {
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
-    defaultLimit: 20,
+    defaultLimit: 10,
     maxLimit: 100,
   });
 
