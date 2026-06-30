@@ -2,6 +2,7 @@
 import express from "express";
 import {
   getOrders,
+  getOrdersWorkSummary,
   createOrderFromQuote,
   getMyOrders,
   getOrderById,
@@ -22,6 +23,7 @@ const router = express.Router();
 
 // ✅ Get all orders (admin)
 router.get("/", protect, admin, getOrders);
+router.get("/work-summary", protect, admin, getOrdersWorkSummary);
 // ✅ Get my orders (user)
 router.get("/my", protect, getMyOrders);
 
@@ -47,4 +49,3 @@ router
   .delete(protect, admin, deleteOrder);
 
 export default router;
-

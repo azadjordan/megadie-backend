@@ -56,11 +56,84 @@ const ORDER_PAYMENT_FILTER_VALUES = new Set([
 ]);
 
 const ORDER_INVOICE_PAYMENT_STATUSES = ["Unpaid", "PartiallyPaid", "Paid"];
+const ORDER_ACTIVE_STATUSES = ["Processing", "Shipping", "Delivered"];
+const ORDER_UNPAID_PAYMENT_STATUSES = ["Unpaid", "PartiallyPaid"];
+const ORDER_WORK_FILTER_VALUES = new Set([
+  "noInvoice",
+  "paymentDue",
+  "needsReservation",
+  "readyToDeliver",
+  "needsStockDeduction",
+]);
+const ORDER_WORK_SUMMARY_KEYS = [
+  "noInvoice",
+  "paymentDue",
+  "needsReservation",
+  "readyToDeliver",
+  "needsStockDeduction",
+];
 
 const addFilterCondition = (filter, condition) => {
   if (!condition || Object.keys(condition).length === 0) return;
   filter.$and = filter.$and || [];
   filter.$and.push(condition);
+};
+
+const getPaymentDueInvoiceIds = () =>
+  Invoice.distinct("_id", {
+    status: "Issued",
+    paymentStatus: { $in: ORDER_UNPAID_PAYMENT_STATUSES },
+  });
+
+const buildOrderWorkFilter = async (work) => {
+  if (!work) return {};
+
+  if (!ORDER_WORK_FILTER_VALUES.has(work)) {
+    throw new Error(
+      `Invalid work. Allowed: ${Array.from(ORDER_WORK_FILTER_VALUES).join(", ")}.`
+    );
+  }
+
+  if (work === "noInvoice") {
+    return {
+      status: { $in: ORDER_ACTIVE_STATUSES },
+      invoice: null,
+    };
+  }
+
+  if (work === "paymentDue") {
+    const invoiceIds = await getPaymentDueInvoiceIds();
+    return {
+      status: { $in: ORDER_ACTIVE_STATUSES },
+      invoice: { $in: invoiceIds },
+    };
+  }
+
+  if (work === "needsReservation") {
+    return {
+      status: "Shipping",
+      allocationStatus: { $ne: "Allocated" },
+      stockFinalizedAt: null,
+    };
+  }
+
+  if (work === "readyToDeliver") {
+    return {
+      status: "Shipping",
+      allocationStatus: "Allocated",
+      stockFinalizedAt: null,
+    };
+  }
+
+  if (work === "needsStockDeduction") {
+    return {
+      status: "Delivered",
+      allocationStatus: "Allocated",
+      stockFinalizedAt: null,
+    };
+  }
+
+  return {};
 };
 
 // Remove all pricing fields for client/owner responses
@@ -267,10 +340,31 @@ export const getMyOrders = asyncHandler(async (req, res) => {
 });
 
 /* =========================
+   GET /api/orders/work-summary
+   Private/Admin
+   Counts orders that need common admin actions
+   ========================= */
+export const getOrdersWorkSummary = asyncHandler(async (_req, res) => {
+  const entries = await Promise.all(
+    ORDER_WORK_SUMMARY_KEYS.map(async (key) => {
+      const workFilter = await buildOrderWorkFilter(key);
+      const count = await Order.countDocuments(workFilter);
+      return [key, count];
+    })
+  );
+
+  res.status(200).json({
+    success: true,
+    message: "Order work summary retrieved successfully.",
+    data: Object.fromEntries(entries),
+  });
+});
+
+/* =========================
    GET /api/orders
    Private/Admin
    Paginated list of orders with optional filters
-   Query: status, paymentStatus, search (matches user name/email or order number)
+   Query: status, paymentStatus, work, search (matches user name/email or order number)
    ========================= */
 export const getOrders = asyncHandler(async (req, res) => {
   const { page, limit, skip } = parsePagination(req, {
@@ -341,6 +435,20 @@ export const getOrders = asyncHandler(async (req, res) => {
       const invoiceIds = await Invoice.distinct("_id", { paymentStatus });
       addFilterCondition(filter, { invoice: { $in: invoiceIds } });
     }
+  }
+
+  const work = req.query.work ? String(req.query.work).trim() : "";
+  if (work) {
+    if (!ORDER_WORK_FILTER_VALUES.has(work)) {
+      res.status(400);
+      throw new Error(
+        `Invalid work. Allowed: ${Array.from(ORDER_WORK_FILTER_VALUES).join(
+          ", "
+        )}.`
+      );
+    }
+
+    addFilterCondition(filter, await buildOrderWorkFilter(work));
   }
 
   const sort = { createdAt: -1, _id: -1 };
