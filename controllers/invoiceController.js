@@ -40,6 +40,32 @@ function parseBoundedDate(v, bound) {
   return d;
 }
 
+function buildDateRange(from, to) {
+  const range = {};
+  if (from) range.$gte = from;
+  if (to) range.$lte = to;
+  return range;
+}
+
+function addInvoiceDateRangeFilter(filter, from, to) {
+  if (!from && !to) return;
+
+  filter.$and = filter.$and || [];
+  filter.$and.push({
+    $or: [
+      { invoiceDate: buildDateRange(from, to) },
+      {
+        invoiceDate: { $exists: false },
+        createdAt: buildDateRange(from, to),
+      },
+      {
+        invoiceDate: null,
+        createdAt: buildDateRange(from, to),
+      },
+    ],
+  });
+}
+
 function isAdminUser(req) {
   // adjust if your user object uses role instead of isAdmin
   return Boolean(req.user?.isAdmin);
@@ -102,11 +128,7 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
 
   if (status) q.status = status;
 
-  if (from || to) {
-    q.createdAt = {};
-    if (from) q.createdAt.$gte = from;
-    if (to) q.createdAt.$lte = to;
-  }
+  addInvoiceDateRangeFilter(q, from, to);
 
   // Unpaid filter (Issued + not fully paid)
   if (unpaid) {
@@ -131,12 +153,13 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
           "paidTotalMinor",
           "balanceDueMinor",
           "paymentStatus",
+          "invoiceDate",
           "dueDate",
           "createdAt",
           "order",
         ].join(" ")
       )
-      .sort({ createdAt: -1 })
+      .sort({ invoiceDate: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
       .populate({
@@ -364,6 +387,7 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
         "paidTotalMinor",
         "balanceDueMinor",
         "paymentStatus",
+        "invoiceDate",
         "dueDate",
         "createdAt",
         "user",
@@ -482,11 +506,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     balanceDueMinor: { $gt: 0 },
   };
 
-  if (from || to) {
-    invoiceFilter.createdAt = {};
-    if (from) invoiceFilter.createdAt.$gte = from;
-    if (to) invoiceFilter.createdAt.$lte = to;
-  }
+  addInvoiceDateRangeFilter(invoiceFilter, from, to);
 
   const invoices = await Invoice.find(invoiceFilter)
     .select(
@@ -496,13 +516,14 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
         "paidTotalMinor",
         "balanceDueMinor",
         "paymentStatus",
+        "invoiceDate",
         "dueDate",
         "createdAt",
         "currency",
         "minorUnitFactor",
       ].join(" ")
     )
-    .sort({ createdAt: 1 })
+    .sort({ invoiceDate: 1, createdAt: 1 })
     .lean();
 
   const currency = invoices[0]?.currency || "AED";

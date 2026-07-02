@@ -305,7 +305,7 @@ const renderInvoiceHtml = ({ invoice, order, company }) => {
               invoice?.invoiceNumber || invoice?._id
             )}</div>
             <div class="doc-meta">Date: ${safeText(
-              formatDate(invoice?.createdAt)
+              formatDate(invoice?.invoiceDate || invoice?.createdAt)
             )}</div>
           </div>
         </header>

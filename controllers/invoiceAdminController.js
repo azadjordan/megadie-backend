@@ -21,6 +21,48 @@ function parseDate(v) {
   return Number.isNaN(d.getTime()) ? null : d;
 }
 
+function addCalendarMonthsClamped(date, months = 1) {
+  const source = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(source.getTime())) return null;
+
+  const year = source.getUTCFullYear();
+  const month = source.getUTCMonth();
+  const day = source.getUTCDate();
+  const target = new Date(Date.UTC(year, month + months, 1));
+  const lastDayOfTargetMonth = new Date(
+    Date.UTC(target.getUTCFullYear(), target.getUTCMonth() + 1, 0)
+  ).getUTCDate();
+
+  target.setUTCDate(Math.min(day, lastDayOfTargetMonth));
+  return target;
+}
+
+function buildDateRange(from, to) {
+  const range = {};
+  if (from) range.$gte = from;
+  if (to) range.$lte = to;
+  return range;
+}
+
+function addInvoiceDateRangeFilter(filter, from, to) {
+  if (!from && !to) return;
+
+  filter.$and = filter.$and || [];
+  filter.$and.push({
+    $or: [
+      { invoiceDate: buildDateRange(from, to) },
+      {
+        invoiceDate: { $exists: false },
+        createdAt: buildDateRange(from, to),
+      },
+      {
+        invoiceDate: null,
+        createdAt: buildDateRange(from, to),
+      },
+    ],
+  });
+}
+
 function toMinorUnits(majorAmount, factor = 100) {
   const n = Number(majorAmount);
   const f = Number(factor);
@@ -34,10 +76,10 @@ function escapeRegex(text = "") {
 }
 
 const SORT_MAP = {
-  newest: { createdAt: -1 },
-  oldest: { createdAt: 1 },
-  amountHigh: { amountMinor: -1, createdAt: -1 },
-  amountLow: { amountMinor: 1, createdAt: -1 },
+  newest: { invoiceDate: -1, createdAt: -1 },
+  oldest: { invoiceDate: 1, createdAt: 1 },
+  amountHigh: { amountMinor: -1, invoiceDate: -1, createdAt: -1 },
+  amountLow: { amountMinor: 1, invoiceDate: -1, createdAt: -1 },
 };
 
 const INVOICE_STATUS_ALLOWED = new Set(Invoice.schema.path("status")?.enumValues || []);
@@ -146,9 +188,9 @@ export const getInvoicesSummary = asyncHandler(async (req, res) => {
  * - unpaid=true  (Issued + paymentStatus != Paid)
  * - overdue=true (dueDate < now + balanceDueMinor > 0 + status != Cancelled)
  * - user=<userId>  (filter by client)
- * - from=YYYY-MM-DD, to=YYYY-MM-DD (createdAt range)
+ * - from=YYYY-MM-DD, to=YYYY-MM-DD (invoiceDate range)
  * - search=<string> (invoiceNumber/orderNumber, case-insensitive)
- * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use createdAt)
+ * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use invoiceDate)
  * - q=<string> (legacy alias for search)
  */
 export const getInvoices = asyncHandler(async (req, res) => {
@@ -204,11 +246,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
     filter.user = new mongoose.Types.ObjectId(user);
   }
 
-  if (from || to) {
-    filter.createdAt = {};
-    if (from) filter.createdAt.$gte = from;
-    if (to) filter.createdAt.$lte = to;
-  }
+  addInvoiceDateRangeFilter(filter, from, to);
 
   if (overdue) {
     filter.status = "Issued";
@@ -255,6 +293,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
           "paidTotalMinor",
           "balanceDueMinor",
           "paymentStatus",
+          "invoiceDate",
           "dueDate",
           "adminNote",
           "cancelReason",
@@ -300,6 +339,7 @@ export const getInvoices = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  *
  * Allowed fields:
+ * - invoiceDate
  * - dueDate
  * - adminNote
  * - status (Issued/Cancelled)
@@ -324,7 +364,22 @@ export const updateInvoice = asyncHandler(async (req, res) => {
     throw new Error("Invoice not found.");
   }
 
-  const allowed = pick(req.body || {}, ["dueDate", "adminNote", "status", "cancelReason"]);
+  const allowed = pick(req.body || {}, [
+    "invoiceDate",
+    "dueDate",
+    "adminNote",
+    "status",
+    "cancelReason",
+  ]);
+
+  if (Object.prototype.hasOwnProperty.call(allowed, "invoiceDate")) {
+    const parsed = parseDate(allowed.invoiceDate);
+    if (!parsed) {
+      res.status(400);
+      throw new Error("Invalid invoice date.");
+    }
+    invoice.invoiceDate = parsed;
+  }
 
   // dueDate: required
   if (Object.prototype.hasOwnProperty.call(allowed, "dueDate")) {
@@ -445,7 +500,7 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
  *
  * Body:
  * - userId (or user)
- * - dueDate (required)
+ * - invoiceDate (optional; defaults to now)
  * - currency (optional)
  * - minorUnitFactor (optional)
  * - adminNote (optional)
@@ -511,15 +566,16 @@ export const createManualInvoice = asyncHandler(async (req, res) => {
     throw new Error("User not found.");
   }
 
-  const rawDueDate = body.dueDate;
-  if (!rawDueDate) {
+  const invoiceDate = body.invoiceDate ? parseDate(body.invoiceDate) : new Date();
+  if (!invoiceDate) {
     res.status(400);
-    throw new Error("Due date is required.");
+    throw new Error("Invalid invoice date.");
   }
-  const dueDate = parseDate(rawDueDate);
+
+  const dueDate = addCalendarMonthsClamped(invoiceDate, 1);
   if (!dueDate) {
     res.status(400);
-    throw new Error("Invalid due date.");
+    throw new Error("Could not calculate due date.");
   }
 
   const minorUnitFactor = Object.prototype.hasOwnProperty.call(
@@ -619,8 +675,9 @@ export const createManualInvoice = asyncHandler(async (req, res) => {
       invoiceItems: cleanedItems,
       amountMinor,
       minorUnitFactor,
+      invoiceDate,
       ...(currency ? { currency } : {}),
-      ...(dueDate ? { dueDate } : {}),
+      dueDate,
       ...(adminNote ? { adminNote } : {}),
     });
   } catch (err) {
@@ -647,6 +704,7 @@ export const createManualInvoice = asyncHandler(async (req, res) => {
  *
  * Body (optional):
  * - dueDate
+ * - invoiceDate
  * - adminNote
  * - currency
  * - minorUnitFactor
@@ -733,6 +791,13 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
     const currency = currencyRaw ? currencyRaw.toUpperCase() : undefined;
     const adminNote =
       typeof req.body?.adminNote === "string" ? req.body.adminNote.trim() : undefined;
+    const invoiceDate = req.body?.invoiceDate
+      ? parseDate(req.body.invoiceDate)
+      : new Date();
+    if (!invoiceDate) {
+      res.status(400);
+      throw new Error("Invalid invoice date.");
+    }
 
     const [invoice] = await Invoice.create(
       [
@@ -742,6 +807,7 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
           source: "Order",
           amountMinor,
           minorUnitFactor,
+          invoiceDate,
           ...(currency ? { currency } : {}),
           ...(dueDate ? { dueDate } : {}),
           ...(adminNote ? { adminNote } : {}),
@@ -775,4 +841,3 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
     session.endSession();
   }
 });
-

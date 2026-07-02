@@ -100,6 +100,9 @@ const invoiceSchema = new mongoose.Schema(
       index: true,
     },
 
+    // Business invoice date shown to clients and used for issued-date reports.
+    invoiceDate: { type: Date, default: Date.now, index: true },
+
     dueDate: { type: Date, required: true, index: true },
 
     // Admin-editable metadata (controller controls allowed edits)
@@ -296,6 +299,11 @@ invoiceSchema.index({ status: 1, createdAt: -1 });
 invoiceSchema.index({ paymentStatus: 1, createdAt: -1 });
 invoiceSchema.index({ user: 1, paymentStatus: 1, createdAt: -1 });
 invoiceSchema.index({ currency: 1, createdAt: -1 });
+invoiceSchema.index({ user: 1, invoiceDate: -1 });
+invoiceSchema.index({ status: 1, invoiceDate: -1 });
+invoiceSchema.index({ paymentStatus: 1, invoiceDate: -1 });
+invoiceSchema.index({ user: 1, paymentStatus: 1, invoiceDate: -1 });
+invoiceSchema.index({ currency: 1, invoiceDate: -1 });
 invoiceSchema.index(
   { order: 1 },
   { unique: true, partialFilterExpression: { order: { $type: "objectId" } } }

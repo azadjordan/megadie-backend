@@ -134,7 +134,9 @@ const renderStatementOfAccountHtml = ({
             return `
               <tr>
                 <td class="col-invoice">${safeText(inv.invoiceNumber || inv._id)}</td>
-                <td class="col-issued muted">${safeText(formatDate(inv.createdAt))}</td>
+                <td class="col-issued muted">${safeText(
+                  formatDate(inv.invoiceDate || inv.createdAt)
+                )}</td>
                 <td class="col-due muted">${safeText(formatDate(inv.dueDate))}</td>
                 <td class="col-status ${statusClass}">${safeText(status)}</td>
                 <td class="col-balance">${safeText(
