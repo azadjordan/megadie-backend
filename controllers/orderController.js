@@ -37,6 +37,16 @@ const ADMIN_ORDER_INVOICE_SELECT = [
   "dueDate",
 ].join(" ");
 
+const ADMIN_ORDER_INVOICE_POPULATE = {
+  path: "invoice",
+  select: ADMIN_ORDER_INVOICE_SELECT,
+  populate: {
+    path: "payments",
+    select: "receivedBy",
+    options: { sort: { paymentDate: -1, createdAt: -1 } },
+  },
+};
+
 const ORDER_USER_DELIVERY_SELECT = [
   "name",
   "email",
@@ -457,7 +467,7 @@ export const getOrders = asyncHandler(async (req, res) => {
     Order.countDocuments(filter),
     Order.find(filter)
       .populate("user", ORDER_USER_DELIVERY_SELECT)
-      .populate("invoice", ADMIN_ORDER_INVOICE_SELECT)
+      .populate(ADMIN_ORDER_INVOICE_POPULATE)
       .sort(sort)
       .skip(skip)
       .limit(limit)
