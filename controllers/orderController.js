@@ -42,7 +42,7 @@ const ADMIN_ORDER_INVOICE_POPULATE = {
   select: ADMIN_ORDER_INVOICE_SELECT,
   populate: {
     path: "payments",
-    select: "receivedBy",
+    select: "receivedBy paymentMethod",
     options: { sort: { paymentDate: -1, createdAt: -1 } },
   },
 };
