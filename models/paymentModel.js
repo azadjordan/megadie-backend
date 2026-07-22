@@ -16,10 +16,9 @@ import mongoose from "mongoose";
  */
 
 export const RECEIVED_BY_OPTIONS = [
-  "Azad",
-  "Momani",
+  "Azad - Personal",
+  "Momani - Personal",
   "Company Account",
-  "Ahmad Emad",
 ];
 
 const paymentSchema = new mongoose.Schema(
