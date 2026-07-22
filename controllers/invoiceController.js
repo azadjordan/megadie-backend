@@ -2,6 +2,7 @@
 import mongoose from "mongoose";
 import { chromium } from "playwright";
 import Invoice from "../models/invoiceModel.js";
+import Payment from "../models/paymentModel.js";
 import User from "../models/userModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 import {
@@ -63,6 +64,57 @@ function addInvoiceDateRangeFilter(filter, from, to) {
         createdAt: buildDateRange(from, to),
       },
     ],
+  });
+}
+
+function resolveInvoiceDate(invoice) {
+  const value = invoice?.invoiceDate || invoice?.createdAt;
+  if (!value) return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function sumMinor(rows, key) {
+  return rows.reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
+}
+
+function buildStatementInvoiceRows(invoices, payments) {
+  const paidByInvoice = new Map();
+  for (const payment of payments || []) {
+    const invoiceId = String(payment?.invoice || "");
+    if (!invoiceId) continue;
+    paidByInvoice.set(
+      invoiceId,
+      (paidByInvoice.get(invoiceId) || 0) + (Number(payment?.amountMinor) || 0)
+    );
+  }
+
+  return (invoices || []).map((invoice) => {
+    const amountMinor = Math.max(0, Number(invoice?.amountMinor) || 0);
+    const rawRecordedPaidMinor = Math.max(
+      0,
+      paidByInvoice.get(String(invoice?._id)) || 0
+    );
+    const recordedPaidMinor = Math.min(amountMinor, rawRecordedPaidMinor);
+    const balanceMinor = Math.max(0, amountMinor - recordedPaidMinor);
+    const statementStatus =
+      balanceMinor <= 0
+        ? "Paid"
+        : recordedPaidMinor > 0
+        ? "Partially paid"
+        : "Unpaid";
+
+    return {
+      ...invoice,
+      amountMinor,
+      rawRecordedPaidMinor,
+      recordedPaidMinor,
+      paidTotalMinor: recordedPaidMinor,
+      balanceMinor,
+      balanceDueMinor: balanceMinor,
+      statementStatus,
+      statementDate: resolveInvoiceDate(invoice),
+    };
   });
 }
 
@@ -504,7 +556,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     status: "Issued",
   };
 
-  addInvoiceDateRangeFilter(invoiceFilter, from, to);
+  addInvoiceDateRangeFilter(invoiceFilter, null, to);
 
   const invoices = await Invoice.find(invoiceFilter)
     .select(
@@ -524,51 +576,72 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     .sort({ invoiceDate: 1, createdAt: 1 })
     .lean();
 
-  const currency = invoices[0]?.currency || "AED";
-  const minorUnitFactor = invoices[0]?.minorUnitFactor || 100;
-  const now = Date.now();
-  const totalInvoicedMinor = invoices.reduce(
-    (sum, inv) => sum + (Number(inv.amountMinor) || 0),
-    0
+  const invoiceIds = invoices.map((invoice) => invoice._id).filter(Boolean);
+  const payments = invoiceIds.length
+    ? await Payment.find({ invoice: { $in: invoiceIds } })
+        .select("invoice amountMinor")
+        .lean()
+    : [];
+
+  const statementInvoices = buildStatementInvoiceRows(invoices, payments);
+  const previousInvoices = from
+    ? statementInvoices.filter((invoice) => {
+        const invoiceDate = invoice.statementDate;
+        return invoiceDate && invoiceDate.getTime() < from.getTime();
+      })
+    : [];
+  const previousOutstandingInvoices = previousInvoices.filter(
+    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
   );
-  const totalPaidMinor = invoices.reduce(
-    (sum, inv) => sum + (Number(inv.paidTotalMinor) || 0),
-    0
+  const periodInvoices = from
+    ? statementInvoices.filter((invoice) => {
+        const invoiceDate = invoice.statementDate;
+        return !invoiceDate || invoiceDate.getTime() >= from.getTime();
+      })
+    : statementInvoices;
+  const outstandingInvoices = statementInvoices.filter(
+    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
   );
-  const totalDueMinor = invoices.reduce(
-    (sum, inv) => sum + (Number(inv.balanceDueMinor) || 0),
-    0
-  );
-  const openCount = invoices.reduce((sum, inv) => {
-    const balance = Number(inv.balanceDueMinor) || 0;
-    return balance > 0 ? sum + 1 : sum;
-  }, 0);
-  const overdueTotalMinor = invoices.reduce((sum, inv) => {
-    const balance = Number(inv.balanceDueMinor) || 0;
-    if (balance <= 0) return sum;
+
+  const currency = statementInvoices[0]?.currency || "AED";
+  const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
+  const overdueReference = to || new Date();
+  const openingBalanceMinor = from ? sumMinor(previousInvoices, "balanceMinor") : 0;
+  const periodInvoicedMinor = sumMinor(periodInvoices, "amountMinor");
+  const recordedPaymentsMinor = sumMinor(periodInvoices, "recordedPaidMinor");
+  const closingBalanceMinor = sumMinor(statementInvoices, "balanceMinor");
+  const overdueTotalMinor = outstandingInvoices.reduce((sum, inv) => {
     const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
-    if (!Number.isFinite(due) || due >= now) return sum;
-    return sum + balance;
+    if (!Number.isFinite(due) || due >= overdueReference.getTime()) return sum;
+    return sum + (Number(inv.balanceMinor) || 0);
   }, 0);
-  const overdueCount = invoices.reduce((sum, inv) => {
-    const balance = Number(inv.balanceDueMinor) || 0;
-    if (balance <= 0) return sum;
+  const overdueCount = outstandingInvoices.reduce((sum, inv) => {
     const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
-    if (!Number.isFinite(due) || due >= now) return sum;
+    if (!Number.isFinite(due) || due >= overdueReference.getTime()) return sum;
     return sum + 1;
   }, 0);
 
   const html = renderStatementOfAccountHtml({
     client,
-    invoices,
+    invoices: periodInvoices,
+    periodInvoices,
+    outstandingInvoices,
     summary: {
-      totalInvoicedMinor,
-      totalPaidMinor,
-      totalDueMinor,
+      openingBalanceMinor,
+      periodInvoicedMinor,
+      recordedPaymentsMinor,
+      closingBalanceMinor,
+      totalInvoicedMinor: periodInvoicedMinor,
+      totalPaidMinor: recordedPaymentsMinor,
+      totalDueMinor: closingBalanceMinor,
       overdueTotalMinor,
-      invoiceCount: invoices.length,
-      openCount,
+      invoiceCount: periodInvoices.length,
+      periodInvoiceCount: periodInvoices.length,
+      previousInvoiceCount: previousOutstandingInvoices.length,
+      outstandingCount: outstandingInvoices.length,
+      openCount: outstandingInvoices.length,
       overdueCount,
+      overdueReferenceDate: overdueReference.toISOString(),
       currency,
       minorUnitFactor,
     },

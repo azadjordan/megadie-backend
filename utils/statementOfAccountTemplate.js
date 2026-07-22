@@ -57,24 +57,85 @@ const formatMoney = (amountMinor, currency = "AED", factor = 100) => {
   }
 };
 
-const isOverdue = (inv) => {
-  const balance = Number(inv?.balanceDueMinor) || 0;
-  if (balance <= 0) return false;
-  if (!inv?.dueDate) return false;
-  const due = Date.parse(inv.dueDate);
-  if (!Number.isFinite(due)) return false;
-  return due < Date.now();
+const getBalanceMinor = (invoice) =>
+  Number(invoice?.balanceMinor ?? invoice?.balanceDueMinor ?? 0) || 0;
+
+const getRecordedPaidMinor = (invoice) =>
+  Number(invoice?.recordedPaidMinor ?? invoice?.paidTotalMinor ?? 0) || 0;
+
+const isOverdue = (invoice, referenceDate) => {
+  const balance = getBalanceMinor(invoice);
+  if (balance <= 0 || !invoice?.dueDate) return false;
+  const due = Date.parse(invoice.dueDate);
+  const reference = referenceDate ? Date.parse(referenceDate) : Date.now();
+  if (!Number.isFinite(due) || !Number.isFinite(reference)) return false;
+  return due < reference;
 };
 
-const formatStatus = (inv, overdue) => {
-  const balance = Number(inv?.balanceDueMinor) || 0;
-  if (inv?.paymentStatus === "Paid" || balance <= 0) return "Paid";
-  if (overdue) {
-    return inv?.paymentStatus === "PartiallyPaid"
-      ? "Overdue (Partial)"
-      : "Overdue";
+const formatStatus = (invoice, overdue) => {
+  const balance = getBalanceMinor(invoice);
+  const recordedPaid = getRecordedPaidMinor(invoice);
+  if (balance <= 0) return "Paid";
+  if (overdue && recordedPaid > 0) return "Overdue (Partial)";
+  if (overdue) return "Overdue";
+  if (recordedPaid > 0) return "Partially paid";
+  return "Unpaid";
+};
+
+const statusClassFor = (invoice, overdue) => {
+  const balance = getBalanceMinor(invoice);
+  const recordedPaid = getRecordedPaidMinor(invoice);
+  if (balance <= 0) return "status status--paid";
+  if (overdue) return "status status--overdue";
+  if (recordedPaid > 0) return "status status--partial";
+  return "status status--unpaid";
+};
+
+const renderInvoiceRows = ({
+  rows,
+  emptyMessage,
+  currency,
+  factor,
+  overdueReferenceDate,
+}) => {
+  const list = Array.isArray(rows) ? rows : [];
+  if (list.length === 0) {
+    return `
+      <tr>
+        <td colspan="7" class="empty">${safeText(emptyMessage)}</td>
+      </tr>
+    `;
   }
-  return inv?.paymentStatus === "PartiallyPaid" ? "Partially paid" : "Unpaid";
+
+  return list
+    .map((invoice) => {
+      const overdue = isOverdue(invoice, overdueReferenceDate);
+      const status = formatStatus(invoice, overdue);
+      const statusClass = statusClassFor(invoice, overdue);
+
+      return `
+        <tr>
+          <td class="col-invoice">${safeText(
+            invoice.invoiceNumber || invoice._id
+          )}</td>
+          <td class="col-issued muted">${safeText(
+            formatDate(invoice.invoiceDate || invoice.createdAt)
+          )}</td>
+          <td class="col-due muted">${safeText(formatDate(invoice.dueDate))}</td>
+          <td class="col-amount">${safeText(
+            formatMoney(invoice.amountMinor, currency, factor)
+          )}</td>
+          <td class="col-paid">${safeText(
+            formatMoney(getRecordedPaidMinor(invoice), currency, factor)
+          )}</td>
+          <td class="col-balance">${safeText(
+            formatMoney(getBalanceMinor(invoice), currency, factor)
+          )}</td>
+          <td class="col-status ${statusClass}">${safeText(status)}</td>
+        </tr>
+      `;
+    })
+    .join("");
 };
 
 const footerYear = new Date().getFullYear();
@@ -91,90 +152,77 @@ const statementOfAccountFooterTemplate = `
 const renderStatementOfAccountHtml = ({
   client,
   invoices,
+  periodInvoices,
+  outstandingInvoices,
   summary,
   generatedAt,
   fromDateLabel,
   cutoffDateLabel,
 }) => {
-  const list = Array.isArray(invoices) ? invoices : [];
+  const periodList = Array.isArray(periodInvoices)
+    ? periodInvoices
+    : Array.isArray(invoices)
+    ? invoices
+    : [];
+  const outstandingList = Array.isArray(outstandingInvoices)
+    ? outstandingInvoices
+    : [];
   const currency = summary?.currency || "AED";
   const factor = summary?.minorUnitFactor || 100;
-  const totalInvoiced = summary?.totalInvoicedMinor ?? 0;
-  const totalPaid = summary?.totalPaidMinor ?? 0;
-  const balanceDue = summary?.totalDueMinor ?? 0;
+  const openingBalance = summary?.openingBalanceMinor ?? 0;
+  const periodInvoiced = summary?.periodInvoicedMinor ?? 0;
+  const recordedPayments = summary?.recordedPaymentsMinor ?? 0;
+  const closingBalance = summary?.closingBalanceMinor ?? 0;
   const overdueTotal = summary?.overdueTotalMinor ?? 0;
+  const periodInvoiceCount = Number.isFinite(Number(summary?.periodInvoiceCount))
+    ? Number(summary.periodInvoiceCount)
+    : periodList.length;
+  const outstandingCount = Number.isFinite(Number(summary?.outstandingCount))
+    ? Number(summary.outstandingCount)
+    : outstandingList.length;
+  const previousInvoiceCount = Number.isFinite(
+    Number(summary?.previousInvoiceCount)
+  )
+    ? Number(summary.previousInvoiceCount)
+    : 0;
+  const overdueCount = Number.isFinite(Number(summary?.overdueCount))
+    ? Number(summary.overdueCount)
+    : 0;
   const generatedLabel = formatDateTime(generatedAt || new Date());
   const hasFromDate = Boolean(fromDateLabel);
   const hasCutoffDate = Boolean(cutoffDateLabel);
-  const scopeLabel = hasFromDate && hasCutoffDate
-    ? `Includes issued invoices between ${safeText(fromDateLabel)} and ${safeText(
-        cutoffDateLabel
+  const recordedPaymentsNote = hasFromDate
+    ? "For period invoices"
+    : "For included invoices";
+  const periodLabel = hasFromDate && hasCutoffDate
+    ? `${safeText(formatDate(fromDateLabel))} to ${safeText(
+        formatDate(cutoffDateLabel)
       )}`
     : hasCutoffDate
-    ? `Includes issued invoices on or before ${safeText(cutoffDateLabel)}`
-    : "Includes all issued invoices";
-  const invoiceCount = Number.isFinite(Number(summary?.invoiceCount))
-    ? Number(summary.invoiceCount)
-    : list.length;
-  const openCount = Number.isFinite(Number(summary?.openCount))
-    ? Number(summary.openCount)
-    : list.reduce(
-        (sum, inv) => ((Number(inv?.balanceDueMinor) || 0) > 0 ? sum + 1 : sum),
-        0
-      );
-  const overdueCount = Number.isFinite(Number(summary?.overdueCount))
-    ? Number(summary.overdueCount)
-    : list.reduce(
-        (sum, inv) => (isOverdue(inv) ? sum + 1 : sum),
-        0
-      );
-  const balanceNote =
-    overdueCount > 0
-      ? `${openCount} open, ${overdueCount} overdue`
-      : `${openCount} open`;
+    ? `All invoices up to ${safeText(formatDate(cutoffDateLabel))}`
+    : "All invoices";
+  const outstandingTitle = "Outstanding Invoices";
+  const periodTitle = hasFromDate
+    ? "Invoices Issued During Period"
+    : hasCutoffDate
+    ? `Invoices Issued Up To ${safeText(formatDate(cutoffDateLabel))}`
+    : "Invoices Issued";
+  const overdueReferenceDate = summary?.overdueReferenceDate || cutoffDateLabel;
 
-  const rowsHtml =
-    list.length === 0
-      ? `
-        <tr>
-          <td colspan="7" class="empty">No issued invoices match this statement scope.</td>
-        </tr>
-      `
-      : list
-          .map((inv) => {
-            const overdue = isOverdue(inv);
-            const status = formatStatus(inv, overdue);
-            const paid =
-              inv?.paymentStatus === "Paid" ||
-              (Number(inv?.balanceDueMinor) || 0) <= 0;
-            const statusClass = overdue
-              ? "status status--overdue"
-              : paid
-              ? "status status--paid"
-              : inv?.paymentStatus === "PartiallyPaid"
-              ? "status status--partial"
-              : "status status--unpaid";
-            return `
-              <tr>
-                <td class="col-invoice">${safeText(inv.invoiceNumber || inv._id)}</td>
-                <td class="col-issued muted">${safeText(
-                  formatDate(inv.invoiceDate || inv.createdAt)
-                )}</td>
-                <td class="col-due muted">${safeText(formatDate(inv.dueDate))}</td>
-                <td class="col-amount">${safeText(
-                  formatMoney(inv.amountMinor, currency, factor)
-                )}</td>
-                <td class="col-paid">${safeText(
-                  formatMoney(inv.paidTotalMinor || 0, currency, factor)
-                )}</td>
-                <td class="col-balance">${safeText(
-                  formatMoney(inv.balanceDueMinor, currency, factor)
-                )}</td>
-                <td class="col-status ${statusClass}">${safeText(status)}</td>
-              </tr>
-            `;
-          })
-          .join("");
+  const outstandingRowsHtml = renderInvoiceRows({
+    rows: outstandingList,
+    emptyMessage: "No outstanding invoices in this statement.",
+    currency,
+    factor,
+    overdueReferenceDate,
+  });
+  const periodRowsHtml = renderInvoiceRows({
+    rows: periodList,
+    emptyMessage: "No issued invoices match this statement period.",
+    currency,
+    factor,
+    overdueReferenceDate,
+  });
 
   return `
     <!doctype html>
@@ -190,6 +238,9 @@ const renderStatementOfAccountHtml = ({
             --muted: #6B7280;
             --border: #E5E7EB;
             --row: #FAFAFC;
+            --green: #047857;
+            --amber: #B45309;
+            --red: #B91C1C;
           }
           * { box-sizing: border-box; }
           body {
@@ -233,10 +284,14 @@ const renderStatementOfAccountHtml = ({
             padding: 10px;
             background: var(--violet-soft);
           }
+          .summary-card--closing {
+            background: #ffffff;
+            border-color: var(--violet);
+          }
           .summary-label {
-            font-size: 11px;
+            font-size: 10px;
             text-transform: uppercase;
-            letter-spacing: 0.6px;
+            letter-spacing: 0.5px;
             color: var(--muted);
           }
           .summary-value {
@@ -279,7 +334,7 @@ const renderStatementOfAccountHtml = ({
             background: #ffffff;
           }
           .client-label {
-            font-size: 11px;
+            font-size: 10px;
             text-transform: uppercase;
             letter-spacing: 0.4px;
             color: var(--muted);
@@ -295,9 +350,9 @@ const renderStatementOfAccountHtml = ({
           thead th {
             background: var(--violet-soft);
             color: var(--muted);
-            font-size: 11px;
+            font-size: 10px;
             text-transform: uppercase;
-            letter-spacing: 0.6px;
+            letter-spacing: 0.5px;
             padding: 8px 6px;
             text-align: left;
             border-top: 1px solid var(--border);
@@ -307,7 +362,7 @@ const renderStatementOfAccountHtml = ({
             padding: 8px 6px;
             border-bottom: 1px solid var(--border);
             vertical-align: top;
-            font-size: 12px;
+            font-size: 11px;
           }
           tbody tr:nth-child(even) { background: var(--row); }
           tbody tr { page-break-inside: avoid; }
@@ -319,14 +374,24 @@ const renderStatementOfAccountHtml = ({
             font-variant-numeric: tabular-nums;
           }
           .status { font-weight: 600; }
-          .status--paid { color: #047857; }
-          .status--overdue { color: #B91C1C; }
-          .status--partial { color: #B45309; }
+          .status--paid { color: var(--green); }
+          .status--overdue { color: var(--red); }
+          .status--partial { color: var(--amber); }
           .status--unpaid { color: var(--text); }
           .empty {
             text-align: center;
             color: var(--muted);
             padding: 12px 6px;
+          }
+          .note {
+            margin-top: 14px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 9px 10px;
+            color: var(--muted);
+            font-size: 11px;
+            line-height: 1.5;
+            background: #ffffff;
           }
         </style>
       </head>
@@ -339,40 +404,47 @@ const renderStatementOfAccountHtml = ({
           <div class="title-block">
             <div class="doc-title">Statement of Account</div>
             <div class="meta">Generated ${safeText(generatedLabel)}</div>
-            <div class="meta">${scopeLabel}</div>
+            <div class="meta">Period: ${periodLabel}</div>
           </div>
         </header>
         <div class="accent"></div>
 
         <div class="summary">
           <div class="summary-card">
-            <div class="summary-label">Total invoiced</div>
+            <div class="summary-label">Opening Balance</div>
             <div class="summary-value">${safeText(
-              formatMoney(totalInvoiced, currency, factor)
+              formatMoney(openingBalance, currency, factor)
             )}</div>
-            <div class="summary-note">${safeText(invoiceCount)} invoice${
-              invoiceCount === 1 ? "" : "s"
+            <div class="summary-note">${safeText(previousInvoiceCount)} previous balance${
+              previousInvoiceCount === 1 ? "" : "s"
             }</div>
           </div>
           <div class="summary-card">
-            <div class="summary-label">Total paid</div>
+            <div class="summary-label">Period Invoiced</div>
             <div class="summary-value">${safeText(
-              formatMoney(totalPaid, currency, factor)
+              formatMoney(periodInvoiced, currency, factor)
             )}</div>
+            <div class="summary-note">${safeText(periodInvoiceCount)} invoice${
+              periodInvoiceCount === 1 ? "" : "s"
+            }</div>
           </div>
           <div class="summary-card">
-            <div class="summary-label">Balance due</div>
+            <div class="summary-label">Recorded Payments</div>
             <div class="summary-value">${safeText(
-              formatMoney(balanceDue, currency, factor)
+              formatMoney(recordedPayments, currency, factor)
             )}</div>
-            <div class="summary-note">${safeText(balanceNote)}</div>
+            <div class="summary-note">${safeText(recordedPaymentsNote)}</div>
           </div>
-          <div class="summary-card">
-            <div class="summary-label">Overdue balance</div>
+          <div class="summary-card summary-card--closing">
+            <div class="summary-label">Closing Balance</div>
             <div class="summary-value">${safeText(
-              formatMoney(overdueTotal, currency, factor)
+              formatMoney(closingBalance, currency, factor)
             )}</div>
-            <div class="summary-note">${safeText(overdueCount)} overdue</div>
+            <div class="summary-note">${safeText(outstandingCount)} outstanding${
+              overdueCount > 0
+                ? `, ${safeText(overdueCount)} overdue`
+                : ""
+            }</div>
           </div>
         </div>
 
@@ -399,35 +471,79 @@ const renderStatementOfAccountHtml = ({
 
         <section class="section">
           <div class="section-head">
-            <div class="section-title">Invoices</div>
+            <div class="section-title">${outstandingTitle}</div>
             <div class="section-rule"></div>
           </div>
           <table>
             <colgroup>
-              <col style="width:19%" />
+              <col style="width:18%" />
               <col style="width:13%" />
               <col style="width:13%" />
               <col style="width:14%" />
-              <col style="width:14%" />
+              <col style="width:15%" />
               <col style="width:14%" />
               <col style="width:13%" />
             </colgroup>
             <thead>
               <tr>
                 <th>Invoice #</th>
-                <th>Issued</th>
-                <th>Due</th>
+                <th>Invoice Date</th>
+                <th>Due Date</th>
                 <th style="text-align:right;">Amount</th>
-                <th style="text-align:right;">Paid</th>
+                <th style="text-align:right;">Recorded Paid</th>
                 <th style="text-align:right;">Balance</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
-              ${rowsHtml}
+              ${outstandingRowsHtml}
             </tbody>
           </table>
         </section>
+
+        <section class="section">
+          <div class="section-head">
+            <div class="section-title">${periodTitle}</div>
+            <div class="section-rule"></div>
+          </div>
+          <table>
+            <colgroup>
+              <col style="width:18%" />
+              <col style="width:13%" />
+              <col style="width:13%" />
+              <col style="width:14%" />
+              <col style="width:15%" />
+              <col style="width:14%" />
+              <col style="width:13%" />
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Invoice #</th>
+                <th>Invoice Date</th>
+                <th>Due Date</th>
+                <th style="text-align:right;">Amount</th>
+                <th style="text-align:right;">Recorded Paid</th>
+                <th style="text-align:right;">Balance</th>
+                <th>Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${periodRowsHtml}
+            </tbody>
+          </table>
+        </section>
+
+        <div class="note">
+          Payments shown are based on payments recorded in Megadie before this
+          statement was generated. The date range controls which invoice dates
+          are included. Overpaid invoices, if any, are shown with a zero
+          remaining balance.
+          ${overdueCount > 0
+            ? ` Overdue balance included in closing balance: ${safeText(
+                formatMoney(overdueTotal, currency, factor)
+              )}.`
+            : ""}
+        </div>
       </body>
     </html>
   `;
