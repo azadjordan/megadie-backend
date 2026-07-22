@@ -489,6 +489,7 @@ export const getInventoryMovements = asyncHandler(async (req, res) => {
     "RESERVE",
     "RELEASE",
     "DEDUCT",
+    "RESTORE",
   ]);
 
   const andFilters = [];

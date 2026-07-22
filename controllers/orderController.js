@@ -5,9 +5,11 @@ import Quote from "../models/quoteModel.js";
 import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
 import Product from "../models/productModel.js";
+import SlotItem from "../models/slotItemModel.js";
 import User from "../models/userModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import { logInventoryMovement } from "../utils/inventoryMovement.js";
+import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
 
 /* =========================
    Helpers (pagination)
@@ -171,102 +173,523 @@ const sanitizeOrderForClient = (order) => {
   return o;
 };
 
-/* =========================
-   DELETE /api/orders/:id
-   Private/Admin
-   Delete order only if status === "Cancelled" and no allocations exist.
-   Block deletion if stock was finalized.
-   Cascades: delete linked quote, invoice, invoice payments, and allocations.
-   ========================= */
-export const deleteOrder = asyncHandler(async (req, res) => {
-  const order = await Order.findById(req.params.id).select(
-    "_id status invoice quote stockFinalizedAt"
+const resolveId = (value) => {
+  if (!value) return "";
+  return String(value?._id || value?.id || value);
+};
+
+const isReservedAllocation = (allocation) =>
+  !allocation?.status || allocation.status === "Reserved";
+
+const isDeductedAllocation = (allocation) => allocation?.status === "Deducted";
+
+const qtyOf = (allocation) => Math.max(0, Number(allocation?.qty) || 0);
+
+const sumAllocationQty = (rows) =>
+  rows.reduce((sum, row) => sum + qtyOf(row), 0);
+
+const formatSlotLabel = (slot) => {
+  if (!slot || typeof slot !== "object") return "Unknown slot";
+  if (slot.label) return slot.label;
+  if (slot.unit && slot.position && slot.store) {
+    return `${slot.unit}${slot.position}-${slot.store}`;
+  }
+  return "Unknown slot";
+};
+
+const formatProductLabel = (product) => {
+  if (!product || typeof product !== "object") return "Unknown product";
+  return product.name || product.sku || "Unknown product";
+};
+
+const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) => {
+  const orderQuery = Order.findById(orderId).select(
+    "_id orderNumber status invoice quote stockFinalizedAt orderItems.product orderItems.qty"
   );
-  if (!order) {
+  if (session) orderQuery.session(session);
+  const order = await orderQuery.lean();
+  if (!order) return null;
+
+  let invoiceId = resolveId(order.invoice);
+  const quoteId = resolveId(order.quote);
+
+  let invoice = null;
+  if (invoiceId) {
+    const invoiceQuery = Invoice.findById(invoiceId).select(
+      "invoiceNumber status amountMinor paidTotalMinor balanceDueMinor currency minorUnitFactor"
+    );
+    if (session) invoiceQuery.session(session);
+    invoice = await invoiceQuery.lean();
+  }
+  if (!invoice) {
+    const linkedInvoiceQuery = Invoice.findOne({ order: order._id }).select(
+      "invoiceNumber status amountMinor paidTotalMinor balanceDueMinor currency minorUnitFactor"
+    );
+    if (session) linkedInvoiceQuery.session(session);
+    invoice = await linkedInvoiceQuery.lean();
+    if (invoice) invoiceId = resolveId(invoice._id);
+  }
+
+  let quote = null;
+  if (quoteId) {
+    const quoteQuery = Quote.findById(quoteId).select("quoteNumber status");
+    if (session) quoteQuery.session(session);
+    quote = await quoteQuery.lean();
+  }
+  if (!quote) {
+    const linkedQuoteQuery = Quote.findOne({ order: order._id }).select(
+      "quoteNumber status"
+    );
+    if (session) linkedQuoteQuery.session(session);
+    quote = await linkedQuoteQuery.lean();
+  }
+
+  const allocationsQuery = OrderAllocation.find({ order: order._id })
+    .select("_id product slot qty status")
+    .populate("product", "name sku cbm")
+    .populate("slot", "label store unit position")
+    .lean();
+  if (session) allocationsQuery.session(session);
+  const allocations = await allocationsQuery;
+
+  const payments = invoiceId
+    ? await (() => {
+        const paymentsQuery = Payment.find({ invoice: invoiceId })
+          .select("amountMinor")
+          .lean();
+        if (session) paymentsQuery.session(session);
+        return paymentsQuery;
+      })()
+    : [];
+
+  const reservedRows = allocations.filter(isReservedAllocation);
+  const deductedRows = allocations.filter(isDeductedAllocation);
+  const cancelledRows = allocations.filter((row) => row?.status === "Cancelled");
+  const reservedQty = sumAllocationQty(reservedRows);
+  const deductedQty = sumAllocationQty(deductedRows);
+  const stockFinalized = Boolean(order.stockFinalizedAt) || deductedRows.length > 0;
+  const paymentTotalMinor = payments.reduce(
+    (sum, payment) => sum + (Number(payment?.amountMinor) || 0),
+    0
+  );
+  const restoreRows = deductedRows.map((row) => ({
+    allocationId: resolveId(row._id),
+    productId: resolveId(row.product),
+    productName: formatProductLabel(row.product),
+    slotId: resolveId(row.slot),
+    slotLabel: formatSlotLabel(row.slot),
+    qty: qtyOf(row),
+  }));
+
+  const orderedByProduct = new Map();
+  for (const item of order.orderItems || []) {
+    const productId = resolveId(item.product);
+    const qtyValue = Math.max(0, Number(item.qty) || 0);
+    if (productId && qtyValue > 0) {
+      orderedByProduct.set(
+        productId,
+        (orderedByProduct.get(productId) || 0) + qtyValue
+      );
+    }
+  }
+
+  const deductedByProduct = new Map();
+  for (const row of deductedRows) {
+    const productId = resolveId(row.product);
+    const qtyValue = qtyOf(row);
+    if (productId && qtyValue > 0) {
+      deductedByProduct.set(
+        productId,
+        (deductedByProduct.get(productId) || 0) + qtyValue
+      );
+    }
+  }
+
+  const blockers = [];
+  if (stockFinalized && deductedRows.length === 0) {
+    blockers.push(
+      "Stock was finalized, but deducted allocation records are missing. Stock cannot be restored safely."
+    );
+  }
+  if (stockFinalized && orderedByProduct.size === 0) {
+    blockers.push("Order items are missing. Stock cannot be restored safely.");
+  }
+  for (const row of restoreRows) {
+    if (!row.productId || row.productName === "Unknown product") {
+      blockers.push("A deducted allocation is missing its product.");
+      break;
+    }
+  }
+  for (const row of restoreRows) {
+    if (!row.slotId || row.slotLabel === "Unknown slot") {
+      blockers.push("A deducted allocation is missing its original slot.");
+      break;
+    }
+  }
+  if (restoreRows.some((row) => row.qty <= 0 || !Number.isInteger(row.qty))) {
+    blockers.push("A deducted allocation has an invalid quantity.");
+  }
+  if (stockFinalized) {
+    for (const [productId, orderedQty] of orderedByProduct.entries()) {
+      if ((deductedByProduct.get(productId) || 0) !== orderedQty) {
+        blockers.push(
+          "Deducted allocation records do not match the order items. Stock cannot be restored safely."
+        );
+        break;
+      }
+    }
+    for (const productId of deductedByProduct.keys()) {
+      if (!orderedByProduct.has(productId)) {
+        blockers.push(
+          "A deducted allocation references a product that is not in this order."
+        );
+        break;
+      }
+    }
+  }
+
+  const actions = [];
+  if (deductedQty > 0) {
+    actions.push(`Restore ${deductedQty} unit${deductedQty === 1 ? "" : "s"} to original slots`);
+    actions.push("Log stock restore movements");
+  }
+  if (reservedQty > 0) {
+    actions.push(`Release ${reservedQty} reserved unit${reservedQty === 1 ? "" : "s"}`);
+  }
+  if (allocations.length > 0) {
+    actions.push(
+      `Delete ${allocations.length} allocation record${
+        allocations.length === 1 ? "" : "s"
+      }`
+    );
+  }
+  if (invoice) {
+    actions.push(`Delete invoice ${invoice.invoiceNumber || invoice._id}`);
+  } else if (invoiceId) {
+    actions.push("Remove missing invoice reference");
+  }
+  if (payments.length > 0) {
+    actions.push(
+      `Delete ${payments.length} payment record${payments.length === 1 ? "" : "s"}`
+    );
+  }
+  if (quote) {
+    actions.push(`Delete linked quote ${quote.quoteNumber || quote._id}`);
+  } else if (quoteId) {
+    actions.push("Remove missing quote reference");
+  }
+  actions.push(`Delete order ${order.orderNumber || order._id}`);
+
+  const warnings = [];
+  if (deductedQty > 0) {
+    warnings.push("Stock was already deducted and will be restored.");
+  }
+  if (payments.length > 0) {
+    warnings.push("Payment records will be permanently deleted.");
+  }
+  if (invoiceId && !invoice) {
+    warnings.push("The linked invoice record was not found.");
+  }
+  if (quoteId && !quote) {
+    warnings.push("The linked quote record was not found.");
+  }
+
+  return {
+    allowed: blockers.length === 0,
+    blockers,
+    order: {
+      id: resolveId(order._id),
+      orderNumber: order.orderNumber || resolveId(order._id),
+      status: order.status || "-",
+      stockFinalized,
+    },
+    stock: {
+      mode: deductedQty > 0 ? "restore" : "release",
+      stockFinalized,
+      reservedQty,
+      deductedQty,
+      restoreRows,
+    },
+    allocations: {
+      total: allocations.length,
+      reservedCount: reservedRows.length,
+      deductedCount: deductedRows.length,
+      cancelledCount: cancelledRows.length,
+    },
+    invoice: invoice
+      ? {
+          exists: true,
+          id: resolveId(invoice._id),
+          invoiceNumber: invoice.invoiceNumber || resolveId(invoice._id),
+          status: invoice.status || "-",
+          amountMinor: invoice.amountMinor || 0,
+          paidTotalMinor: invoice.paidTotalMinor || 0,
+          balanceDueMinor: invoice.balanceDueMinor || 0,
+          currency: invoice.currency || "AED",
+          minorUnitFactor: invoice.minorUnitFactor || 100,
+        }
+      : { exists: false, id: invoiceId || "", invoiceNumber: "" },
+    payments: {
+      count: payments.length,
+      totalMinor: paymentTotalMinor,
+      currency: invoice?.currency || "AED",
+      minorUnitFactor: invoice?.minorUnitFactor || 100,
+    },
+    quote: quote
+      ? {
+          exists: true,
+          id: resolveId(quote._id),
+          quoteNumber: quote.quoteNumber || resolveId(quote._id),
+          status: quote.status || "-",
+        }
+      : { exists: false, id: quoteId || "", quoteNumber: "" },
+    actions,
+    warnings,
+    confirmText: order.orderNumber || resolveId(order._id),
+  };
+};
+
+const restoreDeductedAllocation = async ({
+  allocation,
+  orderId,
+  actorId,
+  session,
+}) => {
+  const productId = resolveId(allocation.product);
+  const slotId = resolveId(allocation.slot);
+  const qtyValue = qtyOf(allocation);
+  if (!mongoose.isValidObjectId(productId) || !mongoose.isValidObjectId(slotId)) {
+    throw new Error("Cannot restore stock because an allocation has an invalid product or slot.");
+  }
+  if (qtyValue <= 0 || !Number.isInteger(qtyValue)) {
+    throw new Error("Cannot restore stock because an allocation has an invalid quantity.");
+  }
+
+  const product = await Product.findById(productId)
+    .select("cbm")
+    .session(session);
+  if (!product) {
+    throw new Error("Cannot restore stock because the product no longer exists.");
+  }
+
+  const unitCbm = Math.max(0, Number(product.cbm) || 0);
+  const restoreCbm = unitCbm * qtyValue;
+  let slotItem = await SlotItem.findOne({
+    product: productId,
+    slot: slotId,
+  }).session(session);
+
+  if (!slotItem) {
+    slotItem = new SlotItem({
+      product: productId,
+      slot: slotId,
+      qty: qtyValue,
+      cbm: 0,
+    });
+  } else {
+    slotItem.qty = Math.max(0, Number(slotItem.qty) || 0) + qtyValue;
+  }
+  await slotItem.save({ session });
+
+  if (restoreCbm > 0) {
+    await applySlotOccupancyDelta(slotId, restoreCbm, session);
+  }
+
+  await logInventoryMovement(
+    {
+      type: "RESTORE",
+      product: productId,
+      slot: slotId,
+      order: orderId,
+      allocation: allocation._id,
+      qty: qtyValue,
+      unitCbm: unitCbm || undefined,
+      cbm: restoreCbm || undefined,
+      actor: actorId || null,
+      note: "Order deleted after stock deduction; stock restored.",
+    },
+    session
+  );
+
+  return { qty: qtyValue, cbm: restoreCbm };
+};
+
+/* =========================
+   GET /api/orders/:id/delete-preview
+   Private/Admin
+   Shows the cleanup/restore impact before deleting an order.
+   ========================= */
+export const getOrderDeletePreview = asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    res.status(400);
+    throw new Error("Invalid order id.");
+  }
+
+  const preview = await buildOrderDeletePreviewPayload(req.params.id);
+  if (!preview) {
     res.status(404);
     throw new Error("Order not found.");
   }
 
-  if (order.status === "Delivered") {
-    res.status(400);
-    throw new Error(
-      "Delivered orders cannot be deleted. Change status to 'Cancelled' first, then delete."
-    );
-  }
-
-  if (order.status !== "Cancelled") {
-    res.status(409);
-    throw new Error(
-      "Only 'Cancelled' orders can be deleted. Update status to 'Cancelled' first."
-    );
-  }
-
-  if (order.stockFinalizedAt) {
-    res.status(409);
-    throw new Error("Stock finalized orders cannot be deleted.");
-  }
-
-  const hasBlockingAllocations = await OrderAllocation.exists({
-    order: order._id,
-    $or: [
-      { status: { $in: ["Reserved", "Deducted"] } },
-      { status: { $exists: false } },
-    ],
+  res.status(200).json({
+    success: true,
+    message: preview.allowed
+      ? "Order delete preview generated."
+      : "Order cannot be deleted safely.",
+    data: preview,
   });
-  if (hasBlockingAllocations) {
-    res.status(409);
-    throw new Error("Remove allocations before deleting this order.");
+});
+
+/* =========================
+   DELETE /api/orders/:id
+   Private/Admin
+   Deletes an order as a correction workflow:
+   - Reserved stock is released
+   - Deducted stock is restored to original slots
+   - Linked invoice/payments, quote, allocations, and order are removed
+   ========================= */
+export const deleteOrder = asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    res.status(400);
+    throw new Error("Invalid order id.");
   }
 
   const session = await mongoose.startSession();
-  let invoiceDeleted = false;
-  let paymentsDeleted = 0;
-  let quoteDeleted = false;
-  let allocationsDeleted = 0;
+  let summary = null;
+
   try {
     await session.withTransaction(async () => {
-      const allocationResult = await OrderAllocation.deleteMany(
-        { order: order._id },
-        { session }
-      );
-      allocationsDeleted = allocationResult?.deletedCount || 0;
+      const preview = await buildOrderDeletePreviewPayload(req.params.id, {
+        session,
+      });
+      if (!preview) {
+        res.status(404);
+        throw new Error("Order not found.");
+      }
+      if (!preview.allowed) {
+        res.status(409);
+        throw new Error(preview.blockers.join(" "));
+      }
 
-      if (order.invoice) {
-        const inv = await Invoice.findById(order.invoice).session(session);
-        if (inv) {
-          const payDel = await Payment.deleteMany(
-            { invoice: inv._id },
-            { session }
-          );
-          paymentsDeleted = payDel?.deletedCount || 0;
-          await inv.deleteOne({ session });
+      const order = await Order.findById(req.params.id)
+        .select("_id orderNumber invoice quote")
+        .session(session);
+      if (!order) {
+        res.status(404);
+        throw new Error("Order not found.");
+      }
+
+      const allocations = await OrderAllocation.find({ order: order._id })
+        .select("_id product slot qty status note")
+        .session(session);
+      const reservedAllocations = allocations.filter(isReservedAllocation);
+      const deductedAllocations = allocations.filter(isDeductedAllocation);
+
+      let restoredQty = 0;
+      let restoredCbm = 0;
+      let releasedQty = 0;
+
+      for (const allocation of reservedAllocations) {
+        const qtyValue = qtyOf(allocation);
+        releasedQty += qtyValue;
+        await logInventoryMovement(
+          {
+            type: "RELEASE",
+            product: allocation.product,
+            slot: allocation.slot,
+            order: order._id,
+            allocation: allocation._id,
+            qty: qtyValue,
+            actor: req.user?._id || null,
+            note: allocation.note || undefined,
+          },
+          session
+        );
+      }
+
+      for (const allocation of deductedAllocations) {
+        const restored = await restoreDeductedAllocation({
+          allocation,
+          orderId: order._id,
+          actorId: req.user?._id || null,
+          session,
+        });
+        restoredQty += restored.qty;
+        restoredCbm += restored.cbm;
+      }
+
+      const allocationResult = await OrderAllocation.deleteMany({
+        order: order._id,
+      }).session(session);
+
+      let invoiceDeleted = false;
+      let paymentsDeleted = 0;
+      let invoiceId = resolveId(order.invoice);
+      let invoice = null;
+      if (invoiceId) {
+        invoice = await Invoice.findById(invoiceId).session(session);
+      }
+      if (!invoice) {
+        invoice = await Invoice.findOne({ order: order._id }).session(session);
+        if (invoice) invoiceId = resolveId(invoice._id);
+      }
+      if (invoiceId) {
+        if (invoice) {
+          if (invoice.status !== "Cancelled") {
+            invoice.status = "Cancelled";
+            invoice.cancelReason =
+              invoice.cancelReason || "Deleted with order correction";
+            if (!invoice.cancelledAt) invoice.cancelledAt = new Date();
+            await invoice.save({ session });
+          }
+          await Invoice.deleteOne({ _id: invoice._id }).session(session);
           invoiceDeleted = true;
         }
+        const paymentResult = await Payment.deleteMany({
+          invoice: invoiceId,
+        }).session(session);
+        paymentsDeleted = paymentResult?.deletedCount || 0;
       }
 
+      let quoteDeleted = false;
+      let quote = null;
       if (order.quote) {
-        const quote = await Quote.findById(order.quote).session(session);
-        if (quote) {
-          await quote.deleteOne({ session });
-          quoteDeleted = true;
-        }
+        quote = await Quote.findById(order.quote).session(session);
       }
-      await order.deleteOne({ session });
-    });
+      if (!quote) {
+        quote = await Quote.findOne({ order: order._id }).session(session);
+      }
+      if (quote) {
+        await quote.deleteOne({ session });
+        quoteDeleted = true;
+      }
 
-    res.status(200).json({
-      success: true,
-      message:
-        "Order deleted. Linked quote, invoice, payments, and allocations removed.",
-      orderId: order._id,
-      invoiceDeleted,
-      paymentsDeleted,
-      quoteDeleted,
-      allocationsDeleted,
+      await order.deleteOne({ session });
+
+      summary = {
+        orderId: resolveId(order._id),
+        orderNumber: order.orderNumber || resolveId(order._id),
+        stockRestored: restoredQty > 0,
+        restoredQty,
+        restoredCbm,
+        releasedQty,
+        allocationsDeleted: allocationResult?.deletedCount || 0,
+        invoiceDeleted,
+        paymentsDeleted,
+        quoteDeleted,
+      };
     });
   } finally {
     session.endSession();
   }
+
+  res.status(200).json({
+    success: true,
+    message: summary?.stockRestored
+      ? "Order deleted and deducted stock restored."
+      : "Order deleted and reservations released.",
+    data: summary,
+  });
 });
 
 /* =========================

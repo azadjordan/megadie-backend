@@ -6,6 +6,7 @@ import {
   createOrderFromQuote,
   getMyOrders,
   getOrderById,
+  getOrderDeletePreview,
   deleteOrder,
   updateOrder,
   markOrderDelivered,
@@ -34,6 +35,8 @@ router.post("/from-quote/:quoteId", protect, admin, createOrderFromQuote);
 router.put("/:id/deliver", protect, admin, markOrderDelivered);
 // Cancel order and cleanup (admin)
 router.post("/:id/cancel", protect, admin, cancelOrderAndCleanup);
+// Preview order delete cleanup (admin)
+router.get("/:id/delete-preview", protect, admin, getOrderDeletePreview);
 
 // Order allocations (admin)
 router.get("/:id/allocations", protect, admin, getOrderAllocations);

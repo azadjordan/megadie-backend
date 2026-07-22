@@ -6,7 +6,15 @@ const movementSchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
-      enum: ["ADJUST_IN", "ADJUST_OUT", "MOVE", "RESERVE", "RELEASE", "DEDUCT"],
+      enum: [
+        "ADJUST_IN",
+        "ADJUST_OUT",
+        "MOVE",
+        "RESERVE",
+        "RELEASE",
+        "DEDUCT",
+        "RESTORE",
+      ],
       index: true,
     },
     product: {
