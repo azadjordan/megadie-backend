@@ -58,6 +58,8 @@ const formatMoney = (amountMinor, currency = "AED", factor = 100) => {
 };
 
 const isOverdue = (inv) => {
+  const balance = Number(inv?.balanceDueMinor) || 0;
+  if (balance <= 0) return false;
   if (!inv?.dueDate) return false;
   const due = Date.parse(inv.dueDate);
   if (!Number.isFinite(due)) return false;
@@ -65,6 +67,8 @@ const isOverdue = (inv) => {
 };
 
 const formatStatus = (inv, overdue) => {
+  const balance = Number(inv?.balanceDueMinor) || 0;
+  if (inv?.paymentStatus === "Paid" || balance <= 0) return "Paid";
   if (overdue) {
     return inv?.paymentStatus === "PartiallyPaid"
       ? "Overdue (Partial)"
@@ -95,39 +99,58 @@ const renderStatementOfAccountHtml = ({
   const list = Array.isArray(invoices) ? invoices : [];
   const currency = summary?.currency || "AED";
   const factor = summary?.minorUnitFactor || 100;
-  const unpaidTotal = summary?.totalDueMinor ?? 0;
+  const totalInvoiced = summary?.totalInvoicedMinor ?? 0;
+  const totalPaid = summary?.totalPaidMinor ?? 0;
+  const balanceDue = summary?.totalDueMinor ?? 0;
   const overdueTotal = summary?.overdueTotalMinor ?? 0;
   const generatedLabel = formatDateTime(generatedAt || new Date());
   const hasFromDate = Boolean(fromDateLabel);
   const hasCutoffDate = Boolean(cutoffDateLabel);
   const scopeLabel = hasFromDate && hasCutoffDate
-    ? `Includes invoices issued between ${safeText(fromDateLabel)} and ${safeText(
+    ? `Includes issued invoices between ${safeText(fromDateLabel)} and ${safeText(
         cutoffDateLabel
       )}`
     : hasCutoffDate
-    ? `Includes invoices issued on or before ${safeText(cutoffDateLabel)}`
-    : "Includes all currently unpaid invoices";
-  const openCount = list.length;
-  const overdueCount = list.reduce(
-    (sum, inv) => (isOverdue(inv) ? sum + 1 : sum),
-    0
-  );
-  const openLabel =
-    overdueCount > 0 ? `${openCount} (${overdueCount} overdue)` : `${openCount}`;
+    ? `Includes issued invoices on or before ${safeText(cutoffDateLabel)}`
+    : "Includes all issued invoices";
+  const invoiceCount = Number.isFinite(Number(summary?.invoiceCount))
+    ? Number(summary.invoiceCount)
+    : list.length;
+  const openCount = Number.isFinite(Number(summary?.openCount))
+    ? Number(summary.openCount)
+    : list.reduce(
+        (sum, inv) => ((Number(inv?.balanceDueMinor) || 0) > 0 ? sum + 1 : sum),
+        0
+      );
+  const overdueCount = Number.isFinite(Number(summary?.overdueCount))
+    ? Number(summary.overdueCount)
+    : list.reduce(
+        (sum, inv) => (isOverdue(inv) ? sum + 1 : sum),
+        0
+      );
+  const balanceNote =
+    overdueCount > 0
+      ? `${openCount} open, ${overdueCount} overdue`
+      : `${openCount} open`;
 
   const rowsHtml =
     list.length === 0
       ? `
         <tr>
-          <td colspan="5" class="empty">No unpaid invoices match this statement scope.</td>
+          <td colspan="7" class="empty">No issued invoices match this statement scope.</td>
         </tr>
       `
       : list
           .map((inv) => {
             const overdue = isOverdue(inv);
             const status = formatStatus(inv, overdue);
+            const paid =
+              inv?.paymentStatus === "Paid" ||
+              (Number(inv?.balanceDueMinor) || 0) <= 0;
             const statusClass = overdue
               ? "status status--overdue"
+              : paid
+              ? "status status--paid"
               : inv?.paymentStatus === "PartiallyPaid"
               ? "status status--partial"
               : "status status--unpaid";
@@ -138,10 +161,16 @@ const renderStatementOfAccountHtml = ({
                   formatDate(inv.invoiceDate || inv.createdAt)
                 )}</td>
                 <td class="col-due muted">${safeText(formatDate(inv.dueDate))}</td>
-                <td class="col-status ${statusClass}">${safeText(status)}</td>
+                <td class="col-amount">${safeText(
+                  formatMoney(inv.amountMinor, currency, factor)
+                )}</td>
+                <td class="col-paid">${safeText(
+                  formatMoney(inv.paidTotalMinor || 0, currency, factor)
+                )}</td>
                 <td class="col-balance">${safeText(
                   formatMoney(inv.balanceDueMinor, currency, factor)
                 )}</td>
+                <td class="col-status ${statusClass}">${safeText(status)}</td>
               </tr>
             `;
           })
@@ -195,7 +224,7 @@ const renderStatementOfAccountHtml = ({
           }
           .summary {
             display: grid;
-            grid-template-columns: repeat(3, minmax(0, 1fr));
+            grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 8px;
           }
           .summary-card {
@@ -215,6 +244,11 @@ const renderStatementOfAccountHtml = ({
             font-size: 13px;
             font-weight: 700;
             color: var(--text);
+          }
+          .summary-note {
+            margin-top: 3px;
+            font-size: 10px;
+            color: var(--muted);
           }
           .section { margin-top: 14px; }
           .section-head {
@@ -278,8 +312,14 @@ const renderStatementOfAccountHtml = ({
           tbody tr:nth-child(even) { background: var(--row); }
           tbody tr { page-break-inside: avoid; }
           .muted { color: var(--muted); }
-          .col-balance { text-align: right; font-variant-numeric: tabular-nums; }
+          .col-amount,
+          .col-paid,
+          .col-balance {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+          }
           .status { font-weight: 600; }
+          .status--paid { color: #047857; }
           .status--overdue { color: #B91C1C; }
           .status--partial { color: #B45309; }
           .status--unpaid { color: var(--text); }
@@ -306,20 +346,33 @@ const renderStatementOfAccountHtml = ({
 
         <div class="summary">
           <div class="summary-card">
-            <div class="summary-label">Unpaid balance</div>
+            <div class="summary-label">Total invoiced</div>
             <div class="summary-value">${safeText(
-              formatMoney(unpaidTotal, currency, factor)
+              formatMoney(totalInvoiced, currency, factor)
             )}</div>
+            <div class="summary-note">${safeText(invoiceCount)} invoice${
+              invoiceCount === 1 ? "" : "s"
+            }</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Total paid</div>
+            <div class="summary-value">${safeText(
+              formatMoney(totalPaid, currency, factor)
+            )}</div>
+          </div>
+          <div class="summary-card">
+            <div class="summary-label">Balance due</div>
+            <div class="summary-value">${safeText(
+              formatMoney(balanceDue, currency, factor)
+            )}</div>
+            <div class="summary-note">${safeText(balanceNote)}</div>
           </div>
           <div class="summary-card">
             <div class="summary-label">Overdue balance</div>
             <div class="summary-value">${safeText(
               formatMoney(overdueTotal, currency, factor)
             )}</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-label">Unpaid invoices</div>
-            <div class="summary-value">${safeText(openLabel)}</div>
+            <div class="summary-note">${safeText(overdueCount)} overdue</div>
           </div>
         </div>
 
@@ -346,24 +399,28 @@ const renderStatementOfAccountHtml = ({
 
         <section class="section">
           <div class="section-head">
-            <div class="section-title">Unpaid invoices</div>
+            <div class="section-title">Invoices</div>
             <div class="section-rule"></div>
           </div>
           <table>
             <colgroup>
-              <col style="width:28%" />
-              <col style="width:16%" />
-              <col style="width:16%" />
-              <col style="width:18%" />
-              <col style="width:22%" />
+              <col style="width:19%" />
+              <col style="width:13%" />
+              <col style="width:13%" />
+              <col style="width:14%" />
+              <col style="width:14%" />
+              <col style="width:14%" />
+              <col style="width:13%" />
             </colgroup>
             <thead>
               <tr>
                 <th>Invoice #</th>
                 <th>Issued</th>
                 <th>Due</th>
-                <th>Status</th>
+                <th style="text-align:right;">Amount</th>
+                <th style="text-align:right;">Paid</th>
                 <th style="text-align:right;">Balance</th>
+                <th>Status</th>
               </tr>
             </thead>
             <tbody>

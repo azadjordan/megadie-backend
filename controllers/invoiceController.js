@@ -502,8 +502,6 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const invoiceFilter = {
     user: userId,
     status: "Issued",
-    paymentStatus: { $ne: "Paid" },
-    balanceDueMinor: { $gt: 0 },
   };
 
   addInvoiceDateRangeFilter(invoiceFilter, from, to);
@@ -529,20 +527,51 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const currency = invoices[0]?.currency || "AED";
   const minorUnitFactor = invoices[0]?.minorUnitFactor || 100;
   const now = Date.now();
+  const totalInvoicedMinor = invoices.reduce(
+    (sum, inv) => sum + (Number(inv.amountMinor) || 0),
+    0
+  );
+  const totalPaidMinor = invoices.reduce(
+    (sum, inv) => sum + (Number(inv.paidTotalMinor) || 0),
+    0
+  );
   const totalDueMinor = invoices.reduce(
     (sum, inv) => sum + (Number(inv.balanceDueMinor) || 0),
     0
   );
+  const openCount = invoices.reduce((sum, inv) => {
+    const balance = Number(inv.balanceDueMinor) || 0;
+    return balance > 0 ? sum + 1 : sum;
+  }, 0);
   const overdueTotalMinor = invoices.reduce((sum, inv) => {
+    const balance = Number(inv.balanceDueMinor) || 0;
+    if (balance <= 0) return sum;
     const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
     if (!Number.isFinite(due) || due >= now) return sum;
-    return sum + (Number(inv.balanceDueMinor) || 0);
+    return sum + balance;
+  }, 0);
+  const overdueCount = invoices.reduce((sum, inv) => {
+    const balance = Number(inv.balanceDueMinor) || 0;
+    if (balance <= 0) return sum;
+    const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
+    if (!Number.isFinite(due) || due >= now) return sum;
+    return sum + 1;
   }, 0);
 
   const html = renderStatementOfAccountHtml({
     client,
     invoices,
-    summary: { totalDueMinor, overdueTotalMinor, currency, minorUnitFactor },
+    summary: {
+      totalInvoicedMinor,
+      totalPaidMinor,
+      totalDueMinor,
+      overdueTotalMinor,
+      invoiceCount: invoices.length,
+      openCount,
+      overdueCount,
+      currency,
+      minorUnitFactor,
+    },
     generatedAt: new Date(),
     fromDateLabel: req.query.from ? String(req.query.from).slice(0, 10) : "",
     cutoffDateLabel: req.query.to ? String(req.query.to).slice(0, 10) : "",
