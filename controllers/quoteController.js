@@ -421,6 +421,105 @@ const getQuoteProductId = (item) => {
   return product ? String(product) : "";
 };
 
+const LIVE_OWNER_AVAILABILITY_STATUSES = new Set(["Processing", "Quoted"]);
+
+const shouldAttachLiveAvailabilityForOwner = (quote) =>
+  LIVE_OWNER_AVAILABILITY_STATUSES.has(quote?.status) && !quote?.order;
+
+const getUniqueQuoteProductIds = (items = []) =>
+  Array.from(
+    new Set(
+      (items || [])
+        .map((item) => getQuoteProductId(item))
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    )
+  );
+
+const buildAvailabilitySnapshotItems = (items = [], totalsMap = new Map()) =>
+  (items || []).map((it) => {
+    const productId = getQuoteProductId(it);
+    const availableNow = productId ? totalsMap.get(productId) || 0 : 0;
+    const qty = Math.max(0, Number(it?.qty) || 0);
+    const shortage = Math.max(0, qty - availableNow);
+
+    return {
+      product: it?.product?._id || it?.product,
+      productName: it?.productName || it?.product?.name || "",
+      qty,
+      priceRule: it?.priceRule ?? null,
+      unitPrice: Math.max(0, Number(it?.unitPrice) || 0),
+      availableNow,
+      shortage,
+      availabilityStatus: getAvailabilityStatus(qty, availableNow),
+    };
+  });
+
+const getLiveAvailabilitySnapshot = async (items = []) => {
+  const productIds = getUniqueQuoteProductIds(items);
+  const totalsMap = await getAvailabilityTotalsByProduct(productIds);
+  const snapshotItems = buildAvailabilitySnapshotItems(items, totalsMap);
+
+  return {
+    checkedAt: new Date(),
+    items: snapshotItems,
+    hasShortage: hasAvailabilityShortage(snapshotItems),
+    hasAnyAvailability: hasAnyAvailability(snapshotItems),
+  };
+};
+
+const refreshQuoteAvailabilitySnapshot = async (quote) => {
+  const snapshot = await getLiveAvailabilitySnapshot(quote?.requestedItems || []);
+  quote.requestedItems = snapshot.items;
+  quote.availabilityCheckedAt = snapshot.checkedAt;
+  return snapshot;
+};
+
+const attachLiveAvailabilityToOwnerQuotes = async (quotes = []) => {
+  const rows = (quotes || []).map((quote) =>
+    quote?.toObject ? quote.toObject() : { ...quote }
+  );
+  const eligibleRows = rows.filter(shouldAttachLiveAvailabilityForOwner);
+  const productIds = getUniqueQuoteProductIds(
+    eligibleRows.flatMap((quote) => quote?.requestedItems || [])
+  );
+
+  if (!eligibleRows.length || !productIds.length) {
+    return rows;
+  }
+
+  const totalsMap = await getAvailabilityTotalsByProduct(productIds);
+  const checkedAt = new Date();
+
+  return rows.map((quote) => {
+    if (!shouldAttachLiveAvailabilityForOwner(quote)) return quote;
+
+    return {
+      ...quote,
+      liveAvailabilityCheckedAt: checkedAt,
+      requestedItems: (quote.requestedItems || []).map((it) => {
+        const productId = getQuoteProductId(it);
+        const liveAvailableNow = productId ? totalsMap.get(productId) || 0 : 0;
+        const qty = Math.max(0, Number(it?.qty) || 0);
+        const liveShortage = Math.max(0, qty - liveAvailableNow);
+
+        return {
+          ...it,
+          liveAvailableNow,
+          liveShortage,
+          liveAvailabilityStatus: getAvailabilityStatus(qty, liveAvailableNow),
+        };
+      }),
+    };
+  });
+};
+
+const attachLiveAvailabilityToOwnerQuote = async (quote) => {
+  const [hydrated] = await attachLiveAvailabilityToOwnerQuotes(
+    quote ? [quote] : []
+  );
+  return hydrated || quote;
+};
+
 const getQuoteUserId = (quote) => {
   const user = quote?.user?._id || quote?.user;
   return user ? String(user) : "";
@@ -972,12 +1071,21 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
     throw new Error("Manual invoice created — quote locked.");
   }
 
-  const items = quote.requestedItems || [];
-  if (hasAvailabilityShortage(items)) {
-    res.status(409);
-    throw new Error(
-      "Cannot confirm while there is a shortage. Please accept the shortage or update quantities."
+  const liveSnapshot = await refreshQuoteAvailabilitySnapshot(quote);
+  if (liveSnapshot.hasShortage) {
+    await quote.save();
+    const populated = await Quote.findById(quote._id).populate(
+      "requestedItems.product",
+      "name"
     );
+    const sanitized = await attachLiveAvailabilityToOwnerQuote(
+      sanitizeQuoteForOwner(populated || quote)
+    );
+    return res.status(409).json({
+      success: false,
+      message: "Availability changed. Please review the updated availability before confirming.",
+      data: sanitized,
+    });
   }
 
   quote.status = "Confirmed";
@@ -1634,27 +1742,34 @@ export const updateQuoteStatusByAdmin = asyncHandler(async (req, res) => {
     );
   }
 
-  if (status === "Quoted") {
+  let liveSnapshot = null;
+
+  if (status === "Quoted" || status === "Confirmed") {
     const items = quote.requestedItems || [];
     if (!items.length) {
       throwHttpError(res, 400, "Quote has no items.");
     }
-    if (!hasAnyAvailability(items)) {
+    liveSnapshot = await refreshQuoteAvailabilitySnapshot(quote);
+  }
+
+  if (status === "Quoted") {
+    if (!liveSnapshot?.hasAnyAvailability) {
+      await quote.save();
       throwHttpError(
         res,
         409,
-        "Cannot mark quote as Quoted while no items are available. Recheck availability first."
+        "Cannot mark quote as Quoted because no stock is currently available."
       );
     }
   }
 
   if (status === "Confirmed") {
-    const items = quote.requestedItems || [];
-    if (hasAvailabilityShortage(items)) {
+    if (liveSnapshot?.hasShortage) {
+      await quote.save();
       throwHttpError(
         res,
         409,
-        "Cannot confirm while there is a shortage. Please accept the shortage or update quantities."
+        "Availability changed. Recheck the quote before confirming."
       );
     }
   }
@@ -1868,11 +1983,12 @@ export const getMyQuotes = asyncHandler(async (req, res) => {
   ]);
 
   const sanitized = (quotesRaw || []).map((q) => sanitizeQuoteForOwner(q));
+  const data = await attachLiveAvailabilityToOwnerQuotes(sanitized);
 
   res.status(200).json({
     success: true,
     message: "Your quotes retrieved successfully.",
-    data: sanitized,
+    data,
     pagination: {
       page,
       limit,
@@ -2156,7 +2272,9 @@ export const getQuoteById = asyncHandler(async (req, res) => {
   }
 
   // ✅ Owner sees sanitized view based on status
-  const sanitized = sanitizeQuoteForOwner(quote);
+  const sanitized = await attachLiveAvailabilityToOwnerQuote(
+    sanitizeQuoteForOwner(quote)
+  );
 
   return res.status(200).json({
     success: true,

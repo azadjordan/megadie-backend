@@ -10,6 +10,7 @@ import User from "../models/userModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import { logInventoryMovement } from "../utils/inventoryMovement.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
+import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
 
 /* =========================
    Helpers (pagination)
@@ -952,6 +953,20 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
   // 3. Resolve product SKUs (snapshot)
   // -------------------------
   const productIds = quote.requestedItems.map((it) => it.product);
+  const totalsMap = await getAvailabilityTotalsByProduct(productIds);
+  const hasLiveShortage = (quote.requestedItems || []).some((it) => {
+    const productId = String(it?.product || "");
+    const requestedQty = Math.max(0, Number(it?.qty) || 0);
+    const availableNow = totalsMap.get(productId) || 0;
+    return requestedQty > availableNow;
+  });
+
+  if (hasLiveShortage) {
+    res.status(409);
+    throw new Error(
+      "Availability changed. Recheck quote availability before creating the order."
+    );
+  }
 
   const products = await Product.find(
     { _id: { $in: productIds } },
