@@ -1005,14 +1005,13 @@ export const cancelQuoteByUser = asyncHandler(async (req, res) => {
     itemsForSummary,
     productMetaMap
   );
-  const messageLines = ["🔴 Quote cancelled"];
+  const messageLines = [`🔴 ${escapeTelegramMarkdown(updated.quoteNumber || updated._id)}`];
   const addLine = (label, value) => {
     const cleaned = String(value || "").trim();
     if (!cleaned) return;
     messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
   };
 
-  addLine("Quote #", updated.quoteNumber || updated._id);
   addLine("Customer", req.user?.name);
   addLine("Email", req.user?.email);
   addLine("Phone", req.user?.phoneNumber);
@@ -1097,14 +1096,13 @@ export const confirmQuoteByUser = asyncHandler(async (req, res) => {
     itemsForSummary,
     productMetaMap
   );
-  const messageLines = ["🟢 Quote confirmed"];
+  const messageLines = [`🟢 ${escapeTelegramMarkdown(updated.quoteNumber || updated._id)}`];
   const addLine = (label, value) => {
     const cleaned = String(value || "").trim();
     if (!cleaned) return;
     messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
   };
 
-  addLine("Quote #", updated.quoteNumber || updated._id);
   addLine("Customer", req.user?.name);
   addLine("Email", req.user?.email);
   addLine("Phone", req.user?.phoneNumber);
