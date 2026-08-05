@@ -673,7 +673,7 @@ export const createQuote = asyncHandler(async (req, res) => {
     safeItems,
     productMetaMap
   );
-  const messageLines = ["🟣 Quote requested"];
+  const messageLines = [`🟣 ${escapeTelegramMarkdown(quote.quoteNumber || quote._id)}`];
   const pushBlankLine = () => {
     if (messageLines.length === 0) return;
     if (messageLines[messageLines.length - 1] !== "") {
@@ -693,7 +693,6 @@ export const createQuote = asyncHandler(async (req, res) => {
     messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
   };
 
-  addLine("Quote #", quote.quoteNumber || quote._id);
   addLine("Customer", req.user?.name);
   addLine("Email", req.user?.email);
   addLine("Phone", req.user?.phoneNumber);
