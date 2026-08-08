@@ -20,6 +20,63 @@ const hasReservedAllocations = async (slotId, productIds, session = null) => {
   return Boolean(exists);
 };
 
+const getReservedProductIds = async (slotId, productIds, session = null) => {
+  if (!productIds || productIds.length === 0) return new Set();
+  const query = OrderAllocation.find({
+    slot: slotId,
+    product: { $in: productIds },
+    $or: [{ status: "Reserved" }, { status: { $exists: false } }],
+  })
+    .select("product")
+    .lean();
+  if (session) {
+    query.session(session);
+  }
+
+  const rows = await query;
+  return new Set(rows.map((row) => String(row.product)));
+};
+
+const normalizeBulkAdjustItems = (items, res) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    res.status(400);
+    throw new Error("Provide at least one item to adjust.");
+  }
+
+  if (items.length > 100) {
+    res.status(400);
+    throw new Error("Adjust up to 100 SKU(s) at a time.");
+  }
+
+  const seenProductIds = new Set();
+  return items.map((entry) => {
+    const productId = String(entry?.productId || entry?.product || "").trim();
+    const deltaValue = Number(entry?.deltaQty);
+
+    if (!mongoose.isValidObjectId(productId)) {
+      res.status(400);
+      throw new Error("One or more product ids are invalid.");
+    }
+
+    if (
+      !Number.isFinite(deltaValue) ||
+      !Number.isInteger(deltaValue) ||
+      deltaValue <= 0
+    ) {
+      res.status(400);
+      throw new Error("deltaQty must be a positive integer for every item.");
+    }
+
+    if (seenProductIds.has(productId)) {
+      res.status(400);
+      throw new Error("Duplicate product ids are not allowed.");
+    }
+    seenProductIds.add(productId);
+
+    return { productId, deltaQty: deltaValue };
+  });
+};
+
 const getReservedQty = async (slotId, productId, session = null) => {
   const query = OrderAllocation.find({
     slot: slotId,
@@ -265,6 +322,152 @@ export const adjustSlotItem = asyncHandler(async (req, res) => {
     success: true,
     message: "Stock adjusted successfully.",
     data: responseData,
+  });
+});
+
+/* =========================
+   POST /api/slot-items/adjust-bulk
+   Adds stock for multiple products in one slot
+   Body: { slotId, items: [{ productId, deltaQty }] }
+   ========================= */
+export const adjustSlotItemsBulk = asyncHandler(async (req, res) => {
+  const { slotId, items } = req.body || {};
+
+  if (!mongoose.isValidObjectId(slotId)) {
+    res.status(400);
+    throw new Error("Invalid slot id.");
+  }
+
+  const normalizedItems = normalizeBulkAdjustItems(items, res);
+  const productIds = normalizedItems.map((item) => item.productId);
+  const session = await mongoose.startSession();
+  let responseData = [];
+  let responseSummary = {
+    requestedCount: normalizedItems.length,
+    successCount: 0,
+    createdCount: 0,
+    updatedCount: 0,
+    failedCount: 0,
+    failures: [],
+  };
+
+  try {
+    await session.withTransaction(async () => {
+      const slot = await Slot.findById(slotId)
+        .select("_id label cbm")
+        .session(session);
+      if (!slot) {
+        res.status(404);
+        throw new Error("Slot not found.");
+      }
+
+      const reservedProductIds = await getReservedProductIds(
+        slotId,
+        productIds,
+        session
+      );
+      if (reservedProductIds.size > 0) {
+        res.status(409);
+        throw new Error(
+          "Stock adjustments are blocked while allocations are unresolved for this slot."
+        );
+      }
+
+      const existingItems = await SlotItem.find({
+        slot: slotId,
+        product: { $in: productIds },
+      }).session(session);
+      const existingByProduct = new Map(
+        existingItems.map((item) => [String(item.product), item])
+      );
+
+      const savedIds = [];
+      let totalDeltaCbm = 0;
+      let createdCount = 0;
+      let updatedCount = 0;
+
+      for (const entry of normalizedItems) {
+        let item = existingByProduct.get(entry.productId);
+        const previousQty = Number(item?.qty || 0);
+        const previousCbm = Number(item?.cbm || 0);
+        let wasNew = false;
+
+        if (!item) {
+          item = new SlotItem({
+            product: entry.productId,
+            slot: slotId,
+            qty: entry.deltaQty,
+          });
+          wasNew = true;
+        } else {
+          item.qty = previousQty + entry.deltaQty;
+        }
+
+        const saved = await item.save({ session });
+        const nextCbm = Number(saved.cbm || 0);
+        const deltaCbm = nextCbm - previousCbm;
+        totalDeltaCbm += deltaCbm;
+        savedIds.push(saved._id);
+
+        if (wasNew) {
+          createdCount += 1;
+        } else {
+          updatedCount += 1;
+        }
+
+        const unitCbm = getUnitCbm(deltaCbm, entry.deltaQty);
+        await logInventoryMovement(
+          {
+            type: "ADJUST_IN",
+            product: entry.productId,
+            slot: slotId,
+            qty: entry.deltaQty,
+            unitCbm: unitCbm || undefined,
+            cbm: deltaCbm || undefined,
+            actor: req.user?._id || null,
+            meta: {
+              bulk: true,
+              previousQty,
+              nextQty: Number(saved.qty) || 0,
+            },
+          },
+          session
+        );
+      }
+
+      if (totalDeltaCbm) {
+        await applySlotOccupancyDelta(slotId, totalDeltaCbm, session);
+      }
+
+      const populatedItems = await SlotItem.find({ _id: { $in: savedIds } })
+        .populate("product", "name sku")
+        .populate("slot", "label store unit position")
+        .session(session);
+      const populatedById = new Map(
+        populatedItems.map((item) => [String(item._id), item])
+      );
+
+      responseData = savedIds
+        .map((id) => populatedById.get(String(id)))
+        .filter(Boolean);
+      responseSummary = {
+        requestedCount: normalizedItems.length,
+        successCount: responseData.length,
+        createdCount,
+        updatedCount,
+        failedCount: 0,
+        failures: [],
+      };
+    });
+  } finally {
+    session.endSession();
+  }
+
+  res.status(200).json({
+    success: true,
+    message: `Stock adjusted for ${responseSummary.successCount} SKU(s).`,
+    data: responseData,
+    summary: responseSummary,
   });
 });
 

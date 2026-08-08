@@ -4,6 +4,7 @@ import {
   getSlotItemsByProduct,
   getSlotItemsBySlot,
   adjustSlotItem,
+  adjustSlotItemsBulk,
   correctSlotItemCount,
   moveSlotItems,
   clearSlotItems,
@@ -16,6 +17,7 @@ const router = express.Router();
 router.get("/by-product/:productId", protect, admin, getSlotItemsByProduct);
 router.get("/by-slot/:slotId", protect, admin, getSlotItemsBySlot);
 router.post("/adjust", protect, admin, adjustSlotItem);
+router.post("/adjust-bulk", protect, admin, adjustSlotItemsBulk);
 router.post("/correct-count", protect, admin, correctSlotItemCount);
 router.post("/move", protect, admin, moveSlotItems);
 router.post("/clear", protect, admin, clearSlotItems);
