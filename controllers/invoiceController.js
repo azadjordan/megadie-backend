@@ -78,6 +78,25 @@ function sumMinor(rows, key) {
   return rows.reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
 }
 
+function sortTime(value) {
+  if (!value) return Number.MAX_SAFE_INTEGER;
+  const date = value instanceof Date ? value : new Date(value);
+  const time = date.getTime();
+  return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
+}
+
+function compareStatementInvoicesOldestFirst(a, b) {
+  const dateDiff =
+    sortTime(a?.statementDate || a?.invoiceDate || a?.createdAt) -
+    sortTime(b?.statementDate || b?.invoiceDate || b?.createdAt);
+  if (dateDiff !== 0) return dateDiff;
+
+  const createdDiff = sortTime(a?.createdAt) - sortTime(b?.createdAt);
+  if (createdDiff !== 0) return createdDiff;
+
+  return String(a?._id || "").localeCompare(String(b?._id || ""));
+}
+
 function buildStatementInvoiceRows(invoices, payments) {
   const paidByInvoice = new Map();
   for (const payment of payments || []) {
@@ -604,7 +623,8 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   );
   const tableInvoices = from
     ? [...previousOutstandingInvoices, ...periodInvoices]
-    : periodInvoices;
+    : [...periodInvoices];
+  tableInvoices.sort(compareStatementInvoicesOldestFirst);
 
   const currency = statementInvoices[0]?.currency || "AED";
   const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
