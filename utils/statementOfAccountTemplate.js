@@ -154,6 +154,7 @@ const renderStatementOfAccountHtml = ({
   invoices,
   periodInvoices,
   outstandingInvoices,
+  tableInvoices,
   summary,
   generatedAt,
   fromDateLabel,
@@ -167,6 +168,7 @@ const renderStatementOfAccountHtml = ({
   const outstandingList = Array.isArray(outstandingInvoices)
     ? outstandingInvoices
     : [];
+  const tableList = Array.isArray(tableInvoices) ? tableInvoices : periodList;
   const currency = summary?.currency || "AED";
   const factor = summary?.minorUnitFactor || 100;
   const openingBalance = summary?.openingBalanceMinor ?? 0;
@@ -201,24 +203,29 @@ const renderStatementOfAccountHtml = ({
     : hasCutoffDate
     ? `All invoices up to ${safeText(formatDate(cutoffDateLabel))}`
     : "All invoices";
-  const outstandingTitle = "Outstanding Invoices";
-  const periodTitle = hasFromDate
-    ? "Invoices Issued During Period"
+  const tableTitle = hasFromDate
+    ? "Statement Invoices"
     : hasCutoffDate
     ? `Invoices Issued Up To ${safeText(formatDate(cutoffDateLabel))}`
     : "Invoices Issued";
+  const tableEmptyMessage = hasFromDate
+    ? "No period invoices or opening balances in this statement."
+    : "No issued invoices match this statement.";
+  const tableScopeNote = hasFromDate
+    ? "Rows include invoices issued during the selected period plus earlier invoices with remaining balance."
+    : hasCutoffDate
+    ? `Rows include issued invoices up to ${formatDate(cutoffDateLabel)}.`
+    : "Rows include all issued invoices.";
+  const dateRangeNote = hasFromDate
+    ? "The From date controls period totals; earlier unpaid invoices are carried forward to explain the opening balance."
+    : hasCutoffDate
+    ? "The cutoff date controls the invoices included in this statement."
+    : "This statement includes all issued invoices.";
   const overdueReferenceDate = summary?.overdueReferenceDate || cutoffDateLabel;
 
-  const outstandingRowsHtml = renderInvoiceRows({
-    rows: outstandingList,
-    emptyMessage: "No outstanding invoices in this statement.",
-    currency,
-    factor,
-    overdueReferenceDate,
-  });
-  const periodRowsHtml = renderInvoiceRows({
-    rows: periodList,
-    emptyMessage: "No issued invoices match this statement period.",
+  const tableRowsHtml = renderInvoiceRows({
+    rows: tableList,
+    emptyMessage: tableEmptyMessage,
     currency,
     factor,
     overdueReferenceDate,
@@ -471,7 +478,7 @@ const renderStatementOfAccountHtml = ({
 
         <section class="section">
           <div class="section-head">
-            <div class="section-title">${outstandingTitle}</div>
+            <div class="section-title">${tableTitle}</div>
             <div class="section-rule"></div>
           </div>
           <table>
@@ -496,47 +503,16 @@ const renderStatementOfAccountHtml = ({
               </tr>
             </thead>
             <tbody>
-              ${outstandingRowsHtml}
-            </tbody>
-          </table>
-        </section>
-
-        <section class="section">
-          <div class="section-head">
-            <div class="section-title">${periodTitle}</div>
-            <div class="section-rule"></div>
-          </div>
-          <table>
-            <colgroup>
-              <col style="width:18%" />
-              <col style="width:13%" />
-              <col style="width:13%" />
-              <col style="width:14%" />
-              <col style="width:15%" />
-              <col style="width:14%" />
-              <col style="width:13%" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>Invoice #</th>
-                <th>Invoice Date</th>
-                <th>Due Date</th>
-                <th style="text-align:right;">Amount</th>
-                <th style="text-align:right;">Recorded Paid</th>
-                <th style="text-align:right;">Balance</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${periodRowsHtml}
+              ${tableRowsHtml}
             </tbody>
           </table>
         </section>
 
         <div class="note">
+          ${safeText(tableScopeNote)}
           Payments shown are based on payments recorded in Megadie before this
-          statement was generated. The date range controls which invoice dates
-          are included. Overpaid invoices, if any, are shown with a zero
+          statement was generated. ${safeText(dateRangeNote)} Overpaid invoices,
+          if any, are shown with a zero
           remaining balance.
           ${overdueCount > 0
             ? ` Overdue balance included in closing balance: ${safeText(

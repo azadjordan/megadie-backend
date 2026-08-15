@@ -602,6 +602,9 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const outstandingInvoices = statementInvoices.filter(
     (invoice) => (Number(invoice.balanceMinor) || 0) > 0
   );
+  const tableInvoices = from
+    ? [...previousOutstandingInvoices, ...periodInvoices]
+    : periodInvoices;
 
   const currency = statementInvoices[0]?.currency || "AED";
   const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
@@ -626,6 +629,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     invoices: periodInvoices,
     periodInvoices,
     outstandingInvoices,
+    tableInvoices,
     summary: {
       openingBalanceMinor,
       periodInvoicedMinor,
