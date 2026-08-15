@@ -26,10 +26,14 @@ function toMinorUnits(majorAmount, factor = 100) {
 }
 
 const SORT_MAP = {
-  newest: { createdAt: -1 },
-  oldest: { createdAt: 1 },
-  amountHigh: { amountMinor: -1, createdAt: -1 },
-  amountLow: { amountMinor: 1, createdAt: -1 },
+  newest: { createdAt: -1, _id: -1 },
+  oldest: { createdAt: 1, _id: 1 },
+  createdNewest: { createdAt: -1, _id: -1 },
+  createdOldest: { createdAt: 1, _id: 1 },
+  paymentNewest: { paymentDate: -1, createdAt: -1, _id: -1 },
+  paymentOldest: { paymentDate: 1, createdAt: 1, _id: 1 },
+  amountHigh: { amountMinor: -1, createdAt: -1, _id: -1 },
+  amountLow: { amountMinor: 1, createdAt: -1, _id: -1 },
 };
 
 const PAYMENT_METHODS_ALLOWED = new Set(
@@ -137,22 +141,25 @@ export const addPaymentToInvoice = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  *
  * Query params (optional):
- * - page, limit
+ * - page, limit (max 100)
  * - search=<string> (invoiceNumber/user name/email/reference/receivedBy, case-insensitive)
  * - method=Cash|Bank Transfer|Credit Card|Cheque|Other
- * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use createdAt)
+ * - user=<userId> (filter by client)
+ * - sort=createdNewest|createdOldest|paymentNewest|paymentOldest|amountHigh|amountLow
+ *   (newest/oldest remain as createdAt aliases)
  */
 export const getPaymentsAdmin = asyncHandler(async (req, res) => {
   const page = Math.max(1, toInt(req.query.page, 1));
   const limitRaw = toInt(req.query.limit, 20);
-  const limit = Math.min(Math.max(1, limitRaw), 20);
+  const limit = Math.min(Math.max(1, limitRaw), 100);
   const skip = (page - 1) * limit;
 
   const method = req.query.method ? String(req.query.method) : null;
-  const sortKey = req.query.sort ? String(req.query.sort) : "newest";
+  const sortKey = req.query.sort ? String(req.query.sort) : "createdNewest";
   const sort = SORT_MAP[sortKey] || SORT_MAP.newest;
 
   const search = req.query.search ? String(req.query.search).trim() : "";
+  const user = req.query.user ? String(req.query.user) : null;
 
   const filter = {};
   if (method && method !== "all") {
@@ -165,6 +172,14 @@ export const getPaymentsAdmin = asyncHandler(async (req, res) => {
       );
     }
     filter.paymentMethod = method;
+  }
+
+  if (user) {
+    if (!mongoose.Types.ObjectId.isValid(user)) {
+      res.status(400);
+      throw new Error("Invalid user filter.");
+    }
+    filter.user = new mongoose.Types.ObjectId(user);
   }
 
   if (search) {
