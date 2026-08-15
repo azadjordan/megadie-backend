@@ -78,6 +78,8 @@ function escapeRegex(text = "") {
 const SORT_MAP = {
   newest: { invoiceDate: -1, createdAt: -1 },
   oldest: { invoiceDate: 1, createdAt: 1 },
+  createdNewest: { createdAt: -1, _id: -1 },
+  createdOldest: { createdAt: 1, _id: 1 },
   amountHigh: { amountMinor: -1, invoiceDate: -1, createdAt: -1 },
   amountLow: { amountMinor: 1, invoiceDate: -1, createdAt: -1 },
 };
@@ -182,7 +184,7 @@ export const getInvoicesSummary = asyncHandler(async (req, res) => {
  * @access  Private/Admin
  *
  * Query params (all optional):
- * - page, limit
+ * - page, limit (max 100)
  * - status=Issued|Cancelled
  * - paymentStatus=Unpaid|PartiallyPaid|Paid
  * - unpaid=true  (Issued + paymentStatus != Paid)
@@ -190,13 +192,14 @@ export const getInvoicesSummary = asyncHandler(async (req, res) => {
  * - user=<userId>  (filter by client)
  * - from=YYYY-MM-DD, to=YYYY-MM-DD (invoiceDate range)
  * - search=<string> (invoiceNumber/orderNumber, case-insensitive)
- * - sort=newest|oldest|amountHigh|amountLow (newest/oldest use invoiceDate)
+ * - sort=newest|oldest|createdNewest|createdOldest|amountHigh|amountLow
+ *   (newest/oldest use invoiceDate; createdNewest/createdOldest use createdAt)
  * - q=<string> (legacy alias for search)
  */
 export const getInvoices = asyncHandler(async (req, res) => {
   const page = Math.max(1, toInt(req.query.page, 1));
   const limitRaw = toInt(req.query.limit, 20);
-  const limit = Math.min(Math.max(1, limitRaw), 20);
+  const limit = Math.min(Math.max(1, limitRaw), 100);
   const sortKey = req.query.sort ? String(req.query.sort) : "newest";
   const sort = SORT_MAP[sortKey] || SORT_MAP.newest;
 
