@@ -17,54 +17,6 @@ const STRING_LIMITS = {
   deviceType: 50,
 };
 
-const EXPECTED_ORIGINS = new Set([
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "https://megadie-frontend.onrender.com",
-  "https://megadie-frontend-v2.onrender.com",
-  "https://www.megadie.com",
-  "https://megadie.com",
-]);
-
-const MULTIPLE_SIGNUP_COUNT = 3;
-const HIGH_EMAIL_DOMAIN_COUNT = 10;
-const VERY_FAST_SIGNUP_MS = 3000;
-const FAST_SIGNUP_MS = 8000;
-
-const RISK_FLAG_LABELS = {
-  same_ip_signup: "Another signup used this IP",
-  multiple_same_ip_signups: "Several signups used this IP",
-  same_email_domain_signup: "Another signup used this email domain",
-  multiple_same_email_domain_signups: "Several signups used this email domain",
-  high_same_email_domain_count: "Many signups use this email domain",
-  same_browser_context_signup: "Another signup used this browser context",
-  multiple_same_browser_context_signups:
-    "Several signups used this browser context",
-  fast_signup: "Fast form completion",
-  very_fast_signup: "Very fast form completion",
-  missing_client_audit: "Missing browser context",
-  missing_user_agent: "Missing user agent",
-  unexpected_origin: "Unexpected registration origin",
-};
-
-const RISK_LEVEL_LABELS = {
-  Low: "Looks normal",
-  Medium: "Review recommended",
-  High: "Review carefully",
-};
-
-const SUPERSEDED_RISK_FLAGS = {
-  multiple_same_ip_signups: ["same_ip_signup"],
-  high_same_email_domain_count: [
-    "same_email_domain_signup",
-    "multiple_same_email_domain_signups",
-  ],
-  multiple_same_email_domain_signups: ["same_email_domain_signup"],
-  multiple_same_browser_context_signups: ["same_browser_context_signup"],
-  very_fast_signup: ["fast_signup"],
-};
-
 function trimTo(value, maxLength) {
   const text = String(value ?? "").trim();
   if (!text) return undefined;
@@ -108,10 +60,6 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function hasClientAuditValues(clientAudit) {
-  return Object.values(clientAudit).some((value) => value !== undefined);
-}
-
 function getHeader(req, name) {
   return firstHeaderValue(req?.headers?.[name]);
 }
@@ -119,20 +67,6 @@ function getHeader(req, name) {
 function getCountryCode(req) {
   const country = trimTo(getHeader(req, "cf-ipcountry"), STRING_LIMITS.ipCountry);
   return country?.toUpperCase();
-}
-
-function isExpectedOrigin(origin) {
-  if (!origin) return true;
-  if (EXPECTED_ORIGINS.has(origin)) return true;
-
-  const frontendUrl = trimTo(process.env.FRONTEND_URL, 250);
-  if (!frontendUrl) return false;
-
-  try {
-    return new URL(origin).origin === new URL(frontendUrl).origin;
-  } catch {
-    return false;
-  }
 }
 
 function sanitizeUtm(rawUtm) {
@@ -246,92 +180,6 @@ export function sanitizeClientAudit(rawClientAudit) {
   };
 }
 
-export function buildRiskFlags(audit, { clientAuditProvided = false } = {}) {
-  const flags = [];
-  const sameIpCount = Number(audit.sameIpSignupCountAtRegistration) || 0;
-  const sameEmailDomainCount =
-    Number(audit.sameEmailDomainCountAtRegistration) || 0;
-  const sameBrowserContextCount =
-    Number(audit.sameBrowserContextSignupCountAtRegistration) || 0;
-  const signupDurationMs = Number(audit.signupDurationMs);
-
-  if (sameIpCount >= MULTIPLE_SIGNUP_COUNT) {
-    flags.push("multiple_same_ip_signups");
-  } else if (sameIpCount > 0) {
-    flags.push("same_ip_signup");
-  }
-
-  if (sameBrowserContextCount >= MULTIPLE_SIGNUP_COUNT) {
-    flags.push("multiple_same_browser_context_signups");
-  } else if (sameBrowserContextCount > 0) {
-    flags.push("same_browser_context_signup");
-  }
-
-  if (sameEmailDomainCount >= HIGH_EMAIL_DOMAIN_COUNT) {
-    flags.push("high_same_email_domain_count");
-  } else if (sameEmailDomainCount >= MULTIPLE_SIGNUP_COUNT) {
-    flags.push("multiple_same_email_domain_signups");
-  } else if (sameEmailDomainCount > 0) {
-    flags.push("same_email_domain_signup");
-  }
-  if (
-    Number.isFinite(signupDurationMs) &&
-    signupDurationMs > 0 &&
-    signupDurationMs <= VERY_FAST_SIGNUP_MS
-  ) {
-    flags.push("very_fast_signup");
-  } else if (
-    Number.isFinite(signupDurationMs) &&
-    signupDurationMs > 0 &&
-    signupDurationMs <= FAST_SIGNUP_MS
-  ) {
-    flags.push("fast_signup");
-  }
-  if (!clientAuditProvided) flags.push("missing_client_audit");
-  if (!audit.userAgent) flags.push("missing_user_agent");
-  if (!isExpectedOrigin(audit.origin)) flags.push("unexpected_origin");
-
-  return flags;
-}
-
-export function getRiskLevel(flags = [], audit = {}) {
-  const meaningfulFlags = flags.filter(
-    (flag) =>
-      ![
-        "missing_client_audit",
-        "same_email_domain_signup",
-        "multiple_same_email_domain_signups",
-        "high_same_email_domain_count",
-      ].includes(flag)
-  );
-  const sameIpCount = Number(audit.sameIpSignupCountAtRegistration) || 0;
-  const sameEmailDomainCount =
-    Number(audit.sameEmailDomainCountAtRegistration) || 0;
-  const sameBrowserContextCount =
-    Number(audit.sameBrowserContextSignupCountAtRegistration) || 0;
-  const hasFastSignup =
-    flags.includes("fast_signup") || flags.includes("very_fast_signup");
-  const hasHighEmailDomainContext =
-    sameEmailDomainCount >= HIGH_EMAIL_DOMAIN_COUNT && hasFastSignup;
-
-  if (
-    sameIpCount >= MULTIPLE_SIGNUP_COUNT ||
-    sameBrowserContextCount >= MULTIPLE_SIGNUP_COUNT ||
-    meaningfulFlags.length >= 3
-  ) {
-    return "High";
-  }
-  if (
-    sameIpCount > 0 ||
-    sameBrowserContextCount > 0 ||
-    hasHighEmailDomainContext ||
-    meaningfulFlags.length > 0
-  ) {
-    return "Medium";
-  }
-  return "Low";
-}
-
 export function buildBrowserContextFilter(audit = {}) {
   const userAgent = trimTo(audit.userAgent, STRING_LIMITS.userAgent);
   const timezone = trimTo(audit.timezone, STRING_LIMITS.timezone);
@@ -364,7 +212,6 @@ export function buildRegistrationAudit({
   sameEmailDomainCount = 0,
   sameBrowserContextSignupCount = 0,
 } = {}) {
-  const clientAuditProvided = isPlainObject(req?.body?.clientAudit);
   const clientAudit = sanitizeClientAudit(req?.body?.clientAudit);
   const sameIpSignupCountAtRegistration = numberInRange(sameIpSignupCount, {
     min: 0,
@@ -412,38 +259,7 @@ export function buildRegistrationAudit({
     sameBrowserContextSignupCountAtRegistration,
   };
 
-  const effectiveClientAuditProvided =
-    clientAuditProvided && hasClientAuditValues(clientAudit);
-  const riskFlags = buildRiskFlags(audit, {
-    clientAuditProvided: effectiveClientAuditProvided,
-  });
-
-  return {
-    ...audit,
-    riskFlags,
-    riskLevel: getRiskLevel(riskFlags, audit),
-  };
-}
-
-export function formatRiskFlags(flags = []) {
-  if (!Array.isArray(flags) || flags.length === 0) return "";
-
-  const uniqueFlags = [...new Set(flags)];
-  const hiddenFlags = new Set();
-  uniqueFlags.forEach((flag) => {
-    SUPERSEDED_RISK_FLAGS[flag]?.forEach((hiddenFlag) => {
-      hiddenFlags.add(hiddenFlag);
-    });
-  });
-
-  return uniqueFlags
-    .filter((flag) => !hiddenFlags.has(flag))
-    .map((flag) => RISK_FLAG_LABELS[flag] || flag)
-    .join(", ");
-}
-
-export function formatRiskLevel(riskLevel) {
-  return RISK_LEVEL_LABELS[riskLevel] || riskLevel || "";
+  return audit;
 }
 
 export function formatUserAgentSummary(audit = {}) {

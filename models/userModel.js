@@ -45,13 +45,6 @@ const registrationAuditSchema = new mongoose.Schema(
       min: 0,
       default: 0,
     },
-
-    riskFlags: [{ type: String, trim: true, maxlength: 80 }],
-    riskLevel: {
-      type: String,
-      enum: ["Low", "Medium", "High"],
-      default: "Low",
-    },
   },
   { _id: false }
 );
@@ -136,7 +129,6 @@ userSchema.set("toJSON", {
 userSchema.index({ name: 1 });
 userSchema.index({ "registrationAudit.ip": 1 }, { sparse: true });
 userSchema.index({ "registrationAudit.emailDomain": 1 }, { sparse: true });
-userSchema.index({ "registrationAudit.riskLevel": 1 }, { sparse: true });
 // unique: true already creates an index on email
 
 const User = mongoose.model("User", userSchema);

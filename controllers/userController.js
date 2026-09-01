@@ -9,8 +9,6 @@ import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 import {
   buildBrowserContextFilter,
   buildRegistrationAudit,
-  formatRiskLevel,
-  formatRiskFlags,
   getEmailDomain,
   getRequestIpInfo,
 } from "../utils/registrationAudit.js";
@@ -41,6 +39,13 @@ function escapeTelegramMarkdown(text = "") {
     .replace(/\(/g, "\\(")
     .replace(/\)/g, "\\)")
     .replace(/`/g, "\\`");
+}
+
+function formatMilliseconds(value) {
+  const duration = Number(value);
+  if (!Number.isFinite(duration) || duration < 0) return "";
+  if (duration < 1000) return `${Math.round(duration)} ms`;
+  return `${(duration / 1000).toFixed(1)} sec`;
 }
 
 function applyApprovalStatus(user, nextStatus, actorId) {
@@ -235,17 +240,30 @@ export const registerUser = asyncHandler(async (req, res) => {
 
   const messageLines = ["⚪ New user registration"];
   const addLine = (label, value) => {
-    const cleaned = String(value || "").trim();
+    const cleaned = value === 0 ? "0" : String(value || "").trim();
     if (!cleaned) return;
     messageLines.push(`${label}: ${escapeTelegramMarkdown(cleaned)}`);
   };
+  const audit = user.registrationAudit || registrationAudit || {};
 
   addLine("Name", user.name);
   addLine("Email", user.email);
   addLine("Phone", user.phoneNumber);
   addLine("Approval", user.approvalStatus || "Pending");
-  addLine("Risk", formatRiskLevel(user.registrationAudit?.riskLevel));
-  addLine("Signals", formatRiskFlags(user.registrationAudit?.riskFlags));
+  addLine("IP", audit.ip);
+  addLine("IP source", audit.ipSource);
+  addLine("IP country", audit.ipCountry);
+  addLine("Email domain", audit.emailDomain);
+  addLine("Previous same IP", audit.sameIpSignupCountAtRegistration ?? 0);
+  addLine(
+    "Previous same browser",
+    audit.sameBrowserContextSignupCountAtRegistration ?? 0
+  );
+  addLine(
+    "Previous same domain",
+    audit.sameEmailDomainCountAtRegistration ?? 0
+  );
+  addLine("Signup duration", formatMilliseconds(audit.signupDurationMs));
 
   const frontendBaseUrl = String(
     process.env.FRONTEND_URL || "https://www.megadie.com"
@@ -507,7 +525,7 @@ export const getUsers = asyncHandler(async (req, res) => {
     User.countDocuments(filter),
     User.find(filter)
       .select(
-        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote registrationAudit.riskLevel registrationAudit.riskFlags registrationAudit.ip registrationAudit.ipSource registrationAudit.ipCountry registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration registrationAudit.sameBrowserContextSignupCountAtRegistration registrationAudit.signupDurationMs createdAt"
+        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote registrationAudit.ip registrationAudit.ipSource registrationAudit.ipCountry registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration registrationAudit.sameBrowserContextSignupCountAtRegistration registrationAudit.signupDurationMs createdAt"
       )
       .sort(sort)
       .skip(skip)
