@@ -6,6 +6,13 @@ import Invoice from "../models/invoiceModel.js";
 import Quote from "../models/quoteModel.js";
 import generateToken from "../utils/generateToken.js";
 import sendTelegramAlert from "../utils/sendTelegramAlert.js";
+import {
+  buildRegistrationAudit,
+  formatRiskLevel,
+  formatRiskFlags,
+  getEmailDomain,
+  getRequestIp,
+} from "../utils/registrationAudit.js";
 
 // Forgot password (Resend)
 import crypto from "crypto";
@@ -159,6 +166,24 @@ export const registerUser = asyncHandler(async (req, res) => {
     );
   }
 
+  const ip = getRequestIp(req);
+  const emailDomain = getEmailDomain(email);
+  const [sameIpSignupCount, sameEmailDomainCount] = await Promise.all([
+    ip ? User.countDocuments({ "registrationAudit.ip": ip }) : 0,
+    emailDomain
+      ? User.countDocuments({
+          email: { $regex: new RegExp(`@${escapeRegex(emailDomain)}$`, "i") },
+        })
+      : 0,
+  ]);
+  const registrationAudit = buildRegistrationAudit({
+    req,
+    email,
+    ip,
+    sameIpSignupCount,
+    sameEmailDomainCount,
+  });
+
   let user;
   try {
     user = await User.create({
@@ -167,6 +192,7 @@ export const registerUser = asyncHandler(async (req, res) => {
       email,
       password,
       approvalStatus: "Pending",
+      registrationAudit,
     });
   } catch (err) {
     if (err?.code === 11000) {
@@ -202,6 +228,8 @@ export const registerUser = asyncHandler(async (req, res) => {
   addLine("Email", user.email);
   addLine("Phone", user.phoneNumber);
   addLine("Approval", user.approvalStatus || "Pending");
+  addLine("Risk", formatRiskLevel(user.registrationAudit?.riskLevel));
+  addLine("Signals", formatRiskFlags(user.registrationAudit?.riskFlags));
 
   const frontendBaseUrl = String(
     process.env.FRONTEND_URL || "https://www.megadie.com"
@@ -463,7 +491,7 @@ export const getUsers = asyncHandler(async (req, res) => {
     User.countDocuments(filter),
     User.find(filter)
       .select(
-        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote createdAt"
+        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote registrationAudit.riskLevel registrationAudit.riskFlags registrationAudit.ip registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration createdAt"
       )
       .sort(sort)
       .skip(skip)

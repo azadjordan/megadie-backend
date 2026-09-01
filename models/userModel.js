@@ -2,6 +2,53 @@
 import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
 
+const registrationAuditUtmSchema = new mongoose.Schema(
+  {
+    source: { type: String, trim: true, maxlength: 150 },
+    medium: { type: String, trim: true, maxlength: 150 },
+    campaign: { type: String, trim: true, maxlength: 150 },
+    term: { type: String, trim: true, maxlength: 150 },
+    content: { type: String, trim: true, maxlength: 150 },
+  },
+  { _id: false }
+);
+
+const registrationAuditSchema = new mongoose.Schema(
+  {
+    capturedAt: { type: Date },
+    ip: { type: String, trim: true, maxlength: 100 },
+    userAgent: { type: String, trim: true, maxlength: 500 },
+    browserName: { type: String, trim: true, maxlength: 50 },
+    osName: { type: String, trim: true, maxlength: 50 },
+    deviceType: { type: String, trim: true, maxlength: 50 },
+    referrer: { type: String, trim: true, maxlength: 500 },
+    origin: { type: String, trim: true, maxlength: 250 },
+    acceptLanguage: { type: String, trim: true, maxlength: 250 },
+
+    browserLanguage: { type: String, trim: true, maxlength: 100 },
+    timezone: { type: String, trim: true, maxlength: 100 },
+    screenWidth: { type: Number, min: 0, max: 100000 },
+    screenHeight: { type: Number, min: 0, max: 100000 },
+    viewportWidth: { type: Number, min: 0, max: 100000 },
+    viewportHeight: { type: Number, min: 0, max: 100000 },
+    signupDurationMs: { type: Number, min: 0, max: 24 * 60 * 60 * 1000 },
+    landingPath: { type: String, trim: true, maxlength: 300 },
+    utm: { type: registrationAuditUtmSchema, default: undefined },
+
+    emailDomain: { type: String, trim: true, lowercase: true, maxlength: 200 },
+    sameIpSignupCountAtRegistration: { type: Number, min: 0, default: 0 },
+    sameEmailDomainCountAtRegistration: { type: Number, min: 0, default: 0 },
+
+    riskFlags: [{ type: String, trim: true, maxlength: 80 }],
+    riskLevel: {
+      type: String,
+      enum: ["Low", "Medium", "High"],
+      default: "Low",
+    },
+  },
+  { _id: false }
+);
+
 const userSchema = new mongoose.Schema(
   {
     name: { type: String, required: true, trim: true },
@@ -39,6 +86,7 @@ const userSchema = new mongoose.Schema(
     rejectedAt: { type: Date },
     rejectedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
     adminNote: { type: String, trim: true, maxlength: 2000, default: "" },
+    registrationAudit: { type: registrationAuditSchema, default: undefined },
 
     /* =========================
        Forgot Password (Email)
@@ -79,6 +127,9 @@ userSchema.set("toJSON", {
 });
 
 userSchema.index({ name: 1 });
+userSchema.index({ "registrationAudit.ip": 1 }, { sparse: true });
+userSchema.index({ "registrationAudit.emailDomain": 1 }, { sparse: true });
+userSchema.index({ "registrationAudit.riskLevel": 1 }, { sparse: true });
 // unique: true already creates an index on email
 
 const User = mongoose.model("User", userSchema);
