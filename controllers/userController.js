@@ -7,11 +7,12 @@ import Quote from "../models/quoteModel.js";
 import generateToken from "../utils/generateToken.js";
 import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 import {
+  buildBrowserContextFilter,
   buildRegistrationAudit,
   formatRiskLevel,
   formatRiskFlags,
   getEmailDomain,
-  getRequestIp,
+  getRequestIpInfo,
 } from "../utils/registrationAudit.js";
 
 // Forgot password (Resend)
@@ -166,22 +167,37 @@ export const registerUser = asyncHandler(async (req, res) => {
     );
   }
 
-  const ip = getRequestIp(req);
+  const ipInfo = getRequestIpInfo(req);
+  const ip = ipInfo.ip;
   const emailDomain = getEmailDomain(email);
-  const [sameIpSignupCount, sameEmailDomainCount] = await Promise.all([
+  const baseRegistrationAudit = buildRegistrationAudit({
+    req,
+    email,
+    ip,
+    ipSource: ipInfo.source,
+  });
+  const browserContextFilter = buildBrowserContextFilter(baseRegistrationAudit);
+  const [
+    sameIpSignupCount,
+    sameEmailDomainCount,
+    sameBrowserContextSignupCount,
+  ] = await Promise.all([
     ip ? User.countDocuments({ "registrationAudit.ip": ip }) : 0,
     emailDomain
       ? User.countDocuments({
           email: { $regex: new RegExp(`@${escapeRegex(emailDomain)}$`, "i") },
         })
       : 0,
+    browserContextFilter ? User.countDocuments(browserContextFilter) : 0,
   ]);
   const registrationAudit = buildRegistrationAudit({
     req,
     email,
     ip,
+    ipSource: ipInfo.source,
     sameIpSignupCount,
     sameEmailDomainCount,
+    sameBrowserContextSignupCount,
   });
 
   let user;
@@ -491,7 +507,7 @@ export const getUsers = asyncHandler(async (req, res) => {
     User.countDocuments(filter),
     User.find(filter)
       .select(
-        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote registrationAudit.riskLevel registrationAudit.riskFlags registrationAudit.ip registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration createdAt"
+        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote registrationAudit.riskLevel registrationAudit.riskFlags registrationAudit.ip registrationAudit.ipSource registrationAudit.ipCountry registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration registrationAudit.sameBrowserContextSignupCountAtRegistration registrationAudit.signupDurationMs createdAt"
       )
       .sort(sort)
       .skip(skip)

@@ -17,6 +17,8 @@ const registrationAuditSchema = new mongoose.Schema(
   {
     capturedAt: { type: Date },
     ip: { type: String, trim: true, maxlength: 100 },
+    ipSource: { type: String, trim: true, maxlength: 80 },
+    ipCountry: { type: String, trim: true, uppercase: true, maxlength: 2 },
     userAgent: { type: String, trim: true, maxlength: 500 },
     browserName: { type: String, trim: true, maxlength: 50 },
     osName: { type: String, trim: true, maxlength: 50 },
@@ -38,6 +40,11 @@ const registrationAuditSchema = new mongoose.Schema(
     emailDomain: { type: String, trim: true, lowercase: true, maxlength: 200 },
     sameIpSignupCountAtRegistration: { type: Number, min: 0, default: 0 },
     sameEmailDomainCountAtRegistration: { type: Number, min: 0, default: 0 },
+    sameBrowserContextSignupCountAtRegistration: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
 
     riskFlags: [{ type: String, trim: true, maxlength: 80 }],
     riskLevel: {
