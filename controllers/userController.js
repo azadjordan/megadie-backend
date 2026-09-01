@@ -260,7 +260,7 @@ export const registerUser = asyncHandler(async (req, res) => {
     audit.sameBrowserContextSignupCountAtRegistration ?? 0
   );
   addLine(
-    "Previous same domain",
+    "Previous same email domain",
     audit.sameEmailDomainCountAtRegistration ?? 0
   );
   addLine("Signup duration", formatMilliseconds(audit.signupDurationMs));
