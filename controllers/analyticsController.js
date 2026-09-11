@@ -12,8 +12,8 @@ import {
 
 const DEFAULT_CURRENCY = "AED";
 const DEFAULT_MINOR_UNIT_FACTOR = 100;
-const DEFAULT_CUSTOMER_LIMIT = 10;
-const MAX_CUSTOMER_LIMIT = 50;
+const DEFAULT_RANKING_LIMIT = 10;
+const MAX_RANKING_LIMIT = 50;
 
 function roundMajor(value) {
   const n = Number(value) || 0;
@@ -53,8 +53,8 @@ function parseCustomerId(value) {
 
 function parseLimit(value) {
   const n = Number.parseInt(String(value || ""), 10);
-  if (!Number.isFinite(n)) return DEFAULT_CUSTOMER_LIMIT;
-  return Math.min(Math.max(1, n), MAX_CUSTOMER_LIMIT);
+  if (!Number.isFinite(n)) return DEFAULT_RANKING_LIMIT;
+  return Math.min(Math.max(1, n), MAX_RANKING_LIMIT);
 }
 
 function customerFilter(customerId) {
@@ -251,11 +251,72 @@ async function aggregateBookedSalesTrend(range, customerId = null) {
   });
 }
 
-async function aggregateCustomerBooked(start, endExclusive) {
+async function aggregateSkuPerformance(start, endExclusive, customerId, limit) {
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        status: { $ne: "Cancelled" },
+        ...customerFilter(customerId),
+        ...dateMatch("createdAt", start, endExclusive),
+      },
+    },
+    { $unwind: "$orderItems" },
+    {
+      $match: {
+        "orderItems.sku": { $type: "string", $ne: "" },
+      },
+    },
+    {
+      $group: {
+        _id: "$orderItems.sku",
+        productName: { $first: "$orderItems.productName" },
+        unitsSold: { $sum: "$orderItems.qty" },
+        bookedRevenue: {
+          $sum: {
+            $ifNull: [
+              "$orderItems.lineTotal",
+              { $multiply: ["$orderItems.qty", "$orderItems.unitPrice"] },
+            ],
+          },
+        },
+        orderIds: { $addToSet: "$_id" },
+      },
+    },
+    {
+      $project: {
+        _id: 0,
+        sku: "$_id",
+        productName: { $ifNull: ["$productName", ""] },
+        unitsSold: 1,
+        bookedRevenue: 1,
+        orderCount: { $size: "$orderIds" },
+      },
+    },
+    { $sort: { bookedRevenue: -1, unitsSold: -1, sku: 1 } },
+    { $limit: limit },
+  ]);
+
+  return rows.map((row) => {
+    const unitsSold = Number(row.unitsSold || 0);
+    const bookedRevenue = roundMajor(row.bookedRevenue);
+    return {
+      sku: row.sku,
+      productName: row.productName || "",
+      unitsSold,
+      bookedRevenue,
+      orderCount: Number(row.orderCount || 0),
+      averageSellingPrice: unitsSold > 0 ? roundMajor(bookedRevenue / unitsSold) : 0,
+      currency: DEFAULT_CURRENCY,
+    };
+  });
+}
+
+async function aggregateCustomerBooked(start, endExclusive, customerId = null) {
   return Order.aggregate([
     {
       $match: {
         status: { $ne: "Cancelled" },
+        ...customerFilter(customerId),
         ...dateMatch("createdAt", start, endExclusive),
       },
     },
@@ -269,11 +330,12 @@ async function aggregateCustomerBooked(start, endExclusive) {
   ]);
 }
 
-async function aggregateCustomerDelivered(start, endExclusive) {
+async function aggregateCustomerDelivered(start, endExclusive, customerId = null) {
   return Order.aggregate([
     {
       $match: {
         status: "Delivered",
+        ...customerFilter(customerId),
         ...dateMatch("deliveredAt", start, endExclusive),
       },
     },
@@ -287,11 +349,12 @@ async function aggregateCustomerDelivered(start, endExclusive) {
   ]);
 }
 
-async function aggregateCustomerInvoiced(start, endExclusive) {
+async function aggregateCustomerInvoiced(start, endExclusive, customerId = null) {
   return Invoice.aggregate([
     {
       $match: {
         status: "Issued",
+        ...customerFilter(customerId),
         ...dateMatch("invoiceDate", start, endExclusive),
       },
     },
@@ -305,10 +368,13 @@ async function aggregateCustomerInvoiced(start, endExclusive) {
   ]);
 }
 
-async function aggregateCustomerCollected(start, endExclusive) {
+async function aggregateCustomerCollected(start, endExclusive, customerId = null) {
   return Payment.aggregate([
     {
-      $match: dateMatch("paymentDate", start, endExclusive),
+      $match: {
+        ...customerFilter(customerId),
+        ...dateMatch("paymentDate", start, endExclusive),
+      },
     },
     {
       $group: {
@@ -320,11 +386,12 @@ async function aggregateCustomerCollected(start, endExclusive) {
   ]);
 }
 
-async function aggregateCustomerOutstanding() {
+async function aggregateCustomerOutstanding(customerId = null) {
   return Invoice.aggregate([
     {
       $match: {
         status: "Issued",
+        ...customerFilter(customerId),
         balanceDueMinor: { $gt: 0 },
       },
     },
@@ -487,8 +554,10 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
 
 export const getAnalyticsCustomers = asyncHandler(async (req, res) => {
   let range;
+  let customerId;
   try {
     range = buildAnalyticsDateRange(req.query);
+    customerId = parseCustomerId(req.query.customerId);
   } catch (err) {
     res.status(400);
     throw err;
@@ -496,14 +565,22 @@ export const getAnalyticsCustomers = asyncHandler(async (req, res) => {
 
   const limit = parseLimit(req.query.limit);
 
-  const [booked, delivered, invoiced, collected, outstanding] =
+  const [booked, delivered, invoiced, collected, outstanding, selectedCustomer] =
     await Promise.all([
-      aggregateCustomerBooked(range.start, range.endExclusive),
-      aggregateCustomerDelivered(range.start, range.endExclusive),
-      aggregateCustomerInvoiced(range.start, range.endExclusive),
-      aggregateCustomerCollected(range.start, range.endExclusive),
-      aggregateCustomerOutstanding(),
+      aggregateCustomerBooked(range.start, range.endExclusive, customerId),
+      aggregateCustomerDelivered(range.start, range.endExclusive, customerId),
+      aggregateCustomerInvoiced(range.start, range.endExclusive, customerId),
+      aggregateCustomerCollected(range.start, range.endExclusive, customerId),
+      aggregateCustomerOutstanding(customerId),
+      customerId
+        ? User.findById(customerId).select("name email").lean()
+        : Promise.resolve(null),
     ]);
+
+  if (customerId && !selectedCustomer) {
+    res.status(404);
+    throw new Error("Customer not found.");
+  }
 
   const metricMaps = {
     booked: rowsToMap(booked),
@@ -520,6 +597,7 @@ export const getAnalyticsCustomers = asyncHandler(async (req, res) => {
     ...metricMaps.collected.keys(),
     ...metricMaps.outstanding.keys(),
   ]);
+  if (customerId) userIds.add(toUserKey(customerId));
 
   const objectIds = Array.from(userIds)
     .filter((id) => mongoose.Types.ObjectId.isValid(id))
@@ -555,10 +633,69 @@ export const getAnalyticsCustomers = asyncHandler(async (req, res) => {
         timezone: range.timezone,
         boundary: range.boundary,
       },
+      scope: {
+        customer: selectedCustomer
+          ? {
+              _id: String(selectedCustomer._id),
+              name: selectedCustomer.name,
+              email: selectedCustomer.email,
+            }
+          : null,
+      },
       currency: DEFAULT_CURRENCY,
       minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
       limit,
       customers: rows,
+    },
+  });
+});
+
+export const getAnalyticsSkus = asyncHandler(async (req, res) => {
+  let range;
+  let customerId;
+  try {
+    range = buildAnalyticsDateRange(req.query);
+    customerId = parseCustomerId(req.query.customerId);
+  } catch (err) {
+    res.status(400);
+    throw err;
+  }
+
+  const limit = parseLimit(req.query.limit);
+  const [selectedCustomer, skus] = await Promise.all([
+    customerId
+      ? User.findById(customerId).select("name email").lean()
+      : Promise.resolve(null),
+    aggregateSkuPerformance(range.start, range.endExclusive, customerId, limit),
+  ]);
+
+  if (customerId && !selectedCustomer) {
+    res.status(404);
+    throw new Error("Customer not found.");
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Analytics SKU performance retrieved successfully.",
+    data: {
+      range: {
+        from: range.from,
+        to: range.to,
+        timezone: range.timezone,
+        boundary: range.boundary,
+      },
+      scope: {
+        customer: selectedCustomer
+          ? {
+              _id: String(selectedCustomer._id),
+              name: selectedCustomer.name,
+              email: selectedCustomer.email,
+            }
+          : null,
+      },
+      currency: DEFAULT_CURRENCY,
+      limit,
+      skus,
     },
   });
 });
