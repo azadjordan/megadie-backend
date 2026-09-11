@@ -1,7 +1,9 @@
 import asyncHandler from "../middleware/asyncHandler.js";
+import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
+import User from "../models/userModel.js";
 import {
   ANALYTICS_MONGO_TIME_ZONE,
   buildAnalyticsDateRange,
@@ -10,6 +12,8 @@ import {
 
 const DEFAULT_CURRENCY = "AED";
 const DEFAULT_MINOR_UNIT_FACTOR = 100;
+const DEFAULT_CUSTOMER_LIMIT = 10;
+const MAX_CUSTOMER_LIMIT = 50;
 
 function roundMajor(value) {
   const n = Number(value) || 0;
@@ -38,11 +42,65 @@ function dateMatch(field, start, endExclusive) {
   };
 }
 
-async function aggregateBookedOrders(start, endExclusive) {
+function parseCustomerId(value) {
+  if (!value) return null;
+  const id = String(value).trim();
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    throw new Error("customerId must be a valid user id.");
+  }
+  return new mongoose.Types.ObjectId(id);
+}
+
+function parseLimit(value) {
+  const n = Number.parseInt(String(value || ""), 10);
+  if (!Number.isFinite(n)) return DEFAULT_CUSTOMER_LIMIT;
+  return Math.min(Math.max(1, n), MAX_CUSTOMER_LIMIT);
+}
+
+function customerFilter(customerId) {
+  return customerId ? { user: customerId } : {};
+}
+
+function toUserKey(value) {
+  return String(value || "");
+}
+
+function buildCustomerRow(userId, usersById, metricMaps) {
+  const key = toUserKey(userId);
+  const user = usersById.get(key) || {};
+  const booked = metricMaps.booked.get(key) || {};
+  const delivered = metricMaps.delivered.get(key) || {};
+  const invoiced = metricMaps.invoiced.get(key) || {};
+  const collected = metricMaps.collected.get(key) || {};
+  const outstanding = metricMaps.outstanding.get(key) || {};
+
+  return {
+    customer: {
+      _id: key,
+      name: user.name || "Unknown customer",
+      email: user.email || "",
+    },
+    bookedSales: roundMajor(booked.bookedSales),
+    orderCount: Number(booked.orderCount || 0),
+    deliveredValue: roundMajor(delivered.deliveredValue),
+    deliveredCount: Number(delivered.deliveredCount || 0),
+    invoicedMinor: Number(invoiced.amountMinor || 0),
+    invoicedCount: Number(invoiced.count || 0),
+    collectedMinor: Number(collected.amountMinor || 0),
+    collectedCount: Number(collected.count || 0),
+    currentOutstandingMinor: Number(outstanding.amountMinor || 0),
+    outstandingInvoiceCount: Number(outstanding.count || 0),
+    currency: DEFAULT_CURRENCY,
+    minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
+  };
+}
+
+async function aggregateBookedOrders(start, endExclusive, customerId = null) {
   const [row] = await Order.aggregate([
     {
       $match: {
         status: { $ne: "Cancelled" },
+        ...customerFilter(customerId),
         ...dateMatch("createdAt", start, endExclusive),
       },
     },
@@ -61,11 +119,12 @@ async function aggregateBookedOrders(start, endExclusive) {
   };
 }
 
-async function aggregateDeliveredValue(start, endExclusive) {
+async function aggregateDeliveredValue(start, endExclusive, customerId = null) {
   const [row] = await Order.aggregate([
     {
       $match: {
         status: "Delivered",
+        ...customerFilter(customerId),
         ...dateMatch("deliveredAt", start, endExclusive),
       },
     },
@@ -84,11 +143,12 @@ async function aggregateDeliveredValue(start, endExclusive) {
   };
 }
 
-async function aggregateInvoicedMinor(start, endExclusive) {
+async function aggregateInvoicedMinor(start, endExclusive, customerId = null) {
   const [row] = await Invoice.aggregate([
     {
       $match: {
         status: "Issued",
+        ...customerFilter(customerId),
         ...dateMatch("invoiceDate", start, endExclusive),
       },
     },
@@ -107,10 +167,13 @@ async function aggregateInvoicedMinor(start, endExclusive) {
   };
 }
 
-async function aggregateCollectedMinor(start, endExclusive) {
+async function aggregateCollectedMinor(start, endExclusive, customerId = null) {
   const [row] = await Payment.aggregate([
     {
-      $match: dateMatch("paymentDate", start, endExclusive),
+      $match: {
+        ...customerFilter(customerId),
+        ...dateMatch("paymentDate", start, endExclusive),
+      },
     },
     {
       $group: {
@@ -127,11 +190,12 @@ async function aggregateCollectedMinor(start, endExclusive) {
   };
 }
 
-async function aggregateCurrentOutstandingMinor() {
+async function aggregateCurrentOutstandingMinor(customerId = null) {
   const [row] = await Invoice.aggregate([
     {
       $match: {
         status: "Issued",
+        ...customerFilter(customerId),
         balanceDueMinor: { $gt: 0 },
       },
     },
@@ -150,11 +214,12 @@ async function aggregateCurrentOutstandingMinor() {
   };
 }
 
-async function aggregateBookedSalesTrend(range) {
+async function aggregateBookedSalesTrend(range, customerId = null) {
   const rows = await Order.aggregate([
     {
       $match: {
         status: { $ne: "Cancelled" },
+        ...customerFilter(customerId),
         ...dateMatch("createdAt", range.start, range.endExclusive),
       },
     },
@@ -186,6 +251,97 @@ async function aggregateBookedSalesTrend(range) {
   });
 }
 
+async function aggregateCustomerBooked(start, endExclusive) {
+  return Order.aggregate([
+    {
+      $match: {
+        status: { $ne: "Cancelled" },
+        ...dateMatch("createdAt", start, endExclusive),
+      },
+    },
+    {
+      $group: {
+        _id: "$user",
+        bookedSales: { $sum: "$totalPrice" },
+        orderCount: { $sum: 1 },
+      },
+    },
+  ]);
+}
+
+async function aggregateCustomerDelivered(start, endExclusive) {
+  return Order.aggregate([
+    {
+      $match: {
+        status: "Delivered",
+        ...dateMatch("deliveredAt", start, endExclusive),
+      },
+    },
+    {
+      $group: {
+        _id: "$user",
+        deliveredValue: { $sum: "$totalPrice" },
+        deliveredCount: { $sum: 1 },
+      },
+    },
+  ]);
+}
+
+async function aggregateCustomerInvoiced(start, endExclusive) {
+  return Invoice.aggregate([
+    {
+      $match: {
+        status: "Issued",
+        ...dateMatch("invoiceDate", start, endExclusive),
+      },
+    },
+    {
+      $group: {
+        _id: "$user",
+        amountMinor: { $sum: "$amountMinor" },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+}
+
+async function aggregateCustomerCollected(start, endExclusive) {
+  return Payment.aggregate([
+    {
+      $match: dateMatch("paymentDate", start, endExclusive),
+    },
+    {
+      $group: {
+        _id: "$user",
+        amountMinor: { $sum: "$amountMinor" },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+}
+
+async function aggregateCustomerOutstanding() {
+  return Invoice.aggregate([
+    {
+      $match: {
+        status: "Issued",
+        balanceDueMinor: { $gt: 0 },
+      },
+    },
+    {
+      $group: {
+        _id: "$user",
+        amountMinor: { $sum: "$balanceDueMinor" },
+        count: { $sum: 1 },
+      },
+    },
+  ]);
+}
+
+function rowsToMap(rows = []) {
+  return new Map(rows.map((row) => [toUserKey(row._id), row]));
+}
+
 function majorMetric(current, previous) {
   return {
     current,
@@ -207,8 +363,10 @@ function minorMetric(currentMinor, previousMinor, extra = {}) {
 
 export const getAnalyticsOverview = asyncHandler(async (req, res) => {
   let range;
+  let customerId;
   try {
     range = buildAnalyticsDateRange(req.query);
+    customerId = parseCustomerId(req.query.customerId);
   } catch (err) {
     res.status(400);
     throw err;
@@ -224,19 +382,44 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
     currentCollected,
     previousCollected,
     currentOutstanding,
+    selectedCustomer,
     trend,
   ] = await Promise.all([
-    aggregateBookedOrders(range.start, range.endExclusive),
-    aggregateBookedOrders(range.previousStart, range.previousEndExclusive),
-    aggregateDeliveredValue(range.start, range.endExclusive),
-    aggregateDeliveredValue(range.previousStart, range.previousEndExclusive),
-    aggregateInvoicedMinor(range.start, range.endExclusive),
-    aggregateInvoicedMinor(range.previousStart, range.previousEndExclusive),
-    aggregateCollectedMinor(range.start, range.endExclusive),
-    aggregateCollectedMinor(range.previousStart, range.previousEndExclusive),
-    aggregateCurrentOutstandingMinor(),
-    aggregateBookedSalesTrend(range),
+    aggregateBookedOrders(range.start, range.endExclusive, customerId),
+    aggregateBookedOrders(
+      range.previousStart,
+      range.previousEndExclusive,
+      customerId
+    ),
+    aggregateDeliveredValue(range.start, range.endExclusive, customerId),
+    aggregateDeliveredValue(
+      range.previousStart,
+      range.previousEndExclusive,
+      customerId
+    ),
+    aggregateInvoicedMinor(range.start, range.endExclusive, customerId),
+    aggregateInvoicedMinor(
+      range.previousStart,
+      range.previousEndExclusive,
+      customerId
+    ),
+    aggregateCollectedMinor(range.start, range.endExclusive, customerId),
+    aggregateCollectedMinor(
+      range.previousStart,
+      range.previousEndExclusive,
+      customerId
+    ),
+    aggregateCurrentOutstandingMinor(customerId),
+    customerId
+      ? User.findById(customerId).select("name email").lean()
+      : Promise.resolve(null),
+    aggregateBookedSalesTrend(range, customerId),
   ]);
+
+  if (customerId && !selectedCustomer) {
+    res.status(404);
+    throw new Error("Customer not found.");
+  }
 
   res.status(200).json({
     success: true,
@@ -249,6 +432,15 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
         previousTo: range.previousTo,
         timezone: range.timezone,
         boundary: range.boundary,
+      },
+      scope: {
+        customer: selectedCustomer
+          ? {
+              _id: String(selectedCustomer._id),
+              name: selectedCustomer.name,
+              email: selectedCustomer.email,
+            }
+          : null,
       },
       metrics: {
         bookedSales: majorMetric(
@@ -289,6 +481,84 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
         },
       },
       trend,
+    },
+  });
+});
+
+export const getAnalyticsCustomers = asyncHandler(async (req, res) => {
+  let range;
+  try {
+    range = buildAnalyticsDateRange(req.query);
+  } catch (err) {
+    res.status(400);
+    throw err;
+  }
+
+  const limit = parseLimit(req.query.limit);
+
+  const [booked, delivered, invoiced, collected, outstanding] =
+    await Promise.all([
+      aggregateCustomerBooked(range.start, range.endExclusive),
+      aggregateCustomerDelivered(range.start, range.endExclusive),
+      aggregateCustomerInvoiced(range.start, range.endExclusive),
+      aggregateCustomerCollected(range.start, range.endExclusive),
+      aggregateCustomerOutstanding(),
+    ]);
+
+  const metricMaps = {
+    booked: rowsToMap(booked),
+    delivered: rowsToMap(delivered),
+    invoiced: rowsToMap(invoiced),
+    collected: rowsToMap(collected),
+    outstanding: rowsToMap(outstanding),
+  };
+
+  const userIds = new Set([
+    ...metricMaps.booked.keys(),
+    ...metricMaps.delivered.keys(),
+    ...metricMaps.invoiced.keys(),
+    ...metricMaps.collected.keys(),
+    ...metricMaps.outstanding.keys(),
+  ]);
+
+  const objectIds = Array.from(userIds)
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+  const users = objectIds.length
+    ? await User.find({ _id: { $in: objectIds } }).select("name email").lean()
+    : [];
+  const usersById = new Map(users.map((user) => [toUserKey(user._id), user]));
+
+  const rows = Array.from(userIds)
+    .map((userId) => buildCustomerRow(userId, usersById, metricMaps))
+    .sort((a, b) => {
+      const bookedDiff = b.bookedSales - a.bookedSales;
+      if (bookedDiff) return bookedDiff;
+      const collectedDiff = b.collectedMinor - a.collectedMinor;
+      if (collectedDiff) return collectedDiff;
+      const invoicedDiff = b.invoicedMinor - a.invoicedMinor;
+      if (invoicedDiff) return invoicedDiff;
+      const outstandingDiff =
+        b.currentOutstandingMinor - a.currentOutstandingMinor;
+      if (outstandingDiff) return outstandingDiff;
+      return a.customer.name.localeCompare(b.customer.name);
+    })
+    .slice(0, limit);
+
+  res.status(200).json({
+    success: true,
+    message: "Analytics customer performance retrieved successfully.",
+    data: {
+      range: {
+        from: range.from,
+        to: range.to,
+        timezone: range.timezone,
+        boundary: range.boundary,
+      },
+      currency: DEFAULT_CURRENCY,
+      minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
+      limit,
+      customers: rows,
     },
   });
 });
