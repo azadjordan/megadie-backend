@@ -477,19 +477,26 @@ function rowsToMap(rows = []) {
   return new Map(rows.map((row) => [toUserKey(row._id), row]));
 }
 
-function majorMetric(current, previous) {
+function majorMetric(current, previous, comparisonEnabled = true) {
   return {
     current,
-    previous,
-    changePercent: changePercent(current, previous),
+    previous: comparisonEnabled ? previous : null,
+    changePercent: comparisonEnabled ? changePercent(current, previous) : null,
   };
 }
 
-function minorMetric(currentMinor, previousMinor, extra = {}) {
+function minorMetric(
+  currentMinor,
+  previousMinor,
+  comparisonEnabled = true,
+  extra = {}
+) {
   return {
     currentMinor,
-    previousMinor,
-    changePercent: changePercent(currentMinor, previousMinor),
+    previousMinor: comparisonEnabled ? previousMinor : null,
+    changePercent: comparisonEnabled
+      ? changePercent(currentMinor, previousMinor)
+      : null,
     currency: DEFAULT_CURRENCY,
     minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
     ...extra,
@@ -507,6 +514,7 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
     throw err;
   }
 
+  const comparisonEnabled = Boolean(range.comparison?.enabled);
   const [
     currentBooked,
     previousBooked,
@@ -521,29 +529,37 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
     trend,
   ] = await Promise.all([
     aggregateBookedOrders(range.start, range.endExclusive, customerId),
-    aggregateBookedOrders(
-      range.previousStart,
-      range.previousEndExclusive,
-      customerId
-    ),
+    comparisonEnabled
+      ? aggregateBookedOrders(
+          range.previousStart,
+          range.previousEndExclusive,
+          customerId
+        )
+      : Promise.resolve({ bookedSales: null, orderCount: null }),
     aggregateDeliveredValue(range.start, range.endExclusive, customerId),
-    aggregateDeliveredValue(
-      range.previousStart,
-      range.previousEndExclusive,
-      customerId
-    ),
+    comparisonEnabled
+      ? aggregateDeliveredValue(
+          range.previousStart,
+          range.previousEndExclusive,
+          customerId
+        )
+      : Promise.resolve({ deliveredValue: null, deliveredCount: null }),
     aggregateInvoicedMinor(range.start, range.endExclusive, customerId),
-    aggregateInvoicedMinor(
-      range.previousStart,
-      range.previousEndExclusive,
-      customerId
-    ),
+    comparisonEnabled
+      ? aggregateInvoicedMinor(
+          range.previousStart,
+          range.previousEndExclusive,
+          customerId
+        )
+      : Promise.resolve({ amountMinor: null, count: null }),
     aggregateCollectedMinor(range.start, range.endExclusive, customerId),
-    aggregateCollectedMinor(
-      range.previousStart,
-      range.previousEndExclusive,
-      customerId
-    ),
+    comparisonEnabled
+      ? aggregateCollectedMinor(
+          range.previousStart,
+          range.previousEndExclusive,
+          customerId
+        )
+      : Promise.resolve({ amountMinor: null, count: null }),
     aggregateCurrentOutstandingMinor(customerId),
     customerId
       ? User.findById(customerId).select("name email").lean()
@@ -565,6 +581,7 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
         to: range.to,
         previousFrom: range.previousFrom,
         previousTo: range.previousTo,
+        comparison: range.comparison,
         timezone: range.timezone,
         boundary: range.boundary,
       },
@@ -580,31 +597,41 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
       metrics: {
         bookedSales: majorMetric(
           currentBooked.bookedSales,
-          previousBooked.bookedSales
+          previousBooked.bookedSales,
+          comparisonEnabled
         ),
-        orders: majorMetric(currentBooked.orderCount, previousBooked.orderCount),
+        orders: majorMetric(
+          currentBooked.orderCount,
+          previousBooked.orderCount,
+          comparisonEnabled
+        ),
         deliveredValue: {
           ...majorMetric(
             currentDelivered.deliveredValue,
-            previousDelivered.deliveredValue
+            previousDelivered.deliveredValue,
+            comparisonEnabled
           ),
           currentCount: currentDelivered.deliveredCount,
-          previousCount: previousDelivered.deliveredCount,
+          previousCount: comparisonEnabled
+            ? previousDelivered.deliveredCount
+            : null,
         },
         invoiced: minorMetric(
           currentInvoiced.amountMinor,
           previousInvoiced.amountMinor,
+          comparisonEnabled,
           {
             currentCount: currentInvoiced.count,
-            previousCount: previousInvoiced.count,
+            previousCount: comparisonEnabled ? previousInvoiced.count : null,
           }
         ),
         collected: minorMetric(
           currentCollected.amountMinor,
           previousCollected.amountMinor,
+          comparisonEnabled,
           {
             currentCount: currentCollected.count,
-            previousCount: previousCollected.count,
+            previousCount: comparisonEnabled ? previousCollected.count : null,
           }
         ),
         currentOutstanding: {

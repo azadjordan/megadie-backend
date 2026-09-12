@@ -3,8 +3,15 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const ANALYTICS_TIME_ZONE = "Asia/Dubai";
 export const ANALYTICS_MONGO_TIME_ZONE = "+04:00";
 export const ANALYTICS_UTC_OFFSET_MINUTES = 4 * 60;
+export const ANALYTICS_COMPARE_MODES = Object.freeze({
+  NONE: "none",
+  PREVIOUS_PERIOD: "previousPeriod",
+  SAME_DATES_LAST_YEAR: "sameDatesLastYear",
+});
 
 const OFFSET_MS = ANALYTICS_UTC_OFFSET_MINUTES * 60 * 1000;
+const MAX_SAME_DATES_LAST_YEAR_DAYS = 366;
+const COMPARE_MODE_VALUES = new Set(Object.values(ANALYTICS_COMPARE_MODES));
 
 // Admin analytics treats YYYY-MM-DD inputs as Dubai business calendar dates.
 // MongoDB filters use an inclusive UTC start and exclusive UTC end.
@@ -81,6 +88,84 @@ function previousCalendarMonth(from) {
   };
 }
 
+function previousSameLengthPeriod(from, dayCount) {
+  return {
+    to: addDays(from.key, -1),
+    from: addDays(from.key, -dayCount),
+  };
+}
+
+function sameDateLastYear(date) {
+  const previousYear = date.year - 1;
+  const day = Math.min(date.day, daysInMonth(previousYear, date.month));
+  return `${previousYear}-${pad2(date.month)}-${pad2(day)}`;
+}
+
+function normalizeCompareMode(value) {
+  if (!value) return ANALYTICS_COMPARE_MODES.PREVIOUS_PERIOD;
+
+  const raw = String(value).trim();
+  return COMPARE_MODE_VALUES.has(raw)
+    ? raw
+    : ANALYTICS_COMPARE_MODES.PREVIOUS_PERIOD;
+}
+
+function disabledComparison(mode, reason = null) {
+  return {
+    mode: ANALYTICS_COMPARE_MODES.NONE,
+    requestedMode: mode,
+    enabled: false,
+    from: null,
+    to: null,
+    label: "Prev period",
+    reason,
+  };
+}
+
+function enabledComparison(mode, previous) {
+  return {
+    mode,
+    requestedMode: mode,
+    enabled: true,
+    from: previous.from,
+    to: previous.to,
+    label: "Prev period",
+    reason: null,
+  };
+}
+
+function buildComparison(mode, from, to, dayCount) {
+  if (mode === ANALYTICS_COMPARE_MODES.NONE) {
+    return disabledComparison(mode);
+  }
+
+  if (mode === ANALYTICS_COMPARE_MODES.SAME_DATES_LAST_YEAR) {
+    const previous = {
+      from: sameDateLastYear(from),
+      to: sameDateLastYear(to),
+    };
+    const previousTo = normalizeDateKey(previous.to, "previousTo");
+
+    if (
+      dayCount > MAX_SAME_DATES_LAST_YEAR_DAYS ||
+      previousTo.utcDayMs >= from.utcDayMs
+    ) {
+      return disabledComparison(
+        mode,
+        "Same dates last year is unavailable for this date range."
+      );
+    }
+
+    return enabledComparison(mode, previous);
+  }
+
+  const previous = isFullCalendarMonth(from, to)
+    ? previousCalendarMonth(from)
+    : previousSameLengthPeriod(from, dayCount);
+
+  return enabledComparison(ANALYTICS_COMPARE_MODES.PREVIOUS_PERIOD, previous);
+}
+
 function businessDateStartToUtc(dateKey) {
   const parsed = normalizeDateKey(dateKey, "date");
   return new Date(parsed.utcDayMs - OFFSET_MS);
@@ -113,26 +198,27 @@ export function buildAnalyticsDateRange(query = {}, now = new Date()) {
   }
 
   const dayCount = Math.round((to.utcDayMs - from.utcDayMs) / DAY_MS) + 1;
-  const previous = isFullCalendarMonth(from, to)
-    ? previousCalendarMonth(from)
-    : {
-        to: addDays(from.key, -1),
-        from: addDays(from.key, -dayCount),
-      };
+  const compareMode = normalizeCompareMode(query.compare);
+  const comparison = buildComparison(compareMode, from, to, dayCount);
 
   const nextToKey = addDays(to.key, 1);
-  const nextPreviousToKey = addDays(previous.to, 1);
+  const nextPreviousToKey = comparison.enabled ? addDays(comparison.to, 1) : null;
 
   return {
     from: from.key,
     to: to.key,
-    previousFrom: previous.from,
-    previousTo: previous.to,
+    previousFrom: comparison.from,
+    previousTo: comparison.to,
     start: businessDateStartToUtc(from.key),
     endExclusive: businessDateStartToUtc(nextToKey),
-    previousStart: businessDateStartToUtc(previous.from),
-    previousEndExclusive: businessDateStartToUtc(nextPreviousToKey),
+    previousStart: comparison.enabled
+      ? businessDateStartToUtc(comparison.from)
+      : null,
+    previousEndExclusive: comparison.enabled
+      ? businessDateStartToUtc(nextPreviousToKey)
+      : null,
     dayCount,
+    comparison,
     timezone: ANALYTICS_TIME_ZONE,
     mongoTimezone: ANALYTICS_MONGO_TIME_ZONE,
     boundary: "inclusive start, exclusive end",
