@@ -31,6 +31,7 @@ import slotItemRoutes from "./routes/slotItemRoutes.js";
 import inventoryRoutes from "./routes/inventoryRoutes.js";
 import userPriceRoutes from "./routes/userPriceRoutes.js";
 import priceRuleRoutes from "./routes/priceRuleRoutes.js";
+import analyticsRoutes from "./routes/analyticsRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
 
 // ✅ Initialize and connect to DB
@@ -95,6 +96,7 @@ app.use("/api/slot-items", slotItemRoutes);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/user-prices", userPriceRoutes);
 app.use("/api/price-rules", priceRuleRoutes);
+app.use("/api/analytics", analyticsRoutes);
 
 // ✅ Error Handling
 app.use(notFound);
