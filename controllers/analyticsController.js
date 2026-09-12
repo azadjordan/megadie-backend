@@ -42,6 +42,69 @@ function dateMatch(field, start, endExclusive) {
   };
 }
 
+function orderLineValueExpression() {
+  return {
+    $sum: {
+      $map: {
+        input: { $ifNull: ["$orderItems", []] },
+        as: "item",
+        in: {
+          $let: {
+            vars: {
+              lineTotal: { $ifNull: ["$$item.lineTotal", null] },
+              computedLineTotal: {
+                $multiply: [
+                  { $ifNull: ["$$item.qty", 0] },
+                  { $ifNull: ["$$item.unitPrice", 0] },
+                ],
+              },
+            },
+            in: {
+              $cond: [
+                { $gt: ["$$lineTotal", 0] },
+                "$$lineTotal",
+                "$$computedLineTotal",
+              ],
+            },
+          },
+        },
+      },
+    },
+  };
+}
+
+function orderValueExpression() {
+  return {
+    $let: {
+      vars: {
+        itemCount: { $size: { $ifNull: ["$orderItems", []] } },
+        itemValue: orderLineValueExpression(),
+        fees: {
+          $add: [
+            { $ifNull: ["$deliveryCharge", 0] },
+            { $ifNull: ["$extraFee", 0] },
+          ],
+        },
+      },
+      in: {
+        $cond: [
+          { $gt: ["$$itemCount", 0] },
+          { $add: ["$$itemValue", "$$fees"] },
+          { $ifNull: ["$totalPrice", 0] },
+        ],
+      },
+    },
+  };
+}
+
+function addAnalyticsOrderValueStage() {
+  return {
+    $addFields: {
+      analyticsOrderValue: orderValueExpression(),
+    },
+  };
+}
+
 function parseCustomerId(value) {
   if (!value) return null;
   const id = String(value).trim();
@@ -104,10 +167,11 @@ async function aggregateBookedOrders(start, endExclusive, customerId = null) {
         ...dateMatch("createdAt", start, endExclusive),
       },
     },
+    addAnalyticsOrderValueStage(),
     {
       $group: {
         _id: null,
-        bookedSales: { $sum: "$totalPrice" },
+        bookedSales: { $sum: "$analyticsOrderValue" },
         orderCount: { $sum: 1 },
       },
     },
@@ -128,10 +192,11 @@ async function aggregateDeliveredValue(start, endExclusive, customerId = null) {
         ...dateMatch("deliveredAt", start, endExclusive),
       },
     },
+    addAnalyticsOrderValueStage(),
     {
       $group: {
         _id: null,
-        deliveredValue: { $sum: "$totalPrice" },
+        deliveredValue: { $sum: "$analyticsOrderValue" },
         deliveredCount: { $sum: 1 },
       },
     },
@@ -223,6 +288,7 @@ async function aggregateBookedSalesTrend(range, customerId = null) {
         ...dateMatch("createdAt", range.start, range.endExclusive),
       },
     },
+    addAnalyticsOrderValueStage(),
     {
       $group: {
         _id: {
@@ -232,7 +298,7 @@ async function aggregateBookedSalesTrend(range, customerId = null) {
             timezone: ANALYTICS_MONGO_TIME_ZONE,
           },
         },
-        bookedSales: { $sum: "$totalPrice" },
+        bookedSales: { $sum: "$analyticsOrderValue" },
         orderCount: { $sum: 1 },
       },
     },
@@ -320,10 +386,11 @@ async function aggregateCustomerBooked(start, endExclusive, customerId = null) {
         ...dateMatch("createdAt", start, endExclusive),
       },
     },
+    addAnalyticsOrderValueStage(),
     {
       $group: {
         _id: "$user",
-        bookedSales: { $sum: "$totalPrice" },
+        bookedSales: { $sum: "$analyticsOrderValue" },
         orderCount: { $sum: 1 },
       },
     },
@@ -339,10 +406,11 @@ async function aggregateCustomerDelivered(start, endExclusive, customerId = null
         ...dateMatch("deliveredAt", start, endExclusive),
       },
     },
+    addAnalyticsOrderValueStage(),
     {
       $group: {
         _id: "$user",
-        deliveredValue: { $sum: "$totalPrice" },
+        deliveredValue: { $sum: "$analyticsOrderValue" },
         deliveredCount: { $sum: 1 },
       },
     },
