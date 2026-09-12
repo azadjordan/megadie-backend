@@ -11,6 +11,8 @@ export const ANALYTICS_COMPARE_MODES = Object.freeze({
 
 const OFFSET_MS = ANALYTICS_UTC_OFFSET_MINUTES * 60 * 1000;
 const MAX_SAME_DATES_LAST_YEAR_DAYS = 366;
+const DAILY_TREND_MAX_DAYS = 62;
+const WEEKLY_TREND_MAX_DAYS = 180;
 const COMPARE_MODE_VALUES = new Set(Object.values(ANALYTICS_COMPARE_MODES));
 
 // Admin analytics treats YYYY-MM-DD inputs as Dubai business calendar dates.
@@ -61,6 +63,12 @@ function getBusinessTodayDateKey(now = new Date()) {
 function addDays(dateKey, days) {
   const parsed = normalizeDateKey(dateKey, "date");
   return formatDateKeyFromUtcDayMs(parsed.utcDayMs + days * DAY_MS);
+}
+
+function compareDateKeys(a, b) {
+  const left = normalizeDateKey(a, "left");
+  const right = normalizeDateKey(b, "right");
+  return left.utcDayMs - right.utcDayMs;
 }
 
 function daysInMonth(year, month) {
@@ -181,6 +189,103 @@ export function enumerateDateKeys(fromKey, toKey) {
   }
 
   return dates;
+}
+
+function trendGranularityForDayCount(dayCount) {
+  if (dayCount <= DAILY_TREND_MAX_DAYS) return "day";
+  if (dayCount <= WEEKLY_TREND_MAX_DAYS) return "week";
+  return "month";
+}
+
+function buildCurrentTrendBuckets(fromKey, toKey, granularity) {
+  if (granularity === "day") {
+    return enumerateDateKeys(fromKey, toKey).map((date) => ({
+      from: date,
+      to: date,
+    }));
+  }
+
+  const buckets = [];
+  let cursor = fromKey;
+
+  while (compareDateKeys(cursor, toKey) <= 0) {
+    if (granularity === "week") {
+      const bucketTo = addDays(cursor, 6);
+      const to = compareDateKeys(bucketTo, toKey) > 0 ? toKey : bucketTo;
+      buckets.push({ from: cursor, to });
+      cursor = addDays(to, 1);
+      continue;
+    }
+
+    const parsed = normalizeDateKey(cursor, "bucketFrom");
+    const monthEnd = `${parsed.year}-${pad2(parsed.month)}-${pad2(
+      daysInMonth(parsed.year, parsed.month)
+    )}`;
+    const to = compareDateKeys(monthEnd, toKey) > 0 ? toKey : monthEnd;
+    buckets.push({ from: cursor, to });
+    cursor = addDays(to, 1);
+  }
+
+  return buckets;
+}
+
+function withUtcBoundaries(bucket) {
+  return {
+    ...bucket,
+    start: businessDateStartToUtc(bucket.from),
+    endExclusive: businessDateStartToUtc(addDays(bucket.to, 1)),
+  };
+}
+
+function buildPreviousTrendBucket(range, current, offsetDays, bucketDayCount) {
+  if (!range.comparison?.enabled) return null;
+
+  if (range.comparison.mode === ANALYTICS_COMPARE_MODES.SAME_DATES_LAST_YEAR) {
+    return {
+      from: sameDateLastYear(normalizeDateKey(current.from, "bucketFrom")),
+      to: sameDateLastYear(normalizeDateKey(current.to, "bucketTo")),
+    };
+  }
+
+  const previousFrom = addDays(range.previousFrom, offsetDays);
+  return {
+    from: previousFrom,
+    to: addDays(previousFrom, bucketDayCount - 1),
+  };
+}
+
+export function buildAnalyticsTrendBuckets(range) {
+  const granularity = trendGranularityForDayCount(range.dayCount);
+  const currentBuckets = buildCurrentTrendBuckets(
+    range.from,
+    range.to,
+    granularity
+  );
+  const rangeFrom = normalizeDateKey(range.from, "from");
+
+  return {
+    granularity,
+    buckets: currentBuckets.map((current) => {
+      const currentFrom = normalizeDateKey(current.from, "bucketFrom");
+      const currentTo = normalizeDateKey(current.to, "bucketTo");
+      const offsetDays = Math.round(
+        (currentFrom.utcDayMs - rangeFrom.utcDayMs) / DAY_MS
+      );
+      const bucketDayCount =
+        Math.round((currentTo.utcDayMs - currentFrom.utcDayMs) / DAY_MS) + 1;
+      const previous = buildPreviousTrendBucket(
+        range,
+        current,
+        offsetDays,
+        bucketDayCount
+      );
+
+      return {
+        current: withUtcBoundaries(current),
+        previous: previous ? withUtcBoundaries(previous) : null,
+      };
+    }),
+  };
 }
 
 export function buildAnalyticsDateRange(query = {}, now = new Date()) {

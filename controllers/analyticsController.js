@@ -5,9 +5,8 @@ import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
 import User from "../models/userModel.js";
 import {
-  ANALYTICS_MONGO_TIME_ZONE,
   buildAnalyticsDateRange,
-  enumerateDateKeys,
+  buildAnalyticsTrendBuckets,
 } from "../utils/analyticsDateRange.js";
 
 const DEFAULT_CURRENCY = "AED";
@@ -279,42 +278,88 @@ async function aggregateCurrentOutstandingMinor(customerId = null) {
   };
 }
 
-async function aggregateBookedSalesTrend(range, customerId = null) {
-  const rows = await Order.aggregate([
+async function aggregateInvoiceAmountsForBuckets(buckets, customerId = null) {
+  if (!buckets.length) return new Map();
+
+  const rows = await Invoice.aggregate([
     {
       $match: {
-        status: { $ne: "Cancelled" },
+        status: "Issued",
         ...customerFilter(customerId),
-        ...dateMatch("createdAt", range.start, range.endExclusive),
+        invoiceDate: {
+          $gte: buckets[0].start,
+          $lt: buckets[buckets.length - 1].endExclusive,
+        },
       },
     },
-    addAnalyticsOrderValueStage(),
     {
-      $group: {
-        _id: {
-          $dateToString: {
-            format: "%Y-%m-%d",
-            date: "$createdAt",
-            timezone: ANALYTICS_MONGO_TIME_ZONE,
+      $project: {
+        amountMinor: 1,
+        bucketIndex: {
+          $switch: {
+            branches: buckets.map((bucket, index) => ({
+              case: {
+                $and: [
+                  { $gte: ["$invoiceDate", bucket.start] },
+                  { $lt: ["$invoiceDate", bucket.endExclusive] },
+                ],
+              },
+              then: index,
+            })),
+            default: null,
           },
         },
-        bookedSales: { $sum: "$analyticsOrderValue" },
-        orderCount: { $sum: 1 },
+      },
+    },
+    { $match: { bucketIndex: { $ne: null } } },
+    {
+      $group: {
+        _id: "$bucketIndex",
+        amountMinor: { $sum: "$amountMinor" },
+        count: { $sum: 1 },
       },
     },
     { $sort: { _id: 1 } },
   ]);
 
-  const byDate = new Map(rows.map((row) => [row._id, row]));
+  return new Map(rows.map((row) => [Number(row._id), row]));
+}
 
-  return enumerateDateKeys(range.from, range.to).map((date) => {
-    const row = byDate.get(date);
-    return {
-      date,
-      bookedSales: roundMajor(row?.bookedSales),
-      orderCount: Number(row?.orderCount || 0),
-    };
-  });
+async function aggregateInvoicedTrend(range, customerId = null) {
+  const trend = buildAnalyticsTrendBuckets(range);
+  const currentBuckets = trend.buckets.map((bucket) => bucket.current);
+  const previousBuckets = trend.buckets
+    .map((bucket) => bucket.previous)
+    .filter(Boolean);
+  const comparisonEnabled = Boolean(range.comparison?.enabled);
+  const [currentByBucket, previousByBucket] = await Promise.all([
+    aggregateInvoiceAmountsForBuckets(currentBuckets, customerId),
+    comparisonEnabled
+      ? aggregateInvoiceAmountsForBuckets(previousBuckets, customerId)
+      : Promise.resolve(new Map()),
+  ]);
+
+  return {
+    granularity: trend.granularity,
+    points: trend.buckets.map((bucket, index) => {
+      const current = currentByBucket.get(index);
+      const previous = previousByBucket.get(index);
+      return {
+        currentFrom: bucket.current.from,
+        currentTo: bucket.current.to,
+        previousFrom: bucket.previous?.from || null,
+        previousTo: bucket.previous?.to || null,
+        currentAmountMinor: Number(current?.amountMinor || 0),
+        currentCount: Number(current?.count || 0),
+        previousAmountMinor: comparisonEnabled
+          ? Number(previous?.amountMinor || 0)
+          : null,
+        previousCount: comparisonEnabled ? Number(previous?.count || 0) : null,
+        currency: DEFAULT_CURRENCY,
+        minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
+      };
+    }),
+  };
 }
 
 async function aggregateSkuPerformance(start, endExclusive, customerId, limit) {
@@ -564,7 +609,7 @@ export const getAnalyticsOverview = asyncHandler(async (req, res) => {
     customerId
       ? User.findById(customerId).select("name email").lean()
       : Promise.resolve(null),
-    aggregateBookedSalesTrend(range, customerId),
+    aggregateInvoicedTrend(range, customerId),
   ]);
 
   if (customerId && !selectedCustomer) {
