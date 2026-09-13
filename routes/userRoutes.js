@@ -19,15 +19,35 @@ import {
 } from "../controllers/userController.js";
 
 import { protect, admin } from "../middleware/authMiddleware.js";
+import {
+  blockHoneypotSubmission,
+  rateLimit,
+} from "../middleware/abuseProtectionMiddleware.js";
 
 // Public
-router.route("/").post(registerUser);
+router.route("/").post(
+  rateLimit({ windowMs: 60 * 60 * 1000, max: 5, keyPrefix: "register" }),
+  blockHoneypotSubmission(["companyWebsite", "website"]),
+  registerUser
+);
 router.post("/logout", logoutUser);
-router.post("/auth", authUser);
+router.post(
+  "/auth",
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 20, keyPrefix: "login" }),
+  authUser
+);
 
 // ✅ Public: forgot/reset password
-router.post("/forgot-password", forgotPassword);
-router.post("/reset-password/:token", resetPassword);
+router.post(
+  "/forgot-password",
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 5, keyPrefix: "forgot-password" }),
+  forgotPassword
+);
+router.post(
+  "/reset-password/:token",
+  rateLimit({ windowMs: 15 * 60 * 1000, max: 5, keyPrefix: "reset-password" }),
+  resetPassword
+);
 
 // Self profile (protected)
 router

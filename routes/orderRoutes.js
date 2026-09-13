@@ -18,7 +18,7 @@ import {
   deleteOrderAllocation,
   finalizeOrderAllocations,
 } from "../controllers/orderAllocationController.js";
-import { protect, admin } from "../middleware/authMiddleware.js";
+import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
@@ -26,7 +26,7 @@ const router = express.Router();
 router.get("/", protect, admin, getOrders);
 router.get("/work-summary", protect, admin, getOrdersWorkSummary);
 // ✅ Get my orders (user)
-router.get("/my", protect, getMyOrders);
+router.get("/my", protect, requireApproved, getMyOrders);
 
 // ✅ Create order from quote (admin)
 router.post("/from-quote/:quoteId", protect, admin, createOrderFromQuote);
@@ -47,7 +47,7 @@ router.delete("/:id/allocations/:allocationId", protect, admin, deleteOrderAlloc
 // ✅ Get / Update / Delete order by ID
 router
   .route("/:id")
-  .get(protect, getOrderById)
+  .get(protect, requireApproved, getOrderById)
   .put(protect, admin, updateOrder)
   .delete(protect, admin, deleteOrder);
 

@@ -1,6 +1,6 @@
 // routes/invoiceRoutes.js
 import express from "express";
-import { protect, admin } from "../middleware/authMiddleware.js";
+import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 
 // Owner + shared (admin OR owner) endpoints
 import {
@@ -24,16 +24,16 @@ import {
 const router = express.Router();
 
 /* ----- Owner endpoints ----- */
-router.get("/my", protect, getMyInvoices);
-router.get("/my/summary", protect, getMyInvoiceSummary);
+router.get("/my", protect, requireApproved, getMyInvoices);
+router.get("/my/summary", protect, requireApproved, getMyInvoiceSummary);
 
 /* ----- Admin summary ----- */
 router.get("/summary", protect, admin, getInvoicesSummary);
 router.get("/soa/:userId", protect, admin, getStatementOfAccountPDF);
 
 /* ----- Admin or Owner ----- */
-router.get("/:id/pdf", protect, getInvoicePDF);
-router.get("/:id", protect, getInvoiceById);
+router.get("/:id/pdf", protect, requireApproved, getInvoicePDF);
+router.get("/:id", protect, requireApproved, getInvoiceById);
 
 /* ----- Admin mutate ----- */
 router.post("/from-order/:orderId", protect, admin, createInvoiceFromOrder);

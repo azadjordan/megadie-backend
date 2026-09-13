@@ -27,20 +27,25 @@ import {
   getQuoteStockCheckByAdmin,
 } from "../controllers/quoteController.js";
 
-import { protect, admin } from "../middleware/authMiddleware.js";
+import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 
 const router = express.Router();
 
 // Create a new quote (client)
-router.route("/").post(protect, createQuote);
+router.route("/").post(protect, requireApproved, createQuote);
 
 // Get current user's own quotes (client)
-router.get("/my", protect, getMyQuotes);
+router.get("/my", protect, requireApproved, getMyQuotes);
 
 // User actions (owner only)
-router.put("/:id/cancel", protect, cancelQuoteByUser);
-router.put("/:id/confirm", protect, confirmQuoteByUser);
-router.put("/:id/update-quantities", protect, updateQuoteQuantitiesByUser);
+router.put("/:id/cancel", protect, requireApproved, cancelQuoteByUser);
+router.put("/:id/confirm", protect, requireApproved, confirmQuoteByUser);
+router.put(
+  "/:id/update-quantities",
+  protect,
+  requireApproved,
+  updateQuoteQuantitiesByUser
+);
 
 // Generate PDF version of a quote (admin only)
 router.get("/:id/pdf", protect, admin, getQuotePDF);
@@ -85,7 +90,7 @@ router.get(
 // Get / delete a specific quote
 router
   .route("/:id")
-  .get(protect, getQuoteById)
+  .get(protect, requireApproved, getQuoteById)
   .delete(protect, admin, deleteQuote);
 
 export default router;

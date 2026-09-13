@@ -14,12 +14,12 @@ import { protect, admin } from "../middleware/authMiddleware.js";
 const router = express.Router();
 
 // /api/slots
-router.get("/", getSlots);
-router.get("/summary", getSlotSummary);
+router.get("/", protect, admin, getSlots);
+router.get("/summary", protect, admin, getSlotSummary);
 router.post("/occupancy/rebuild", protect, admin, rebuildSlotOccupancy);
-router.get("/:id", getSlotById);
-router.post("/", createSlot);
-router.put("/:id", updateSlot);
-router.delete("/:id", deleteSlot);
+router.get("/:id", protect, admin, getSlotById);
+router.post("/", protect, admin, createSlot);
+router.put("/:id", protect, admin, updateSlot);
+router.delete("/:id", protect, admin, deleteSlot);
 
 export default router;
