@@ -143,6 +143,20 @@ function computePaymentStatus(amountMinor, paidTotalMinor) {
   return "PartiallyPaid";
 }
 
+async function ensureNoReceiptLinkedPayments(Payment, invoiceId, session = null) {
+  const query = Payment.exists({
+    invoice: invoiceId,
+    receipt: { $exists: true, $ne: null },
+  });
+  if (session) query.session(session);
+  const receiptPayment = await query;
+  if (receiptPayment) {
+    throw new Error(
+      "Invoices with customer receipt allocations cannot be deleted. Reverse the customer receipt before deleting the invoice."
+    );
+  }
+}
+
 invoiceSchema.methods.recomputeCaches = function recomputeCaches() {
   const amountMinor = Math.max(0, Number(this.amountMinor) || 0);
   const paidMinor = Math.max(0, Number(this.paidTotalMinor) || 0);
@@ -262,7 +276,11 @@ invoiceSchema.pre(
       }
 
       const Payment = mongoose.model("Payment");
-      await Payment.deleteMany({ invoice: this._id }); // ok because invoice is being deleted anyway
+      const session = typeof this.$session === "function" ? this.$session() : null;
+      await ensureNoReceiptLinkedPayments(Payment, this._id, session);
+      const deleteQuery = Payment.deleteMany({ invoice: this._id }); // ok because invoice is being deleted anyway
+      if (session) deleteQuery.session(session);
+      await deleteQuery;
       next();
     } catch (err) {
       next(err);
@@ -273,10 +291,13 @@ invoiceSchema.pre(
 // Query deletion: Invoice.findByIdAndDelete / findOneAndDelete
 invoiceSchema.pre("findOneAndDelete", async function (next) {
   try {
-    const doc = await this.model
+    const session =
+      typeof this.getOptions === "function" ? this.getOptions().session : null;
+    const invoiceQuery = this.model
       .findOne(this.getQuery())
-      .select("_id status")
-      .lean();
+      .select("_id status");
+    if (session) invoiceQuery.session(session);
+    const doc = await invoiceQuery.lean();
     if (!doc) return next();
 
     if (doc.status !== "Cancelled") {
@@ -284,7 +305,10 @@ invoiceSchema.pre("findOneAndDelete", async function (next) {
     }
 
     const Payment = mongoose.model("Payment");
-    await Payment.deleteMany({ invoice: doc._id });
+    await ensureNoReceiptLinkedPayments(Payment, doc._id, session);
+    const deleteQuery = Payment.deleteMany({ invoice: doc._id });
+    if (session) deleteQuery.session(session);
+    await deleteQuery;
     next();
   } catch (err) {
     next(err);

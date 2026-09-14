@@ -179,6 +179,29 @@ const resolveId = (value) => {
   return String(value?._id || value?.id || value);
 };
 
+const RECEIPT_PAYMENT_CLEANUP_BLOCK =
+  "This order has customer receipt allocations. Reverse the customer receipt before deleting or cancelling the order.";
+
+async function countInvoicePayments(invoiceId, session = null) {
+  const query = Payment.countDocuments({ invoice: invoiceId });
+  if (session) query.session(session);
+  return query;
+}
+
+async function assertNoReceiptPaymentsForInvoice(invoiceId, res, session = null) {
+  if (!invoiceId) return;
+  const query = Payment.exists({
+    invoice: invoiceId,
+    receipt: { $exists: true, $ne: null },
+  });
+  if (session) query.session(session);
+  const receiptPayment = await query;
+  if (receiptPayment) {
+    res.status(409);
+    throw new Error(RECEIPT_PAYMENT_CLEANUP_BLOCK);
+  }
+}
+
 const isReservedAllocation = (allocation) =>
   !allocation?.status || allocation.status === "Reserved";
 
@@ -256,7 +279,7 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
   const payments = invoiceId
     ? await (() => {
         const paymentsQuery = Payment.find({ invoice: invoiceId })
-          .select("amountMinor")
+          .select("amountMinor receipt")
           .lean();
         if (session) paymentsQuery.session(session);
         return paymentsQuery;
@@ -273,6 +296,8 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
     (sum, payment) => sum + (Number(payment?.amountMinor) || 0),
     0
   );
+  const receiptPaymentCount = payments.filter((payment) => payment?.receipt)
+    .length;
   const restoreRows = deductedRows.map((row) => ({
     allocationId: resolveId(row._id),
     productId: resolveId(row.product),
@@ -348,6 +373,9 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
       }
     }
   }
+  if (receiptPaymentCount > 0) {
+    blockers.push(RECEIPT_PAYMENT_CLEANUP_BLOCK);
+  }
 
   const actions = [];
   if (deductedQty > 0) {
@@ -387,6 +415,13 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
   }
   if (payments.length > 0) {
     warnings.push("Payment records will be permanently deleted.");
+  }
+  if (receiptPaymentCount > 0) {
+    warnings.push(
+      `${receiptPaymentCount} payment allocation${
+        receiptPaymentCount === 1 ? " is" : "s are"
+      } linked to a customer receipt.`
+    );
   }
   if (invoiceId && !invoice) {
     warnings.push("The linked invoice record was not found.");
@@ -433,6 +468,7 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
     payments: {
       count: payments.length,
       totalMinor: paymentTotalMinor,
+      receiptLinkedCount: receiptPaymentCount,
       currency: invoice?.currency || "AED",
       minorUnitFactor: invoice?.minorUnitFactor || 100,
     },
@@ -635,6 +671,8 @@ export const deleteOrder = asyncHandler(async (req, res) => {
         if (invoice) invoiceId = resolveId(invoice._id);
       }
       if (invoiceId) {
+        await assertNoReceiptPaymentsForInvoice(invoiceId, res, session);
+        paymentsDeleted = await countInvoicePayments(invoiceId, session);
         if (invoice) {
           if (invoice.status !== "Cancelled") {
             invoice.status = "Cancelled";
@@ -643,13 +681,14 @@ export const deleteOrder = asyncHandler(async (req, res) => {
             if (!invoice.cancelledAt) invoice.cancelledAt = new Date();
             await invoice.save({ session });
           }
-          await Invoice.deleteOne({ _id: invoice._id }).session(session);
+          await invoice.deleteOne({ session });
           invoiceDeleted = true;
+        } else {
+          const paymentResult = await Payment.deleteMany({
+            invoice: invoiceId,
+          }).session(session);
+          paymentsDeleted = paymentResult?.deletedCount || 0;
         }
-        const paymentResult = await Payment.deleteMany({
-          invoice: invoiceId,
-        }).session(session);
-        paymentsDeleted = paymentResult?.deletedCount || 0;
       }
 
       let quoteDeleted = false;
@@ -1235,6 +1274,7 @@ export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
       if (order.invoice) {
         const invoice = await Invoice.findById(order.invoice).session(session);
         if (invoice) {
+          await assertNoReceiptPaymentsForInvoice(invoice._id, res, session);
           if (invoice.status !== "Cancelled") {
             invoice.status = "Cancelled";
             invoice.cancelReason =
@@ -1243,12 +1283,11 @@ export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
             await invoice.save({ session });
           }
 
-          const paymentResult = await Payment.deleteMany({
-            invoice: invoice._id,
-          }).session(session);
-          summary.paymentsDeleted = paymentResult?.deletedCount || 0;
-
-          await Invoice.deleteOne({ _id: invoice._id }).session(session);
+          summary.paymentsDeleted = await countInvoicePayments(
+            invoice._id,
+            session
+          );
+          await invoice.deleteOne({ session });
           summary.invoiceDeleted = true;
         }
 

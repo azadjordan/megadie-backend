@@ -21,12 +21,27 @@ export const RECEIVED_BY_OPTIONS = [
   "Company Account",
 ];
 
+export const PAYMENT_METHOD_OPTIONS = [
+  "Cash",
+  "Bank Transfer",
+  "Credit Card",
+  "Cheque",
+  "Other",
+];
+
 const paymentSchema = new mongoose.Schema(
   {
     invoice: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Invoice",
       required: true,
+      immutable: true,
+    },
+
+    receipt: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "CustomerPaymentReceipt",
+      default: null,
       immutable: true,
     },
 
@@ -48,7 +63,7 @@ const paymentSchema = new mongoose.Schema(
 
     paymentMethod: {
       type: String,
-      enum: ["Cash", "Bank Transfer", "Credit Card", "Cheque", "Other"],
+      enum: PAYMENT_METHOD_OPTIONS,
       required: true,
       immutable: true,
     },
@@ -88,9 +103,12 @@ paymentSchema.pre("validate", async function (next) {
     }
 
     const Invoice = mongoose.model("Invoice");
-    const inv = await Invoice.findById(this.invoice)
-      .select("_id user status amountMinor paidTotalMinor currency minorUnitFactor")
-      .lean();
+    const session = typeof this.$session === "function" ? this.$session() : null;
+    const invoiceQuery = Invoice.findById(this.invoice).select(
+      "_id user status amountMinor paidTotalMinor balanceDueMinor currency minorUnitFactor"
+    );
+    if (session) invoiceQuery.session(session);
+    const inv = await invoiceQuery.lean();
 
     if (!inv) return next(new Error("Invoice not found."));
 
@@ -107,17 +125,18 @@ paymentSchema.pre("validate", async function (next) {
     }
 
     /**
-     * Optional strict overpay prevention.
-     * If true, blocks paidTotalMinor + amountMinor > invoice.amountMinor.
-     * If false, overpay is allowed (invoice will still show Paid when paid >= amount).
+     * Strict overpay prevention. Customer credits are not supported, so every
+     * payment must fit inside the invoice's current remaining balance.
      */
-    const BLOCK_OVERPAY = false;
-    if (BLOCK_OVERPAY) {
-      const paid = Math.max(0, Number(inv.paidTotalMinor) || 0);
-      const totalIfAdded = paid + this.amountMinor;
-      if (totalIfAdded > (Number(inv.amountMinor) || 0)) {
-        return next(new Error("Payment exceeds invoice amount."));
-      }
+    const balanceDue =
+      typeof inv.balanceDueMinor === "number"
+        ? Math.max(0, inv.balanceDueMinor)
+        : Math.max(
+            0,
+            (Number(inv.amountMinor) || 0) - (Number(inv.paidTotalMinor) || 0)
+          );
+    if (this.amountMinor > balanceDue) {
+      return next(new Error("Payment exceeds invoice balance."));
     }
 
     next();
@@ -142,7 +161,7 @@ paymentSchema.pre("validate", async function (next) {
  *
  * NOTE: Requires MongoDB 4.2+ (pipeline updates).
  */
-async function applyInvoiceDeltaMinorAtomic(invoiceId, deltaMinor) {
+async function applyInvoiceDeltaMinorAtomic(invoiceId, deltaMinor, options = {}) {
   const Invoice = mongoose.model("Invoice");
 
   // Guard: only integers
@@ -183,7 +202,8 @@ async function applyInvoiceDeltaMinorAtomic(invoiceId, deltaMinor) {
           updatedAt: "$$NOW",
         },
       },
-    ]
+    ],
+    options?.session ? { session: options.session } : undefined
   );
 }
 
@@ -199,7 +219,10 @@ paymentSchema.pre("save", function (next) {
 paymentSchema.post("save", async function (doc, next) {
   try {
     if (doc._wasNew) {
-      await applyInvoiceDeltaMinorAtomic(doc.invoice, doc.amountMinor);
+      const session = typeof doc.$session === "function" ? doc.$session() : null;
+      await applyInvoiceDeltaMinorAtomic(doc.invoice, doc.amountMinor, {
+        session,
+      });
     }
     next();
   } catch (err) {
@@ -219,7 +242,10 @@ paymentSchema.pre(
   { document: true, query: false },
   async function (next) {
     try {
-      await applyInvoiceDeltaMinorAtomic(this.invoice, -this.amountMinor);
+      const session = typeof this.$session === "function" ? this.$session() : null;
+      await applyInvoiceDeltaMinorAtomic(this.invoice, -this.amountMinor, {
+        session,
+      });
       next();
     } catch (err) {
       next(err);
@@ -230,14 +256,17 @@ paymentSchema.pre(
 // Query deletion: Payment.findByIdAndDelete / findOneAndDelete
 paymentSchema.pre("findOneAndDelete", async function (next) {
   try {
-    const doc = await this.model
-      .findOne(this.getQuery())
-      .select("invoice amountMinor")
-      .lean();
+    const session =
+      typeof this.getOptions === "function" ? this.getOptions().session : null;
+    const query = this.model.findOne(this.getQuery()).select("invoice amountMinor");
+    if (session) query.session(session);
+    const doc = await query.lean();
 
     if (!doc) return next();
 
-    await applyInvoiceDeltaMinorAtomic(doc.invoice, -doc.amountMinor);
+    await applyInvoiceDeltaMinorAtomic(doc.invoice, -doc.amountMinor, {
+      session,
+    });
     next();
   } catch (err) {
     next(err);
@@ -249,6 +278,7 @@ paymentSchema.pre("findOneAndDelete", async function (next) {
 ---------------------------------- */
 paymentSchema.index({ invoice: 1, paymentDate: -1 });
 paymentSchema.index({ user: 1, paymentDate: -1 });
+paymentSchema.index({ receipt: 1 });
 
 const Payment = mongoose.models.Payment || mongoose.model("Payment", paymentSchema);
 export default Payment;

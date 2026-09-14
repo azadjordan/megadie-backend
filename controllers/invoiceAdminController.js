@@ -446,7 +446,7 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
     throw new Error("Invalid invoice id.");
   }
 
-  const invoice = await Invoice.findById(id).select("_id status order");
+  const invoice = await Invoice.findById(id).select("_id status order source");
   if (!invoice) {
     res.status(404);
     throw new Error("Invoice not found.");
@@ -455,6 +455,17 @@ export const deleteInvoice = asyncHandler(async (req, res) => {
   if (invoice.status !== "Cancelled") {
     res.status(400);
     throw new Error("Only Cancelled invoices can be deleted.");
+  }
+
+  const hasReceiptPayments = await Payment.exists({
+    invoice: invoice._id,
+    receipt: { $exists: true, $ne: null },
+  });
+  if (hasReceiptPayments) {
+    res.status(409);
+    throw new Error(
+      "Invoices with customer receipt allocations cannot be deleted. Reverse the customer receipt before deleting the invoice."
+    );
   }
 
   const paymentsDeleted = await Payment.countDocuments({ invoice: invoice._id });
