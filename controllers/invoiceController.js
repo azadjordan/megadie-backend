@@ -575,10 +575,6 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     status: "Issued",
   };
 
-  if (!from) {
-    addInvoiceDateRangeFilter(invoiceFilter, null, to);
-  }
-
   const invoices = await Invoice.find(invoiceFilter)
     .select(
       [
@@ -623,7 +619,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
             (!to || invoiceDate.getTime() <= to.getTime()))
         );
       })
-    : statementInvoices;
+    : [];
   const laterInvoices =
     from && to
       ? statementInvoices.filter((invoice) => {
@@ -637,18 +633,31 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const outstandingInvoices = statementInvoices.filter(
     (invoice) => (Number(invoice.balanceMinor) || 0) > 0
   );
-  const tableInvoices = from
-    ? [...previousOutstandingInvoices, ...periodInvoices]
-    : [...periodInvoices];
+  const selectedOutstandingInvoices = periodInvoices.filter(
+    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
+  );
+  const tableInvoices = from ? [...periodInvoices] : [...outstandingInvoices];
+
+  previousOutstandingInvoices.sort(compareStatementInvoicesOldestFirst);
+  periodInvoices.sort(compareStatementInvoicesOldestFirst);
+  laterOutstandingInvoices.sort(compareStatementInvoicesOldestFirst);
+  outstandingInvoices.sort(compareStatementInvoicesOldestFirst);
   tableInvoices.sort(compareStatementInvoicesOldestFirst);
 
   const currency = statementInvoices[0]?.currency || "AED";
   const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
   const overdueReference = new Date();
-  const openingBalanceMinor = from ? sumMinor(previousInvoices, "balanceMinor") : 0;
+  const beforeOutstandingMinor = sumMinor(
+    previousOutstandingInvoices,
+    "balanceMinor"
+  );
+  const selectedPeriodDueMinor = sumMinor(periodInvoices, "balanceMinor");
+  const afterOutstandingMinor = sumMinor(laterOutstandingInvoices, "balanceMinor");
+  const currentTotalDueMinor = sumMinor(outstandingInvoices, "balanceMinor");
+  const openingBalanceMinor = from ? beforeOutstandingMinor : 0;
   const periodInvoicedMinor = sumMinor(periodInvoices, "amountMinor");
   const recordedPaymentsMinor = sumMinor(periodInvoices, "recordedPaidMinor");
-  const closingBalanceMinor = sumMinor(statementInvoices, "balanceMinor");
+  const closingBalanceMinor = currentTotalDueMinor;
   const overdueTotalMinor = outstandingInvoices.reduce((sum, inv) => {
     const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
     if (!Number.isFinite(due) || due >= overdueReference.getTime()) return sum;
@@ -670,17 +679,24 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     tableInvoices,
     summary: {
       openingBalanceMinor,
+      beforeOutstandingMinor,
       periodInvoicedMinor,
+      selectedPeriodDueMinor,
       recordedPaymentsMinor,
+      afterOutstandingMinor,
       closingBalanceMinor,
       totalInvoicedMinor: periodInvoicedMinor,
       totalPaidMinor: recordedPaymentsMinor,
-      totalDueMinor: closingBalanceMinor,
+      totalDueMinor: currentTotalDueMinor,
+      currentTotalDueMinor,
       overdueTotalMinor,
       invoiceCount: periodInvoices.length,
       periodInvoiceCount: periodInvoices.length,
       previousInvoiceCount: previousOutstandingInvoices.length,
       laterInvoiceCount: laterOutstandingInvoices.length,
+      beforeOutstandingCount: previousOutstandingInvoices.length,
+      selectedOutstandingCount: selectedOutstandingInvoices.length,
+      afterOutstandingCount: laterOutstandingInvoices.length,
       outstandingCount: outstandingInvoices.length,
       openCount: outstandingInvoices.length,
       overdueCount,
