@@ -601,15 +601,6 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     : [];
 
   const statementInvoices = buildStatementInvoiceRows(invoices, payments);
-  const previousInvoices = from
-    ? statementInvoices.filter((invoice) => {
-        const invoiceDate = invoice.statementDate;
-        return invoiceDate && invoiceDate.getTime() < from.getTime();
-      })
-    : [];
-  const previousOutstandingInvoices = previousInvoices.filter(
-    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
-  );
   const periodInvoices = from
     ? statementInvoices.filter((invoice) => {
         const invoiceDate = invoice.statementDate;
@@ -620,41 +611,30 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
         );
       })
     : [];
-  const laterInvoices =
-    from && to
-      ? statementInvoices.filter((invoice) => {
-          const invoiceDate = invoice.statementDate;
-          return invoiceDate && invoiceDate.getTime() > to.getTime();
-        })
-      : [];
-  const laterOutstandingInvoices = laterInvoices.filter(
-    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
-  );
   const outstandingInvoices = statementInvoices.filter(
     (invoice) => (Number(invoice.balanceMinor) || 0) > 0
   );
-  const selectedOutstandingInvoices = periodInvoices.filter(
-    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
+  const periodInvoiceIds = new Set(
+    periodInvoices.map((invoice) => String(invoice?._id || "")).filter(Boolean)
   );
+  const otherOutstandingInvoices = from
+    ? outstandingInvoices.filter(
+        (invoice) => !periodInvoiceIds.has(String(invoice?._id || ""))
+      )
+    : [];
   const tableInvoices = from ? [...periodInvoices] : [...outstandingInvoices];
 
-  previousOutstandingInvoices.sort(compareStatementInvoicesOldestFirst);
   periodInvoices.sort(compareStatementInvoicesOldestFirst);
-  laterOutstandingInvoices.sort(compareStatementInvoicesOldestFirst);
+  otherOutstandingInvoices.sort(compareStatementInvoicesOldestFirst);
   outstandingInvoices.sort(compareStatementInvoicesOldestFirst);
   tableInvoices.sort(compareStatementInvoicesOldestFirst);
 
   const currency = statementInvoices[0]?.currency || "AED";
   const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
   const overdueReference = new Date();
-  const beforeOutstandingMinor = sumMinor(
-    previousOutstandingInvoices,
-    "balanceMinor"
-  );
   const selectedPeriodDueMinor = sumMinor(periodInvoices, "balanceMinor");
-  const afterOutstandingMinor = sumMinor(laterOutstandingInvoices, "balanceMinor");
+  const otherOutstandingMinor = sumMinor(otherOutstandingInvoices, "balanceMinor");
   const currentTotalDueMinor = sumMinor(outstandingInvoices, "balanceMinor");
-  const openingBalanceMinor = from ? beforeOutstandingMinor : 0;
   const periodInvoicedMinor = sumMinor(periodInvoices, "amountMinor");
   const recordedPaymentsMinor = sumMinor(periodInvoices, "recordedPaidMinor");
   const closingBalanceMinor = currentTotalDueMinor;
@@ -674,16 +654,13 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     invoices: periodInvoices,
     periodInvoices,
     outstandingInvoices,
-    previousOutstandingInvoices,
-    laterOutstandingInvoices,
+    otherOutstandingInvoices,
     tableInvoices,
     summary: {
-      openingBalanceMinor,
-      beforeOutstandingMinor,
       periodInvoicedMinor,
       selectedPeriodDueMinor,
       recordedPaymentsMinor,
-      afterOutstandingMinor,
+      otherOutstandingMinor,
       closingBalanceMinor,
       totalInvoicedMinor: periodInvoicedMinor,
       totalPaidMinor: recordedPaymentsMinor,
@@ -692,11 +669,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
       overdueTotalMinor,
       invoiceCount: periodInvoices.length,
       periodInvoiceCount: periodInvoices.length,
-      previousInvoiceCount: previousOutstandingInvoices.length,
-      laterInvoiceCount: laterOutstandingInvoices.length,
-      beforeOutstandingCount: previousOutstandingInvoices.length,
-      selectedOutstandingCount: selectedOutstandingInvoices.length,
-      afterOutstandingCount: laterOutstandingInvoices.length,
+      otherOutstandingCount: otherOutstandingInvoices.length,
       outstandingCount: outstandingInvoices.length,
       openCount: outstandingInvoices.length,
       overdueCount,

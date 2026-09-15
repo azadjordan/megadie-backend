@@ -203,8 +203,7 @@ const renderStatementOfAccountHtml = ({
   invoices,
   periodInvoices,
   outstandingInvoices,
-  previousOutstandingInvoices,
-  laterOutstandingInvoices,
+  otherOutstandingInvoices,
   tableInvoices,
   summary,
   generatedAt,
@@ -219,45 +218,20 @@ const renderStatementOfAccountHtml = ({
   const outstandingList = Array.isArray(outstandingInvoices)
     ? outstandingInvoices
     : [];
-  const previousOutstandingList = Array.isArray(previousOutstandingInvoices)
-    ? previousOutstandingInvoices
-    : [];
-  const laterOutstandingList = Array.isArray(laterOutstandingInvoices)
-    ? laterOutstandingInvoices
+  const otherOutstandingList = Array.isArray(otherOutstandingInvoices)
+    ? otherOutstandingInvoices
     : [];
   const tableList = Array.isArray(tableInvoices) ? tableInvoices : periodList;
   const currency = summary?.currency || "AED";
   const factor = summary?.minorUnitFactor || 100;
-  const beforeOutstanding =
-    summary?.beforeOutstandingMinor ?? summary?.openingBalanceMinor ?? 0;
-  const selectedPeriodDue = summary?.selectedPeriodDueMinor ?? 0;
-  const afterOutstanding = summary?.afterOutstandingMinor ?? 0;
   const currentTotalDue =
     summary?.currentTotalDueMinor ??
     summary?.totalDueMinor ??
     summary?.closingBalanceMinor ??
     0;
-  const periodInvoiceCount = Number.isFinite(Number(summary?.periodInvoiceCount))
-    ? Number(summary.periodInvoiceCount)
-    : periodList.length;
   const outstandingCount = Number.isFinite(Number(summary?.outstandingCount))
     ? Number(summary.outstandingCount)
     : outstandingList.length;
-  const beforeOutstandingCount = Number.isFinite(
-    Number(summary?.beforeOutstandingCount)
-  )
-    ? Number(summary.beforeOutstandingCount)
-    : 0;
-  const selectedOutstandingCount = Number.isFinite(
-    Number(summary?.selectedOutstandingCount)
-  )
-    ? Number(summary.selectedOutstandingCount)
-    : 0;
-  const afterOutstandingCount = Number.isFinite(
-    Number(summary?.afterOutstandingCount)
-  )
-    ? Number(summary.afterOutstandingCount)
-    : 0;
   const generatedLabel = formatDateTime(generatedAt || new Date());
   const hasFromDate = Boolean(fromDateLabel);
   const hasCutoffDate = Boolean(cutoffDateLabel);
@@ -269,15 +243,6 @@ const renderStatementOfAccountHtml = ({
       : hasFromDate
       ? `From ${fromDateDisplay}`
       : "";
-  const beforePeriodLabel = hasFromDate
-    ? `Due Before ${fromDateDisplay}`
-    : "Due Before Selected Period";
-  const selectedPeriodDueLabel = hasFromDate
-    ? `Due ${selectedRangeDisplay}`
-    : "Selected Period Due";
-  const afterPeriodLabel = hasCutoffDate
-    ? `Due After ${cutoffDateDisplay}`
-    : "Due After Selected Period";
   const periodLabel = hasFromDate && hasCutoffDate
     ? `Selected period: ${safeText(fromDateDisplay)} to ${safeText(
         cutoffDateDisplay
@@ -292,72 +257,29 @@ const renderStatementOfAccountHtml = ({
     ? "No invoices were issued during the selected period."
     : "No current due invoices.";
   const tableScopeNote = hasFromDate
-    ? "The selected period table includes all invoices in the period. Before and after tables include current outstanding invoices only."
+    ? "The selected period table is shown for context. Other Current Due Invoices includes outstanding invoices outside that selected period."
     : "Rows include issued invoices with a current outstanding balance. Paid invoices are hidden.";
   const dateRangeNote = hasFromDate
-    ? "The selected period controls grouping; it does not hide other current outstanding balances."
+    ? "The selected period is a focus area only; Current Total Due reflects all current outstanding balances."
     : "This statement shows the client's current due invoices.";
   const overdueReferenceDate = summary?.overdueReferenceDate || cutoffDateLabel;
 
-  const summaryHtml = hasFromDate
-    ? `
-        <div class="summary">
-          <div class="summary-card">
-            <div class="summary-label">${safeText(beforePeriodLabel)}</div>
-            <div class="summary-value">${safeText(
-              formatMoney(beforeOutstanding, currency, factor)
-            )}</div>
-            <div class="summary-note">${safeText(
-              beforeOutstandingCount
-            )} outstanding invoice${beforeOutstandingCount === 1 ? "" : "s"}</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-label">${safeText(selectedPeriodDueLabel)}</div>
-            <div class="summary-value">${safeText(
-              formatMoney(selectedPeriodDue, currency, factor)
-            )}</div>
-            <div class="summary-note">${safeText(
-              selectedOutstandingCount
-            )} outstanding of ${safeText(periodInvoiceCount)} period invoice${
-              periodInvoiceCount === 1 ? "" : "s"
-            }</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-label">${safeText(afterPeriodLabel)}</div>
-            <div class="summary-value">${safeText(
-              formatMoney(afterOutstanding, currency, factor)
-            )}</div>
-            <div class="summary-note">${safeText(
-              afterOutstandingCount
-            )} outstanding invoice${afterOutstandingCount === 1 ? "" : "s"}</div>
-          </div>
-          <div class="summary-card summary-card--closing">
-            <div class="summary-label">Current Total Due</div>
-            <div class="summary-value">${safeText(
-              formatMoney(currentTotalDue, currency, factor)
-            )}</div>
-            <div class="summary-note">${safeText(
-              outstandingCount
-            )} outstanding invoice${outstandingCount === 1 ? "" : "s"}</div>
-          </div>
-        </div>
-      `
-    : `
-        <div class="summary summary--simple">
-          <div class="summary-card summary-card--closing">
-            <div class="summary-label">Current Total Due</div>
-            <div class="summary-value">${safeText(
-              formatMoney(currentTotalDue, currency, factor)
-            )}</div>
-            <div class="summary-note">Outstanding balance now</div>
-          </div>
-          <div class="summary-card">
-            <div class="summary-label">Outstanding Invoices</div>
-            <div class="summary-value">${safeText(outstandingCount)}</div>
-            <div class="summary-note">Issued invoices with balance due</div>
-          </div>
-        </div>
-      `;
+  const summaryHtml = `
+    <div class="summary summary--simple">
+      <div class="summary-card summary-card--closing">
+        <div class="summary-label">Current Total Due</div>
+        <div class="summary-value">${safeText(
+          formatMoney(currentTotalDue, currency, factor)
+        )}</div>
+        <div class="summary-note">Outstanding balance now</div>
+      </div>
+      <div class="summary-card">
+        <div class="summary-label">Outstanding Invoices</div>
+        <div class="summary-value">${safeText(outstandingCount)}</div>
+        <div class="summary-note">Issued invoices with balance due</div>
+      </div>
+    </div>
+  `;
 
   const tableSectionsHtml = hasFromDate
     ? [
@@ -370,28 +292,15 @@ const renderStatementOfAccountHtml = ({
           factor,
           overdueReferenceDate,
         }),
-        previousOutstandingList.length
-          ? renderInvoiceTableSection({
-              title: beforePeriodLabel,
-              note: "Current outstanding invoices issued before the selected period.",
-              rows: previousOutstandingList,
-              emptyMessage: "No outstanding invoices before the selected period.",
-              currency,
-              factor,
-              overdueReferenceDate,
-            })
-          : "",
-        laterOutstandingList.length
-          ? renderInvoiceTableSection({
-              title: afterPeriodLabel,
-              note: "Current outstanding invoices issued after the selected period.",
-              rows: laterOutstandingList,
-              emptyMessage: "No outstanding invoices after the selected period.",
-              currency,
-              factor,
-              overdueReferenceDate,
-            })
-          : "",
+        renderInvoiceTableSection({
+          title: "Other Current Due Invoices",
+          note: "Outstanding invoices outside the selected period.",
+          rows: otherOutstandingList,
+          emptyMessage: "No other current due invoices.",
+          currency,
+          factor,
+          overdueReferenceDate,
+        }),
       ].join("")
     : renderInvoiceTableSection({
         title: tableTitle,
