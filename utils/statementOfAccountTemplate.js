@@ -261,15 +261,32 @@ const renderStatementOfAccountHtml = ({
   const generatedLabel = formatDateTime(generatedAt || new Date());
   const hasFromDate = Boolean(fromDateLabel);
   const hasCutoffDate = Boolean(cutoffDateLabel);
+  const fromDateDisplay = hasFromDate ? formatDate(fromDateLabel) : "";
+  const cutoffDateDisplay = hasCutoffDate ? formatDate(cutoffDateLabel) : "";
+  const selectedRangeDisplay =
+    hasFromDate && hasCutoffDate
+      ? `${fromDateDisplay} - ${cutoffDateDisplay}`
+      : hasFromDate
+      ? `From ${fromDateDisplay}`
+      : "";
+  const beforePeriodLabel = hasFromDate
+    ? `Due Before ${fromDateDisplay}`
+    : "Due Before Selected Period";
+  const selectedPeriodDueLabel = hasFromDate
+    ? `Due ${selectedRangeDisplay}`
+    : "Selected Period Due";
+  const afterPeriodLabel = hasCutoffDate
+    ? `Due After ${cutoffDateDisplay}`
+    : "Due After Selected Period";
   const periodLabel = hasFromDate && hasCutoffDate
-    ? `Selected period: ${safeText(formatDate(fromDateLabel))} to ${safeText(
-        formatDate(cutoffDateLabel)
+    ? `Selected period: ${safeText(fromDateDisplay)} to ${safeText(
+        cutoffDateDisplay
       )}`
     : hasFromDate
-    ? `Selected period from ${safeText(formatDate(fromDateLabel))}`
+    ? `Selected period from ${safeText(fromDateDisplay)}`
     : `Current position as of ${safeText(formatDate(generatedAt || new Date()))}`;
   const tableTitle = hasFromDate
-    ? "Selected Period Invoices"
+    ? `Invoices ${selectedRangeDisplay}`
     : "Current Due Invoices";
   const tableEmptyMessage = hasFromDate
     ? "No invoices were issued during the selected period."
@@ -286,7 +303,7 @@ const renderStatementOfAccountHtml = ({
     ? `
         <div class="summary">
           <div class="summary-card">
-            <div class="summary-label">Before Selected Period</div>
+            <div class="summary-label">${safeText(beforePeriodLabel)}</div>
             <div class="summary-value">${safeText(
               formatMoney(beforeOutstanding, currency, factor)
             )}</div>
@@ -295,7 +312,7 @@ const renderStatementOfAccountHtml = ({
             )} outstanding invoice${beforeOutstandingCount === 1 ? "" : "s"}</div>
           </div>
           <div class="summary-card">
-            <div class="summary-label">Selected Period Due</div>
+            <div class="summary-label">${safeText(selectedPeriodDueLabel)}</div>
             <div class="summary-value">${safeText(
               formatMoney(selectedPeriodDue, currency, factor)
             )}</div>
@@ -306,7 +323,7 @@ const renderStatementOfAccountHtml = ({
             }</div>
           </div>
           <div class="summary-card">
-            <div class="summary-label">After Selected Period</div>
+            <div class="summary-label">${safeText(afterPeriodLabel)}</div>
             <div class="summary-value">${safeText(
               formatMoney(afterOutstanding, currency, factor)
             )}</div>
@@ -355,7 +372,7 @@ const renderStatementOfAccountHtml = ({
         }),
         previousOutstandingList.length
           ? renderInvoiceTableSection({
-              title: "Before Selected Period",
+              title: beforePeriodLabel,
               note: "Current outstanding invoices issued before the selected period.",
               rows: previousOutstandingList,
               emptyMessage: "No outstanding invoices before the selected period.",
@@ -366,7 +383,7 @@ const renderStatementOfAccountHtml = ({
           : "",
         laterOutstandingList.length
           ? renderInvoiceTableSection({
-              title: "After Selected Period",
+              title: afterPeriodLabel,
               note: "Current outstanding invoices issued after the selected period.",
               rows: laterOutstandingList,
               emptyMessage: "No outstanding invoices after the selected period.",
