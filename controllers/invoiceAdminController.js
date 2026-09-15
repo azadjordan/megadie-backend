@@ -78,6 +78,7 @@ function escapeRegex(text = "") {
 const SORT_MAP = {
   newest: { invoiceDate: -1, createdAt: -1 },
   oldest: { invoiceDate: 1, createdAt: 1 },
+  dueOldest: { dueDate: 1, invoiceDate: 1, createdAt: 1, _id: 1 },
   createdNewest: { createdAt: -1, _id: -1 },
   createdOldest: { createdAt: 1, _id: 1 },
   amountHigh: { amountMinor: -1, invoiceDate: -1, createdAt: -1 },
@@ -192,8 +193,8 @@ export const getInvoicesSummary = asyncHandler(async (req, res) => {
  * - user=<userId>  (filter by client)
  * - from=YYYY-MM-DD, to=YYYY-MM-DD (invoiceDate range)
  * - search=<string> (invoiceNumber/orderNumber, case-insensitive)
- * - sort=newest|oldest|createdNewest|createdOldest|amountHigh|amountLow
- *   (newest/oldest use invoiceDate; createdNewest/createdOldest use createdAt)
+ * - sort=newest|oldest|dueOldest|createdNewest|createdOldest|amountHigh|amountLow
+ *   (newest/oldest use invoiceDate; dueOldest mirrors receipt allocation order)
  * - q=<string> (legacy alias for search)
  */
 export const getInvoices = asyncHandler(async (req, res) => {
