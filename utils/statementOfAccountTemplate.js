@@ -138,6 +138,55 @@ const renderInvoiceRows = ({
     .join("");
 };
 
+const renderInvoiceTableSection = ({
+  title,
+  note,
+  rows,
+  emptyMessage,
+  currency,
+  factor,
+  overdueReferenceDate,
+}) => `
+  <section class="section">
+    <div class="section-head">
+      <div class="section-title">${safeText(title)}</div>
+      <div class="section-rule"></div>
+    </div>
+    ${note ? `<div class="section-note">${safeText(note)}</div>` : ""}
+    <table>
+      <colgroup>
+        <col style="width:18%" />
+        <col style="width:13%" />
+        <col style="width:13%" />
+        <col style="width:14%" />
+        <col style="width:15%" />
+        <col style="width:14%" />
+        <col style="width:13%" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Invoice #</th>
+          <th>Invoice Date</th>
+          <th>Due Date</th>
+          <th style="text-align:right;">Amount</th>
+          <th style="text-align:right;">Recorded Paid</th>
+          <th style="text-align:right;">Balance</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${renderInvoiceRows({
+          rows,
+          emptyMessage,
+          currency,
+          factor,
+          overdueReferenceDate,
+        })}
+      </tbody>
+    </table>
+  </section>
+`;
+
 const footerYear = new Date().getFullYear();
 
 const statementOfAccountFooterTemplate = `
@@ -154,6 +203,8 @@ const renderStatementOfAccountHtml = ({
   invoices,
   periodInvoices,
   outstandingInvoices,
+  previousOutstandingInvoices,
+  laterOutstandingInvoices,
   tableInvoices,
   summary,
   generatedAt,
@@ -167,6 +218,12 @@ const renderStatementOfAccountHtml = ({
     : [];
   const outstandingList = Array.isArray(outstandingInvoices)
     ? outstandingInvoices
+    : [];
+  const previousOutstandingList = Array.isArray(previousOutstandingInvoices)
+    ? previousOutstandingInvoices
+    : [];
+  const laterOutstandingList = Array.isArray(laterOutstandingInvoices)
+    ? laterOutstandingInvoices
     : [];
   const tableList = Array.isArray(tableInvoices) ? tableInvoices : periodList;
   const currency = summary?.currency || "AED";
@@ -204,39 +261,75 @@ const renderStatementOfAccountHtml = ({
     ? `All invoices up to ${safeText(formatDate(cutoffDateLabel))}`
     : "All invoices";
   const tableTitle = hasFromDate
-    ? "Statement Invoices"
+    ? "Selected Period Invoices"
     : hasCutoffDate
     ? `Invoices Issued Up To ${safeText(formatDate(cutoffDateLabel))}`
     : "Invoices Issued";
   const tableEmptyMessage = hasFromDate
-    ? "No period invoices or opening balances in this statement."
+    ? "No invoices were issued during the selected period."
     : "No issued invoices match this statement.";
   const tableScopeNote = hasFromDate
-    ? "Rows include invoices issued during the selected period plus earlier invoices with remaining balance."
+    ? "Rows are grouped by the selected period first, followed by outstanding invoices before or after the period."
     : hasCutoffDate
     ? `Rows include issued invoices up to ${formatDate(cutoffDateLabel)}.`
     : "Rows include all issued invoices.";
   const dateRangeNote = hasFromDate
-    ? "The From date controls period totals; earlier unpaid invoices are carried forward to explain the opening balance."
+    ? "The selected period controls grouping; outstanding invoices outside the period are included when they affect the current balance."
     : hasCutoffDate
     ? "The cutoff date controls the invoices included in this statement."
     : "This statement includes all issued invoices.";
   const overdueReferenceDate = summary?.overdueReferenceDate || cutoffDateLabel;
 
-  const tableRowsHtml = renderInvoiceRows({
-    rows: tableList,
-    emptyMessage: tableEmptyMessage,
-    currency,
-    factor,
-    overdueReferenceDate,
-  });
+  const tableSectionsHtml = hasFromDate
+    ? [
+        renderInvoiceTableSection({
+          title: tableTitle,
+          note: "Invoices issued inside the selected statement period.",
+          rows: periodList,
+          emptyMessage: tableEmptyMessage,
+          currency,
+          factor,
+          overdueReferenceDate,
+        }),
+        previousOutstandingList.length
+          ? renderInvoiceTableSection({
+              title: "Previous Outstanding Invoices",
+              note: "Unpaid or partially paid invoices issued before the selected period.",
+              rows: previousOutstandingList,
+              emptyMessage: "No previous outstanding invoices.",
+              currency,
+              factor,
+              overdueReferenceDate,
+            })
+          : "",
+        laterOutstandingList.length
+          ? renderInvoiceTableSection({
+              title: "Later Outstanding Invoices",
+              note: "Unpaid or partially paid invoices issued after the selected period.",
+              rows: laterOutstandingList,
+              emptyMessage: "No later outstanding invoices.",
+              currency,
+              factor,
+              overdueReferenceDate,
+            })
+          : "",
+      ].join("")
+    : renderInvoiceTableSection({
+        title: tableTitle,
+        note: "",
+        rows: tableList,
+        emptyMessage: tableEmptyMessage,
+        currency,
+        factor,
+        overdueReferenceDate,
+      });
 
   return `
     <!doctype html>
     <html lang="en">
       <head>
         <meta charset="utf-8" />
-        <title>Statement of Account</title>
+        <title>Current Statement of Account</title>
         <style>
           :root {
             --violet: #4B0082;
@@ -329,6 +422,11 @@ const renderStatementOfAccountHtml = ({
             flex: 1;
             border-bottom: 1px solid var(--border);
           }
+          .section-note {
+            margin-top: -2px;
+            color: var(--muted);
+            font-size: 11px;
+          }
           .client-grid {
             display: grid;
             grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -409,7 +507,7 @@ const renderStatementOfAccountHtml = ({
             <div class="brand-sub">Megadie.com</div>
           </div>
           <div class="title-block">
-            <div class="doc-title">Statement of Account</div>
+            <div class="doc-title">Current Statement of Account</div>
             <div class="meta">Generated ${safeText(generatedLabel)}</div>
             <div class="meta">Period: ${periodLabel}</div>
           </div>
@@ -476,37 +574,7 @@ const renderStatementOfAccountHtml = ({
           </div>
         </section>
 
-        <section class="section">
-          <div class="section-head">
-            <div class="section-title">${tableTitle}</div>
-            <div class="section-rule"></div>
-          </div>
-          <table>
-            <colgroup>
-              <col style="width:18%" />
-              <col style="width:13%" />
-              <col style="width:13%" />
-              <col style="width:14%" />
-              <col style="width:15%" />
-              <col style="width:14%" />
-              <col style="width:13%" />
-            </colgroup>
-            <thead>
-              <tr>
-                <th>Invoice #</th>
-                <th>Invoice Date</th>
-                <th>Due Date</th>
-                <th style="text-align:right;">Amount</th>
-                <th style="text-align:right;">Recorded Paid</th>
-                <th style="text-align:right;">Balance</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              ${tableRowsHtml}
-            </tbody>
-          </table>
-        </section>
+        ${tableSectionsHtml}
 
         <div class="note">
           ${safeText(tableScopeNote)}

@@ -575,7 +575,9 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     status: "Issued",
   };
 
-  addInvoiceDateRangeFilter(invoiceFilter, null, to);
+  if (!from) {
+    addInvoiceDateRangeFilter(invoiceFilter, null, to);
+  }
 
   const invoices = await Invoice.find(invoiceFilter)
     .select(
@@ -615,9 +617,23 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const periodInvoices = from
     ? statementInvoices.filter((invoice) => {
         const invoiceDate = invoice.statementDate;
-        return !invoiceDate || invoiceDate.getTime() >= from.getTime();
+        return (
+          !invoiceDate ||
+          (invoiceDate.getTime() >= from.getTime() &&
+            (!to || invoiceDate.getTime() <= to.getTime()))
+        );
       })
     : statementInvoices;
+  const laterInvoices =
+    from && to
+      ? statementInvoices.filter((invoice) => {
+          const invoiceDate = invoice.statementDate;
+          return invoiceDate && invoiceDate.getTime() > to.getTime();
+        })
+      : [];
+  const laterOutstandingInvoices = laterInvoices.filter(
+    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
+  );
   const outstandingInvoices = statementInvoices.filter(
     (invoice) => (Number(invoice.balanceMinor) || 0) > 0
   );
@@ -628,7 +644,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
 
   const currency = statementInvoices[0]?.currency || "AED";
   const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
-  const overdueReference = to || new Date();
+  const overdueReference = new Date();
   const openingBalanceMinor = from ? sumMinor(previousInvoices, "balanceMinor") : 0;
   const periodInvoicedMinor = sumMinor(periodInvoices, "amountMinor");
   const recordedPaymentsMinor = sumMinor(periodInvoices, "recordedPaidMinor");
@@ -649,6 +665,8 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     invoices: periodInvoices,
     periodInvoices,
     outstandingInvoices,
+    previousOutstandingInvoices,
+    laterOutstandingInvoices,
     tableInvoices,
     summary: {
       openingBalanceMinor,
@@ -662,6 +680,7 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
       invoiceCount: periodInvoices.length,
       periodInvoiceCount: periodInvoices.length,
       previousInvoiceCount: previousOutstandingInvoices.length,
+      laterInvoiceCount: laterOutstandingInvoices.length,
       outstandingCount: outstandingInvoices.length,
       openCount: outstandingInvoices.length,
       overdueCount,
