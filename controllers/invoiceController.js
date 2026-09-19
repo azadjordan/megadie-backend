@@ -3,6 +3,7 @@ import mongoose from "mongoose";
 import { chromium } from "playwright";
 import Invoice from "../models/invoiceModel.js";
 import Payment from "../models/paymentModel.js";
+import CustomerPaymentReceipt from "../models/customerPaymentReceiptModel.js";
 import User from "../models/userModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
 import {
@@ -13,6 +14,11 @@ import {
   renderStatementOfAccountHtml,
   statementOfAccountFooterTemplate,
 } from "../utils/statementOfAccountTemplate.js";
+import {
+  outstandingBalanceFooterTemplate,
+  renderOutstandingBalanceHtml,
+} from "../utils/outstandingBalanceTemplate.js";
+import { buildStatementOfAccountLedger } from "../utils/statementOfAccountLedger.js";
 
 /* -----------------------
    Small helpers
@@ -41,6 +47,37 @@ function parseBoundedDate(v, bound) {
   return d;
 }
 
+function parseDubaiStatementDate(v, bound) {
+  if (!v) return null;
+
+  const raw = String(v).trim();
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(raw);
+  if (!match) return parseBoundedDate(v, bound);
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const check = new Date(Date.UTC(year, month - 1, day));
+  if (
+    check.getUTCFullYear() !== year ||
+    check.getUTCMonth() !== month - 1 ||
+    check.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  const hours = bound === "end" ? 23 : 0;
+  const minutes = bound === "end" ? 59 : 0;
+  const seconds = bound === "end" ? 59 : 0;
+  const milliseconds = bound === "end" ? 999 : 0;
+  const dubaiOffsetMs = 4 * 60 * 60 * 1000;
+
+  return new Date(
+    Date.UTC(year, month - 1, day, hours, minutes, seconds, milliseconds) -
+      dubaiOffsetMs
+  );
+}
+
 function buildDateRange(from, to) {
   const range = {};
   if (from) range.$gte = from;
@@ -64,76 +101,6 @@ function addInvoiceDateRangeFilter(filter, from, to) {
         createdAt: buildDateRange(from, to),
       },
     ],
-  });
-}
-
-function resolveInvoiceDate(invoice) {
-  const value = invoice?.invoiceDate || invoice?.createdAt;
-  if (!value) return null;
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? null : date;
-}
-
-function sumMinor(rows, key) {
-  return rows.reduce((sum, row) => sum + (Number(row?.[key]) || 0), 0);
-}
-
-function sortTime(value) {
-  if (!value) return Number.MAX_SAFE_INTEGER;
-  const date = value instanceof Date ? value : new Date(value);
-  const time = date.getTime();
-  return Number.isFinite(time) ? time : Number.MAX_SAFE_INTEGER;
-}
-
-function compareStatementInvoicesOldestFirst(a, b) {
-  const dateDiff =
-    sortTime(a?.statementDate || a?.invoiceDate || a?.createdAt) -
-    sortTime(b?.statementDate || b?.invoiceDate || b?.createdAt);
-  if (dateDiff !== 0) return dateDiff;
-
-  const createdDiff = sortTime(a?.createdAt) - sortTime(b?.createdAt);
-  if (createdDiff !== 0) return createdDiff;
-
-  return String(a?._id || "").localeCompare(String(b?._id || ""));
-}
-
-function buildStatementInvoiceRows(invoices, payments) {
-  const paidByInvoice = new Map();
-  for (const payment of payments || []) {
-    const invoiceId = String(payment?.invoice || "");
-    if (!invoiceId) continue;
-    paidByInvoice.set(
-      invoiceId,
-      (paidByInvoice.get(invoiceId) || 0) + (Number(payment?.amountMinor) || 0)
-    );
-  }
-
-  return (invoices || []).map((invoice) => {
-    const amountMinor = Math.max(0, Number(invoice?.amountMinor) || 0);
-    const rawRecordedPaidMinor = Math.max(
-      0,
-      paidByInvoice.get(String(invoice?._id)) || 0
-    );
-    const recordedPaidMinor = Math.min(amountMinor, rawRecordedPaidMinor);
-    const balanceMinor = Math.max(0, amountMinor - recordedPaidMinor);
-    const statementStatus =
-      balanceMinor <= 0
-        ? "Paid"
-        : recordedPaidMinor > 0
-        ? "Partially paid"
-        : "Unpaid";
-
-    return {
-      ...invoice,
-      amountMinor,
-      rawRecordedPaidMinor,
-      recordedPaidMinor,
-      paidTotalMinor: recordedPaidMinor,
-      balanceMinor,
-      balanceDueMinor: balanceMinor,
-      statementStatus,
-      statementDate: resolveInvoiceDate(invoice),
-    };
   });
 }
 
@@ -541,8 +508,8 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
  */
 export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
   const { userId } = req.params;
-  const from = parseBoundedDate(req.query.from, "start");
-  const to = parseBoundedDate(req.query.to, "end");
+  const from = parseDubaiStatementDate(req.query.from, "start");
+  const to = parseDubaiStatementDate(req.query.to, "end");
 
   if (!mongoose.Types.ObjectId.isValid(userId)) {
     res.status(400);
@@ -593,93 +560,54 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
     .sort({ invoiceDate: 1, createdAt: 1 })
     .lean();
 
-  const invoiceIds = invoices.map((invoice) => invoice._id).filter(Boolean);
-  const payments = invoiceIds.length
-    ? await Payment.find({ invoice: { $in: invoiceIds } })
-        .select("invoice amountMinor")
-        .lean()
-    : [];
-
-  const statementInvoices = buildStatementInvoiceRows(invoices, payments);
-  const periodInvoices = from
-    ? statementInvoices.filter((invoice) => {
-        const invoiceDate = invoice.statementDate;
-        return (
-          !invoiceDate ||
-          (invoiceDate.getTime() >= from.getTime() &&
-            (!to || invoiceDate.getTime() <= to.getTime()))
-        );
-      })
-    : [];
-  const outstandingInvoices = statementInvoices.filter(
-    (invoice) => (Number(invoice.balanceMinor) || 0) > 0
-  );
-  const periodInvoiceIds = new Set(
-    periodInvoices.map((invoice) => String(invoice?._id || "")).filter(Boolean)
-  );
-  const otherOutstandingInvoices = from
-    ? outstandingInvoices.filter(
-        (invoice) => !periodInvoiceIds.has(String(invoice?._id || ""))
+  const [payments, receipts] = await Promise.all([
+    Payment.find({ user: userId })
+      .select(
+        [
+          "invoice",
+          "receipt",
+          "amountMinor",
+          "paymentMethod",
+          "paymentDate",
+          "note",
+          "reference",
+          "receivedBy",
+          "createdAt",
+        ].join(" ")
       )
-    : [];
-  const tableInvoices = from ? [...periodInvoices] : [...outstandingInvoices];
+      .lean(),
+    CustomerPaymentReceipt.find({ user: userId })
+      .select(
+        [
+          "amountMinor",
+          "allocatedTotalMinor",
+          "currency",
+          "minorUnitFactor",
+          "paymentMethod",
+          "paymentDate",
+          "receivedBy",
+          "reference",
+          "note",
+          "allocations",
+          "createdAt",
+        ].join(" ")
+      )
+      .lean(),
+  ]);
 
-  periodInvoices.sort(compareStatementInvoicesOldestFirst);
-  otherOutstandingInvoices.sort(compareStatementInvoicesOldestFirst);
-  outstandingInvoices.sort(compareStatementInvoicesOldestFirst);
-  tableInvoices.sort(compareStatementInvoicesOldestFirst);
-
-  const currency = statementInvoices[0]?.currency || "AED";
-  const minorUnitFactor = statementInvoices[0]?.minorUnitFactor || 100;
-  const overdueReference = new Date();
-  const selectedPeriodDueMinor = sumMinor(periodInvoices, "balanceMinor");
-  const otherOutstandingMinor = sumMinor(otherOutstandingInvoices, "balanceMinor");
-  const currentTotalDueMinor = sumMinor(outstandingInvoices, "balanceMinor");
-  const periodInvoicedMinor = sumMinor(periodInvoices, "amountMinor");
-  const recordedPaymentsMinor = sumMinor(periodInvoices, "recordedPaidMinor");
-  const closingBalanceMinor = currentTotalDueMinor;
-  const overdueTotalMinor = outstandingInvoices.reduce((sum, inv) => {
-    const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
-    if (!Number.isFinite(due) || due >= overdueReference.getTime()) return sum;
-    return sum + (Number(inv.balanceMinor) || 0);
-  }, 0);
-  const overdueCount = outstandingInvoices.reduce((sum, inv) => {
-    const due = inv?.dueDate ? Date.parse(inv.dueDate) : NaN;
-    if (!Number.isFinite(due) || due >= overdueReference.getTime()) return sum;
-    return sum + 1;
-  }, 0);
+  const generatedAt = new Date();
+  const statement = buildStatementOfAccountLedger({
+    invoices,
+    payments,
+    receipts,
+    fromDate: from,
+    cutoffDate: to,
+    generatedAt,
+  });
 
   const html = renderStatementOfAccountHtml({
     client,
-    invoices: periodInvoices,
-    periodInvoices,
-    outstandingInvoices,
-    otherOutstandingInvoices,
-    tableInvoices,
-    summary: {
-      periodInvoicedMinor,
-      selectedPeriodDueMinor,
-      recordedPaymentsMinor,
-      otherOutstandingMinor,
-      closingBalanceMinor,
-      totalInvoicedMinor: periodInvoicedMinor,
-      totalPaidMinor: recordedPaymentsMinor,
-      totalDueMinor: currentTotalDueMinor,
-      currentTotalDueMinor,
-      overdueTotalMinor,
-      invoiceCount: periodInvoices.length,
-      periodInvoiceCount: periodInvoices.length,
-      otherOutstandingCount: otherOutstandingInvoices.length,
-      outstandingCount: outstandingInvoices.length,
-      openCount: outstandingInvoices.length,
-      overdueCount,
-      overdueReferenceDate: overdueReference.toISOString(),
-      currency,
-      minorUnitFactor,
-    },
-    generatedAt: new Date(),
-    fromDateLabel: req.query.from ? String(req.query.from).slice(0, 10) : "",
-    cutoffDateLabel: req.query.to ? String(req.query.to).slice(0, 10) : "",
+    statement,
   });
 
   const safeName = String(client.name || "client")
@@ -709,6 +637,105 @@ export const getStatementOfAccountPDF = asyncHandler(async (req, res) => {
       displayHeaderFooter: true,
       headerTemplate: "<div></div>",
       footerTemplate: statementOfAccountFooterTemplate,
+      margin: { top: "18mm", bottom: "22mm", left: "16mm", right: "16mm" },
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `inline; filename=${fileName}`);
+    res.end(pdfBuffer);
+  } finally {
+    if (browser) {
+      await browser.close();
+    }
+  }
+});
+
+/**
+ * @desc    Get Outstanding Balance Statement PDF for a user (admin only)
+ * @route   GET /api/invoices/outstanding-balance/:userId
+ * @access  Private/Admin
+ */
+export const getOutstandingBalancePDF = asyncHandler(async (req, res) => {
+  const { userId } = req.params;
+
+  if (!mongoose.Types.ObjectId.isValid(userId)) {
+    res.status(400);
+    throw new Error("Invalid user id.");
+  }
+
+  const client = await User.findById(userId)
+    .select("name email phoneNumber address")
+    .lean();
+  if (!client) {
+    res.status(404);
+    throw new Error("User not found.");
+  }
+
+  const invoices = await Invoice.find({
+    user: userId,
+    status: "Issued",
+    paymentStatus: { $ne: "Paid" },
+    balanceDueMinor: { $gt: 0 },
+  })
+    .select(
+      [
+        "invoiceNumber",
+        "amountMinor",
+        "paidTotalMinor",
+        "balanceDueMinor",
+        "paymentStatus",
+        "invoiceDate",
+        "dueDate",
+        "createdAt",
+        "currency",
+        "minorUnitFactor",
+      ].join(" ")
+    )
+    .sort({ dueDate: 1, invoiceDate: 1, createdAt: 1, _id: 1 })
+    .lean();
+
+  const currency = invoices[0]?.currency || "AED";
+  const minorUnitFactor = invoices[0]?.minorUnitFactor || 100;
+  const totalDueMinor = invoices.reduce(
+    (sum, invoice) => sum + (Number(invoice?.balanceDueMinor) || 0),
+    0
+  );
+  const generatedAt = new Date();
+
+  const html = renderOutstandingBalanceHtml({
+    client,
+    invoices,
+    summary: {
+      totalDueMinor,
+      invoiceCount: invoices.length,
+      currency,
+      minorUnitFactor,
+    },
+    generatedAt,
+  });
+
+  const safeName = String(client.name || "client")
+    .trim()
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const dateTag = generatedAt.toISOString().slice(0, 10);
+  const fileName = `outstanding-balance-${safeName || client._id}-${dateTag}.pdf`;
+
+  let browser;
+  try {
+    browser = await chromium.launch({
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+    });
+    const page = await browser.newPage();
+    await page.setContent(html, { waitUntil: "load" });
+    await applyPdfMedia(page);
+    const pdfBuffer = await page.pdf({
+      format: "A4",
+      printBackground: true,
+      displayHeaderFooter: true,
+      headerTemplate: "<div></div>",
+      footerTemplate: outstandingBalanceFooterTemplate,
       margin: { top: "18mm", bottom: "22mm", left: "16mm", right: "16mm" },
     });
 

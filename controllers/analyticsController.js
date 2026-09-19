@@ -13,6 +13,26 @@ const DEFAULT_CURRENCY = "AED";
 const DEFAULT_MINOR_UNIT_FACTOR = 100;
 const DEFAULT_RANKING_LIMIT = 10;
 const MAX_RANKING_LIMIT = 50;
+const CHARITY_RULES = [
+  {
+    key: "grosgrainRibbon",
+    label: "Grosgrain Ribbon",
+    rateMinor: 100,
+    description: "AED 1.00 per delivered piece",
+  },
+  {
+    key: "otherRibbon",
+    label: "Other Ribbon",
+    rateMinor: 50,
+    description: "AED 0.50 per delivered piece",
+  },
+  {
+    key: "creasingMatrix",
+    label: "Creasing Matrix",
+    rateMinor: 100,
+    description: "AED 1.00 per delivered piece",
+  },
+];
 
 function roundMajor(value) {
   const n = Number(value) || 0;
@@ -420,6 +440,159 @@ async function aggregateSkuPerformance(start, endExclusive, customerId, limit) {
       currency: DEFAULT_CURRENCY,
     };
   });
+}
+
+async function aggregateCharityImpact(start, endExclusive, customerId = null) {
+  const rows = await Order.aggregate([
+    {
+      $match: {
+        status: "Delivered",
+        ...customerFilter(customerId),
+        ...dateMatch("deliveredAt", start, endExclusive),
+      },
+    },
+    { $unwind: "$orderItems" },
+    {
+      $lookup: {
+        from: "products",
+        localField: "orderItems.product",
+        foreignField: "_id",
+        as: "product",
+      },
+    },
+    { $unwind: "$product" },
+    {
+      $lookup: {
+        from: "categories",
+        localField: "product.category",
+        foreignField: "_id",
+        as: "category",
+      },
+    },
+    {
+      $unwind: {
+        path: "$category",
+        preserveNullAndEmptyArrays: true,
+      },
+    },
+    {
+      $addFields: {
+        charityGroup: {
+          $switch: {
+            branches: [
+              {
+                case: {
+                  $and: [
+                    { $eq: ["$product.productType", "Ribbon"] },
+                    { $eq: ["$category.key", "grosgrain"] },
+                  ],
+                },
+                then: "grosgrainRibbon",
+              },
+              {
+                case: { $eq: ["$product.productType", "Ribbon"] },
+                then: "otherRibbon",
+              },
+              {
+                case: { $eq: ["$product.productType", "Creasing Matrix"] },
+                then: "creasingMatrix",
+              },
+            ],
+            default: null,
+          },
+        },
+        charityRateMinor: {
+          $switch: {
+            branches: [
+              {
+                case: {
+                  $and: [
+                    { $eq: ["$product.productType", "Ribbon"] },
+                    { $eq: ["$category.key", "grosgrain"] },
+                  ],
+                },
+                then: 100,
+              },
+              {
+                case: { $eq: ["$product.productType", "Ribbon"] },
+                then: 50,
+              },
+              {
+                case: { $eq: ["$product.productType", "Creasing Matrix"] },
+                then: 100,
+              },
+            ],
+            default: 0,
+          },
+        },
+      },
+    },
+    {
+      $match: {
+        charityGroup: { $ne: null },
+        charityRateMinor: { $gt: 0 },
+      },
+    },
+    {
+      $group: {
+        _id: "$charityGroup",
+        unitsSold: { $sum: "$orderItems.qty" },
+        donationMinor: {
+          $sum: {
+            $multiply: ["$orderItems.qty", "$charityRateMinor"],
+          },
+        },
+        orderIds: { $addToSet: "$_id" },
+        productIds: { $addToSet: "$orderItems.product" },
+      },
+    },
+  ]);
+
+  const rowsByKey = new Map(rows.map((row) => [row._id, row]));
+  const orderIds = new Set();
+  let totalEligibleUnits = 0;
+  let totalDonationMinor = 0;
+
+  const breakdown = CHARITY_RULES.map((rule) => {
+    const row = rowsByKey.get(rule.key) || {};
+    const unitsSold = Number(row.unitsSold || 0);
+    const donationMinor = Number(row.donationMinor || 0);
+    const rowOrderIds = Array.isArray(row.orderIds) ? row.orderIds : [];
+
+    for (const orderId of rowOrderIds) {
+      orderIds.add(String(orderId));
+    }
+    totalEligibleUnits += unitsSold;
+    totalDonationMinor += donationMinor;
+
+    return {
+      key: rule.key,
+      label: rule.label,
+      rateMinor: rule.rateMinor,
+      description: rule.description,
+      unitsSold,
+      donationMinor,
+      orderCount: rowOrderIds.length,
+      productCount: Array.isArray(row.productIds) ? row.productIds.length : 0,
+      currency: DEFAULT_CURRENCY,
+      minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
+    };
+  });
+
+  return {
+    totalDonationMinor,
+    totalEligibleUnits,
+    deliveredOrderCount: orderIds.size,
+    currency: DEFAULT_CURRENCY,
+    minorUnitFactor: DEFAULT_MINOR_UNIT_FACTOR,
+    breakdown,
+    rules: CHARITY_RULES.map((rule) => ({
+      key: rule.key,
+      label: rule.label,
+      rateMinor: rule.rateMinor,
+      description: rule.description,
+    })),
+  };
 }
 
 async function aggregateCustomerBooked(start, endExclusive, customerId = null) {
@@ -836,6 +1009,53 @@ export const getAnalyticsSkus = asyncHandler(async (req, res) => {
       currency: DEFAULT_CURRENCY,
       limit,
       skus,
+    },
+  });
+});
+
+export const getAnalyticsCharity = asyncHandler(async (req, res) => {
+  let range;
+  let customerId;
+  try {
+    range = buildAnalyticsDateRange(req.query);
+    customerId = parseCustomerId(req.query.customerId);
+  } catch (err) {
+    res.status(400);
+    throw err;
+  }
+
+  const [selectedCustomer, charity] = await Promise.all([
+    customerId
+      ? User.findById(customerId).select("name email").lean()
+      : Promise.resolve(null),
+    aggregateCharityImpact(range.start, range.endExclusive, customerId),
+  ]);
+
+  if (customerId && !selectedCustomer) {
+    res.status(404);
+    throw new Error("Customer not found.");
+  }
+
+  res.status(200).json({
+    success: true,
+    message: "Analytics charity impact retrieved successfully.",
+    data: {
+      range: {
+        from: range.from,
+        to: range.to,
+        timezone: range.timezone,
+        boundary: range.boundary,
+      },
+      scope: {
+        customer: selectedCustomer
+          ? {
+              _id: String(selectedCustomer._id),
+              name: selectedCustomer.name,
+              email: selectedCustomer.email,
+            }
+          : null,
+      },
+      charity,
     },
   });
 });

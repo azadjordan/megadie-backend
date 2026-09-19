@@ -12,6 +12,8 @@ const safeText = (value, fallback = "--") => {
   return escapeHtml(String(value));
 };
 
+const STATEMENT_TIME_ZONE = "Asia/Dubai";
+
 const formatDate = (value) => {
   if (!value) return "--";
   try {
@@ -19,6 +21,7 @@ const formatDate = (value) => {
       year: "numeric",
       month: "short",
       day: "2-digit",
+      timeZone: STATEMENT_TIME_ZONE,
     });
   } catch {
     return safeText(value);
@@ -35,6 +38,7 @@ const formatDateTime = (value) => {
       hour: "2-digit",
       minute: "2-digit",
       hour12: false,
+      timeZone: STATEMENT_TIME_ZONE,
     });
   } catch {
     return safeText(value);
@@ -50,6 +54,7 @@ const formatMoney = (amountMinor, currency = "AED", factor = 100) => {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency,
+      minimumFractionDigits: 2,
       maximumFractionDigits: 2,
     }).format(major);
   } catch {
@@ -57,110 +62,178 @@ const formatMoney = (amountMinor, currency = "AED", factor = 100) => {
   }
 };
 
-const getBalanceMinor = (invoice) =>
-  Number(invoice?.balanceMinor ?? invoice?.balanceDueMinor ?? 0) || 0;
-
-const getRecordedPaidMinor = (invoice) =>
-  Number(invoice?.recordedPaidMinor ?? invoice?.paidTotalMinor ?? 0) || 0;
-
-const isOverdue = (invoice, referenceDate) => {
-  const balance = getBalanceMinor(invoice);
-  if (balance <= 0 || !invoice?.dueDate) return false;
-  const due = Date.parse(invoice.dueDate);
-  const reference = referenceDate ? Date.parse(referenceDate) : Date.now();
-  if (!Number.isFinite(due) || !Number.isFinite(reference)) return false;
-  return due < reference;
+const moneyOrBlank = (amountMinor, currency, factor) => {
+  const amount = Number(amountMinor) || 0;
+  return amount > 0 ? formatMoney(amount, currency, factor) : "";
 };
 
-const formatStatus = (invoice, overdue) => {
-  const balance = getBalanceMinor(invoice);
-  const recordedPaid = getRecordedPaidMinor(invoice);
-  if (balance <= 0) return "Paid";
-  if (overdue && recordedPaid > 0) return "Overdue (Partial)";
-  if (overdue) return "Overdue";
-  if (recordedPaid > 0) return "Partially paid";
-  return "Unpaid";
+const formatCount = (value) => {
+  const count = Number(value) || 0;
+  return new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 }).format(count);
 };
 
-const statusClassFor = (invoice, overdue) => {
-  const balance = getBalanceMinor(invoice);
-  const recordedPaid = getRecordedPaidMinor(invoice);
-  if (balance <= 0) return "status status--paid";
-  if (overdue) return "status status--overdue";
-  if (recordedPaid > 0) return "status status--partial";
-  return "status status--unpaid";
+const renderSummaryCard = ({ label, value, note, featured = false }) => `
+  <div class="summary-card${featured ? " summary-card--featured" : ""}">
+    <div class="summary-label">${safeText(label)}</div>
+    <div class="summary-value">${safeText(value)}</div>
+    ${note ? `<div class="summary-note">${safeText(note)}</div>` : ""}
+  </div>
+`;
+
+const getActivityTypeClass = (kind) =>
+  kind === "payment" ? "type type--payment" : "type type--invoice";
+
+const renderOpeningBalanceRow = ({ statement, currency, factor }) => {
+  if (!statement?.hasDateRange) return "";
+
+  return `
+    <tr class="opening-row">
+      <td class="muted">${safeText(formatDate(statement.fromDate))}</td>
+      <td><span class="type type--opening">Opening</span></td>
+      <td>Balance brought forward</td>
+      <td class="muted">Balance before selected period</td>
+      <td class="amount"></td>
+      <td class="amount"></td>
+      <td class="amount amount--balance">${safeText(
+        formatMoney(statement.summary?.openingBalanceMinor || 0, currency, factor)
+      )}</td>
+    </tr>
+  `;
 };
 
-const renderInvoiceRows = ({
-  rows,
-  emptyMessage,
-  currency,
-  factor,
-  overdueReferenceDate,
-}) => {
+const renderActivityRows = ({ statement, currency, factor }) => {
+  const rows = Array.isArray(statement?.activityRows)
+    ? statement.activityRows
+    : [];
+
+  if (rows.length === 0 && !statement?.hasDateRange) {
+    return `
+      <tr>
+        <td colspan="7" class="empty">No invoices or payments were recorded by this date.</td>
+      </tr>
+    `;
+  }
+
+  const openingRow = renderOpeningBalanceRow({ statement, currency, factor });
+  const activityHtml =
+    rows.length === 0
+      ? `
+        <tr>
+          <td colspan="7" class="empty">No invoices or payments were recorded during this period.</td>
+        </tr>
+      `
+      : rows
+          .map(
+            (row) => `
+              <tr>
+                <td class="muted">${safeText(formatDate(row.date))}</td>
+                <td><span class="${getActivityTypeClass(row.kind)}">${safeText(
+                  row.type
+                )}</span></td>
+                <td class="reference">${safeText(row.reference)}</td>
+                <td class="details">${safeText(row.details)}</td>
+                <td class="amount">${safeText(
+                  moneyOrBlank(row.debitMinor, currency, factor),
+                  ""
+                )}</td>
+                <td class="amount">${safeText(
+                  moneyOrBlank(row.creditMinor, currency, factor),
+                  ""
+                )}</td>
+                <td class="amount amount--balance">${safeText(
+                  formatMoney(row.balanceMinor, currency, factor)
+                )}</td>
+              </tr>
+            `
+          )
+          .join("");
+
+  return `${openingRow}${activityHtml}`;
+};
+
+const renderActivityTable = ({ statement, currency, factor }) => `
+  <section class="section">
+    <div class="section-head">
+      <div class="section-title">Account Activity</div>
+      <div class="section-rule"></div>
+    </div>
+    <table>
+      <colgroup>
+        <col style="width:12%" />
+        <col style="width:10%" />
+        <col style="width:17%" />
+        <col style="width:25%" />
+        <col style="width:12%" />
+        <col style="width:12%" />
+        <col style="width:12%" />
+      </colgroup>
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Type</th>
+          <th>Reference</th>
+          <th>Details</th>
+          <th style="text-align:right;">Debit</th>
+          <th style="text-align:right;">Credit</th>
+          <th style="text-align:right;">Balance</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${renderActivityRows({ statement, currency, factor })}
+      </tbody>
+    </table>
+  </section>
+`;
+
+const renderOutstandingRows = ({ rows, currency, factor }) => {
   const list = Array.isArray(rows) ? rows : [];
   if (list.length === 0) {
     return `
       <tr>
-        <td colspan="7" class="empty">${safeText(emptyMessage)}</td>
+        <td colspan="7" class="empty">No outstanding invoices as of this statement date.</td>
       </tr>
     `;
   }
 
   return list
-    .map((invoice) => {
-      const overdue = isOverdue(invoice, overdueReferenceDate);
-      const status = formatStatus(invoice, overdue);
-      const statusClass = statusClassFor(invoice, overdue);
-
-      return `
+    .map(
+      (invoice) => `
         <tr>
-          <td class="col-invoice">${safeText(
-            invoice.invoiceNumber || invoice._id
-          )}</td>
-          <td class="col-issued muted">${safeText(
-            formatDate(invoice.invoiceDate || invoice.createdAt)
-          )}</td>
-          <td class="col-due muted">${safeText(formatDate(invoice.dueDate))}</td>
-          <td class="col-amount">${safeText(
+          <td class="reference">${safeText(invoice.invoiceNumber || invoice._id)}</td>
+          <td class="muted">${safeText(formatDate(invoice.invoiceDate || invoice.createdAt))}</td>
+          <td class="muted">${safeText(formatDate(invoice.dueDate))}</td>
+          <td class="amount">${safeText(
             formatMoney(invoice.amountMinor, currency, factor)
           )}</td>
-          <td class="col-paid">${safeText(
-            formatMoney(getRecordedPaidMinor(invoice), currency, factor)
+          <td class="amount">${safeText(
+            formatMoney(invoice.paidByCutoffMinor, currency, factor)
           )}</td>
-          <td class="col-balance">${safeText(
-            formatMoney(getBalanceMinor(invoice), currency, factor)
+          <td class="amount amount--balance">${safeText(
+            formatMoney(invoice.balanceAsOfCutoffMinor, currency, factor)
           )}</td>
-          <td class="col-status ${statusClass}">${safeText(status)}</td>
+          <td><span class="status">${safeText(invoice.statementStatus)}</span></td>
         </tr>
-      `;
-    })
+      `
+    )
     .join("");
 };
 
-const renderInvoiceTableSection = ({
-  title,
-  note,
-  rows,
-  emptyMessage,
-  currency,
-  factor,
-  overdueReferenceDate,
-}) => `
+const renderOutstandingTable = ({ statement, currency, factor, cutoffDisplay }) => `
   <section class="section">
     <div class="section-head">
-      <div class="section-title">${safeText(title)}</div>
+      <div class="section-title">Outstanding Invoices as of ${safeText(
+        cutoffDisplay
+      )}</div>
       <div class="section-rule"></div>
     </div>
-    ${note ? `<div class="section-note">${safeText(note)}</div>` : ""}
     <table>
       <colgroup>
         <col style="width:18%" />
         <col style="width:13%" />
         <col style="width:13%" />
         <col style="width:14%" />
-        <col style="width:15%" />
         <col style="width:14%" />
+        <col style="width:15%" />
         <col style="width:13%" />
       </colgroup>
       <thead>
@@ -169,23 +242,35 @@ const renderInvoiceTableSection = ({
           <th>Invoice Date</th>
           <th>Due Date</th>
           <th style="text-align:right;">Amount</th>
-          <th style="text-align:right;">Recorded Paid</th>
+          <th style="text-align:right;">Paid by Cutoff</th>
           <th style="text-align:right;">Balance</th>
           <th>Status</th>
         </tr>
       </thead>
       <tbody>
-        ${renderInvoiceRows({
-          rows,
-          emptyMessage,
+        ${renderOutstandingRows({
+          rows: statement.outstandingInvoices,
           currency,
           factor,
-          overdueReferenceDate,
         })}
       </tbody>
     </table>
   </section>
 `;
+
+const getPeriodDisplay = (statement) => {
+  const fromDisplay = statement?.fromDate ? formatDate(statement.fromDate) : "";
+  const cutoffDisplay = formatDate(statement?.cutoffDate);
+
+  if (statement?.hasDateRange) {
+    return `${fromDisplay} to ${cutoffDisplay}`;
+  }
+
+  const firstDisplay = statement?.firstTransactionDate
+    ? formatDate(statement.firstTransactionDate)
+    : "account opening";
+  return `${firstDisplay} to ${cutoffDisplay}`;
+};
 
 const footerYear = new Date().getFullYear();
 
@@ -198,126 +283,59 @@ const statementOfAccountFooterTemplate = `
   </div>
 `;
 
-const renderStatementOfAccountHtml = ({
-  client,
-  invoices,
-  periodInvoices,
-  outstandingInvoices,
-  otherOutstandingInvoices,
-  tableInvoices,
-  summary,
-  generatedAt,
-  fromDateLabel,
-  cutoffDateLabel,
-}) => {
-  const periodList = Array.isArray(periodInvoices)
-    ? periodInvoices
-    : Array.isArray(invoices)
-    ? invoices
-    : [];
-  const outstandingList = Array.isArray(outstandingInvoices)
-    ? outstandingInvoices
-    : [];
-  const otherOutstandingList = Array.isArray(otherOutstandingInvoices)
-    ? otherOutstandingInvoices
-    : [];
-  const tableList = Array.isArray(tableInvoices) ? tableInvoices : periodList;
-  const currency = summary?.currency || "AED";
-  const factor = summary?.minorUnitFactor || 100;
-  const currentTotalDue =
-    summary?.currentTotalDueMinor ??
-    summary?.totalDueMinor ??
-    summary?.closingBalanceMinor ??
-    0;
-  const outstandingCount = Number.isFinite(Number(summary?.outstandingCount))
-    ? Number(summary.outstandingCount)
-    : outstandingList.length;
-  const generatedLabel = formatDateTime(generatedAt || new Date());
-  const hasFromDate = Boolean(fromDateLabel);
-  const hasCutoffDate = Boolean(cutoffDateLabel);
-  const fromDateDisplay = hasFromDate ? formatDate(fromDateLabel) : "";
-  const cutoffDateDisplay = hasCutoffDate ? formatDate(cutoffDateLabel) : "";
-  const selectedRangeDisplay =
-    hasFromDate && hasCutoffDate
-      ? `${fromDateDisplay} - ${cutoffDateDisplay}`
-      : hasFromDate
-      ? `From ${fromDateDisplay}`
-      : "";
-  const periodLabel = hasFromDate && hasCutoffDate
-    ? `Selected period: ${safeText(fromDateDisplay)} to ${safeText(
-        cutoffDateDisplay
-      )}`
-    : hasFromDate
-    ? `Selected period from ${safeText(fromDateDisplay)}`
-    : `Current position as of ${safeText(formatDate(generatedAt || new Date()))}`;
-  const tableTitle = hasFromDate
-    ? `Invoices ${selectedRangeDisplay}`
-    : "Current Due Invoices";
-  const tableEmptyMessage = hasFromDate
-    ? "No invoices were issued during the selected period."
-    : "No current due invoices.";
-  const tableScopeNote = hasFromDate
-    ? "The selected period table is shown for context. Other Current Due Invoices includes outstanding invoices outside that selected period."
-    : "Rows include issued invoices with a current outstanding balance. Paid invoices are hidden.";
-  const dateRangeNote = hasFromDate
-    ? "The selected period is a focus area only; Current Total Due reflects all current outstanding balances."
-    : "This statement shows the client's current due invoices.";
-  const overdueReferenceDate = summary?.overdueReferenceDate || cutoffDateLabel;
+const renderStatementOfAccountHtml = ({ client, statement }) => {
+  const safeStatement = statement || {};
+  const summary = safeStatement.summary || {};
+  const currency = summary.currency || "AED";
+  const factor = summary.minorUnitFactor || 100;
+  const generatedLabel = formatDateTime(safeStatement.generatedAt || new Date());
+  const cutoffDisplay = formatDate(safeStatement.cutoffDate || new Date());
+  const periodDisplay = getPeriodDisplay(safeStatement);
+  const openingNote = safeStatement.hasDateRange
+    ? `Before ${formatDate(safeStatement.fromDate)}`
+    : "Start of account";
+  const summaryCards = [
+    renderSummaryCard({
+      label: "Opening Balance",
+      value: formatMoney(summary.openingBalanceMinor || 0, currency, factor),
+      note: openingNote,
+    }),
+    renderSummaryCard({
+      label: "Invoiced",
+      value: formatMoney(summary.periodInvoicedMinor || 0, currency, factor),
+      note: `${formatCount(summary.invoiceActivityCount)} invoice rows`,
+    }),
+    renderSummaryCard({
+      label: "Payments Received",
+      value: formatMoney(summary.periodPaymentsMinor || 0, currency, factor),
+      note: `${formatCount(summary.paymentActivityCount)} payment rows`,
+    }),
+    renderSummaryCard({
+      label: "Closing Balance",
+      value: formatMoney(summary.closingBalanceMinor || 0, currency, factor),
+      note: `As of ${cutoffDisplay}`,
+      featured: true,
+    }),
+    safeStatement.isHistoricalCutoff
+      ? renderSummaryCard({
+          label: "Current Balance Today",
+          value: formatMoney(summary.currentBalanceTodayMinor || 0, currency, factor),
+          note: "Shown because this statement ends before today",
+          featured: true,
+        })
+      : "",
+  ].join("");
 
-  const summaryHtml = `
-    <div class="summary summary--simple">
-      <div class="summary-card summary-card--closing">
-        <div class="summary-label">Current Total Due</div>
-        <div class="summary-value">${safeText(
-          formatMoney(currentTotalDue, currency, factor)
-        )}</div>
-        <div class="summary-note">Outstanding balance now</div>
-      </div>
-      <div class="summary-card">
-        <div class="summary-label">Outstanding Invoices</div>
-        <div class="summary-value">${safeText(outstandingCount)}</div>
-        <div class="summary-note">Issued invoices with balance due</div>
-      </div>
-    </div>
-  `;
-
-  const tableSectionsHtml = hasFromDate
-    ? [
-        renderInvoiceTableSection({
-          title: tableTitle,
-          note: "Invoices issued inside the selected statement period.",
-          rows: periodList,
-          emptyMessage: tableEmptyMessage,
-          currency,
-          factor,
-          overdueReferenceDate,
-        }),
-        renderInvoiceTableSection({
-          title: "Other Current Due Invoices",
-          note: "Outstanding invoices outside the selected period.",
-          rows: otherOutstandingList,
-          emptyMessage: "No other current due invoices.",
-          currency,
-          factor,
-          overdueReferenceDate,
-        }),
-      ].join("")
-    : renderInvoiceTableSection({
-        title: tableTitle,
-        note: "",
-        rows: tableList,
-        emptyMessage: tableEmptyMessage,
-        currency,
-        factor,
-        overdueReferenceDate,
-      });
+  const currentBalanceNote = safeStatement.isHistoricalCutoff
+    ? " Current Balance Today is shown separately because the statement cutoff is earlier than today."
+    : "";
 
   return `
     <!doctype html>
     <html lang="en">
       <head>
         <meta charset="utf-8" />
-        <title>Current Statement of Account</title>
+        <title>Statement of Account</title>
         <style>
           :root {
             --violet: #4B0082;
@@ -327,8 +345,7 @@ const renderStatementOfAccountHtml = ({
             --border: #E5E7EB;
             --row: #FAFAFC;
             --green: #047857;
-            --amber: #B45309;
-            --red: #B91C1C;
+            --blue: #1D4ED8;
           }
           * { box-sizing: border-box; }
           body {
@@ -336,7 +353,7 @@ const renderStatementOfAccountHtml = ({
             padding: 0;
             color: var(--text);
             font-family: "Helvetica", Arial, sans-serif;
-            font-size: 13px;
+            font-size: 12px;
             background: #ffffff;
           }
           .header {
@@ -349,12 +366,12 @@ const renderStatementOfAccountHtml = ({
             font-size: 22px;
             font-weight: 700;
             color: var(--violet);
-            letter-spacing: 0.2px;
+            letter-spacing: 0;
           }
           .brand-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
           .title-block { text-align: right; }
           .doc-title { font-size: 19px; font-weight: 700; }
-          .meta { font-size: 12px; color: var(--muted); margin-top: 2px; }
+          .meta { font-size: 11px; color: var(--muted); margin-top: 2px; }
           .accent {
             height: 3px;
             background: var(--violet);
@@ -366,37 +383,39 @@ const renderStatementOfAccountHtml = ({
             grid-template-columns: repeat(4, minmax(0, 1fr));
             gap: 8px;
           }
-          .summary--simple {
-            grid-template-columns: repeat(2, minmax(0, 1fr));
+          .summary--with-current {
+            grid-template-columns: repeat(5, minmax(0, 1fr));
           }
           .summary-card {
             border: 1px solid var(--border);
             border-radius: 8px;
-            padding: 10px;
+            padding: 9px;
+            background: #ffffff;
+            min-height: 68px;
+          }
+          .summary-card--featured {
+            border-color: var(--violet);
             background: var(--violet-soft);
           }
-          .summary-card--closing {
-            background: #ffffff;
-            border-color: var(--violet);
-          }
           .summary-label {
-            font-size: 10px;
+            font-size: 9px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
+            letter-spacing: 0.4px;
             color: var(--muted);
           }
           .summary-value {
             margin-top: 4px;
-            font-size: 13px;
+            font-size: 12px;
             font-weight: 700;
             color: var(--text);
           }
           .summary-note {
             margin-top: 3px;
-            font-size: 10px;
+            font-size: 9px;
             color: var(--muted);
+            line-height: 1.35;
           }
-          .section { margin-top: 14px; }
+          .section { margin-top: 13px; }
           .section-head {
             display: flex;
             align-items: center;
@@ -407,16 +426,11 @@ const renderStatementOfAccountHtml = ({
             font-size: 11px;
             font-weight: 700;
             text-transform: uppercase;
-            letter-spacing: 0.6px;
+            letter-spacing: 0.5px;
           }
           .section-rule {
             flex: 1;
             border-bottom: 1px solid var(--border);
-          }
-          .section-note {
-            margin-top: -2px;
-            color: var(--muted);
-            font-size: 11px;
           }
           .client-grid {
             display: grid;
@@ -430,50 +444,60 @@ const renderStatementOfAccountHtml = ({
             background: #ffffff;
           }
           .client-label {
-            font-size: 10px;
+            font-size: 9px;
             text-transform: uppercase;
             letter-spacing: 0.4px;
             color: var(--muted);
           }
-          .client-value { margin-top: 4px; font-size: 12px; }
+          .client-value { margin-top: 4px; font-size: 11px; }
           table {
             width: 100%;
             border-collapse: collapse;
-            margin-top: 10px;
+            margin-top: 8px;
             table-layout: fixed;
           }
           thead { display: table-header-group; }
           thead th {
             background: var(--violet-soft);
             color: var(--muted);
-            font-size: 10px;
+            font-size: 9px;
             text-transform: uppercase;
-            letter-spacing: 0.5px;
-            padding: 8px 6px;
+            letter-spacing: 0.4px;
+            padding: 7px 5px;
             text-align: left;
             border-top: 1px solid var(--border);
             border-bottom: 1px solid var(--border);
           }
           tbody td {
-            padding: 8px 6px;
+            padding: 7px 5px;
             border-bottom: 1px solid var(--border);
             vertical-align: top;
-            font-size: 11px;
+            font-size: 10px;
+            overflow-wrap: anywhere;
           }
           tbody tr:nth-child(even) { background: var(--row); }
           tbody tr { page-break-inside: avoid; }
           .muted { color: var(--muted); }
-          .col-amount,
-          .col-paid,
-          .col-balance {
+          .amount {
             text-align: right;
             font-variant-numeric: tabular-nums;
+            white-space: nowrap;
           }
-          .status { font-weight: 600; }
-          .status--paid { color: var(--green); }
-          .status--overdue { color: var(--red); }
-          .status--partial { color: var(--amber); }
-          .status--unpaid { color: var(--text); }
+          .amount--balance { font-weight: 700; }
+          .reference { font-weight: 700; }
+          .details { color: var(--muted); line-height: 1.35; }
+          .type,
+          .status {
+            display: inline-block;
+            font-weight: 700;
+            font-size: 9px;
+          }
+          .type--invoice { color: var(--blue); }
+          .type--payment { color: var(--green); }
+          .type--opening { color: var(--muted); }
+          .opening-row {
+            background: #ffffff !important;
+          }
           .empty {
             text-align: center;
             color: var(--muted);
@@ -485,7 +509,7 @@ const renderStatementOfAccountHtml = ({
             border-radius: 8px;
             padding: 9px 10px;
             color: var(--muted);
-            font-size: 11px;
+            font-size: 10px;
             line-height: 1.5;
             background: #ffffff;
           }
@@ -498,14 +522,18 @@ const renderStatementOfAccountHtml = ({
             <div class="brand-sub">Megadie.com</div>
           </div>
           <div class="title-block">
-            <div class="doc-title">Current Statement of Account</div>
+            <div class="doc-title">Statement of Account</div>
             <div class="meta">Generated ${safeText(generatedLabel)}</div>
-            <div class="meta">Period: ${periodLabel}</div>
+            <div class="meta">Period: ${safeText(periodDisplay)}</div>
           </div>
         </header>
         <div class="accent"></div>
 
-        ${summaryHtml}
+        <div class="summary${
+          safeStatement.isHistoricalCutoff ? " summary--with-current" : ""
+        }">
+          ${summaryCards}
+        </div>
 
         <section class="section">
           <div class="section-head">
@@ -528,14 +556,23 @@ const renderStatementOfAccountHtml = ({
           </div>
         </section>
 
-        ${tableSectionsHtml}
+        ${renderActivityTable({ statement: safeStatement, currency, factor })}
+
+        ${renderOutstandingTable({
+          statement: safeStatement,
+          currency,
+          factor,
+          cutoffDisplay,
+        })}
 
         <div class="note">
-          ${safeText(tableScopeNote)}
-          Payments shown are based on payments recorded in Megadie before this
-          statement was generated. ${safeText(dateRangeNote)} Overpaid invoices,
-          if any, are shown with a zero
-          remaining balance.
+          This statement is calculated from issued invoices and recorded payments.
+          Customer receipt payments are shown once in Account Activity, even when
+          they were allocated across multiple invoices. The outstanding invoice
+          table explains the closing balance as of ${safeText(cutoffDisplay)}.${safeText(
+            currentBalanceNote,
+            ""
+          )}
         </div>
       </body>
     </html>
