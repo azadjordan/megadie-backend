@@ -10,6 +10,16 @@ export function getAvailabilityStatus(requestedQty, availableNow) {
   return "SHORTAGE";
 }
 
+// Browsing stock indicators refer to an orderable variation meeting its MOQ.
+// The underlying stock read remains fresh for quote/order validation callers.
+export function hasSellableStock(product, availableNow) {
+  if (!product || product.isActive === false || product.isAvailable === false) return false;
+  const moq = Number(product.moq);
+  const minimum = Number.isFinite(moq) && moq > 0 ? Math.max(1, moq) : 1;
+  const available = Number(availableNow);
+  return Number.isFinite(available) && available >= minimum;
+}
+
 export async function getAvailabilityTotalsByProduct(productIds) {
   const ids = productIds
     .filter(Boolean)

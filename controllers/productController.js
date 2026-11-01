@@ -1,8 +1,9 @@
 // controllers/productController.js
 import mongoose from "mongoose";
+import { performance } from "node:perf_hooks";
 import Product from "../models/productModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
-import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
+import { getAvailabilityTotalsByProduct, hasSellableStock } from "../utils/quoteAvailability.js";
 import {
   getCachedCategoryIdsByKeys,
   getCachedFilterConfig,
@@ -256,6 +257,7 @@ export const getProducts = asyncHandler(async (req, res) => {
    Batch availability snapshots for cart review
    ========================= */
 export const getProductsAvailability = asyncHandler(async (req, res) => {
+  const startedAt = performance.now();
   const rawProductIds = Array.isArray(req.body?.productIds)
     ? req.body.productIds
     : [];
@@ -284,7 +286,7 @@ export const getProductsAvailability = asyncHandler(async (req, res) => {
   const [products, totalsMap] = await Promise.all([
     objectIds.length
       ? Product.find({ _id: { $in: objectIds } })
-          .select("_id isActive isAvailable")
+          .select("_id isActive isAvailable moq")
           .lean()
       : [],
     getAvailabilityTotalsByProduct(validProductIds),
@@ -306,6 +308,7 @@ export const getProductsAvailability = asyncHandler(async (req, res) => {
       productId,
       exists: Boolean(product),
       isAvailable: isRequestable,
+      inStock: hasSellableStock(product, totalsMap.get(productId) || 0),
       availability: {
         availableNow: product ? totalsMap.get(productId) || 0 : 0,
         checkedAt: availabilityCheckedAt,
@@ -313,6 +316,8 @@ export const getProductsAvailability = asyncHandler(async (req, res) => {
     };
   });
 
+  res.set('Cache-Control', 'private, no-store');
+  res.set('Server-Timing', `availability;dur=${(performance.now() - startedAt).toFixed(1)}`);
   res.status(200).json({
     success: true,
     message: "Product availability retrieved successfully.",
