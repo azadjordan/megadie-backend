@@ -73,7 +73,7 @@ Return a small `resolvedDelivery` view: `details` (or null), `savedToOrder`, `re
 
 ## 5. Current store AE1: reuse SiteSettings
 
-AE1 identifies the first UAE store; the user has confirmed there is currently only one store in the UAE. The previous assumption that AE1 and AE2 are two existing physical stores is withdrawn. AE2's meaning remains to be clarified. Do not create another store record, duplicate AE1's location under AE2, or alter existing slot/inventory codes based on this assumption.
+AE1 identifies the first UAE store; the user has confirmed there is currently only one store in the UAE and AE2 is an unused code. The previous assumption that AE1 and AE2 are two existing physical stores is withdrawn. Configure AE1 only. Do not create an AE2 location, duplicate AE1's location under AE2, or rename/delete the unused inventory code as part of this feature.
 
 The existing singleton `SiteSettings` record can hold `storeLocations.AE1`, containing `name`, `address`, `googleMapsUrl`, `phoneNumbers` (up to two), and optional `notes`. Keep the existing store code and show a readable label such as Megadie UAE (AE1). Other codes can receive location details later when their actual physical meaning is confirmed; no generic store-management feature is needed now.
 
@@ -120,7 +120,7 @@ Ordinary reads are not an atomic cross-collection snapshot. The sheet is informa
 
 1. Implement the small default/resolution helper, two optional User fields, and saved order value/revision. Wire existing user APIs and order creation; test default/order isolation.
 2. Add guarded order-only delivery editing and the customer-reassignment safeguard. Switch Courier from editing User to editing the order.
-3. Extend existing settings with AE1's pickup details and a small editor; clarify AE2 before assigning it a location or alias.
+3. Extend existing settings with AE1's pickup details and a small editor; leave the unused AE2 code unconfigured.
 4. Add the combined sheet read and evolve the unfinished pick-list formatter/button into Prepare & Deliver.
 5. Run focused integration checks, frontend lint/build, and relevant existing order/catalog regression tests before coordinated review/release.
 
@@ -130,6 +130,6 @@ Use pure Node tests for helpers/formatters and a disposable test database for pe
 
 ## 9. Release boundaries
 
-Deploy additive backend changes first, then the frontend in the same coordinated release. Avoid order creation and courier delivery edits between the two deployments: the old frontend still edits User while the new backend captures order destinations. If those actions did occur in the gap, review the affected active orders' destinations before using the new copy actions. This short release coordination avoids introducing a permanent feature-flag or dual-write mechanism. Enter AE1's real pickup location before relying on final staff sheets, and clarify AE2 if it is referenced by an order's allocations. Review active legacy destinations as needed; do not bulk rewrite completed orders.
+Deploy additive backend changes first, then the frontend in the same coordinated release. Avoid order creation and courier delivery edits between the two deployments: the old frontend still edits User while the new backend captures order destinations. If those actions did occur in the gap, review the affected active orders' destinations before using the new copy actions. This short release coordination avoids introducing a permanent feature-flag or dual-write mechanism. Enter AE1's real pickup location before relying on final staff sheets. An unexpected AE2 allocation requires data review rather than a second pickup, since AE2 is unused. Review active legacy destinations as needed; do not bulk rewrite completed orders.
 
 Keep both repositories on `feat/order-delivery-details`. Preserve the local pick-list work and exclude unrelated inventory operation scripts from feature commits. This review updates plans only; it does not implement, push, deploy, or migrate anything.
