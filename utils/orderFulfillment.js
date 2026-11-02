@@ -14,6 +14,7 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
   delivery.missingFields = delivery.missingFields.filter((key) => key === "addressOrLocation");
   if (order.status !== "Shipping") problems.push("Order is not Shipping. Confirm reservations before preparing it.");
   if (!delivery.savedToOrder) problems.push("Review and save the delivery details for this order.");
+  if (!order.assignedTo?.trim()) problems.push("Assign this order before copying.");
   if (delivery.missingFields.length) problems.push("Delivery location is missing: add an address or map.");
 
   for (const item of order.orderItems || []) {

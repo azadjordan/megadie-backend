@@ -5,7 +5,7 @@ import { buildFulfillmentSheet } from "../utils/orderFulfillment.js";
 
 const user = { name: "Alpha Beta Company", phoneNumber: "account-phone", address: "Default address", deliveryGoogleMapsUrl: "https://maps.app.goo.gl/example" };
 const details = { contactName: "Recipient", phoneNumber: "+123", address: "Order address", secondaryPhoneNumber: "", googleMapsUrl: "", notes: "" };
-const order = { _id: "o1", orderNumber: "ORD-261102-023AD", status: "Shipping", user, deliveryDetails: details, deliveryRevision: 1,
+const order = { _id: "o1", orderNumber: "ORD-261102-023AD", status: "Shipping", user, assignedTo: "Ahmed", deliveryDetails: details, deliveryRevision: 1,
   totalPrice: 9876, adminToAdminNote: "SECRET", orderItems: [{ product: "p1", sku: "SKU1", productName: "Ribbon", qty: 4 }] };
 const allocation = (qty, label = "A2-AE1", status = "Reserved", store = "AE1") => ({ product: "p1", qty, status, slot: { label, store } });
 
@@ -16,16 +16,17 @@ test("compact carton label uses initials and the full last order segment", () =>
   assert.doesNotMatch(buildCartonLabel("A. B. C.", order.orderNumber), /[.\s]/);
 });
 
-test("assignment is an optional trimmed name with a bounded length", () => {
+test("assignment requires a nonblank trimmed name with a bounded length", () => {
   assert.equal(validateAssignedTo("  Ahmed  "), "Ahmed");
-  assert.equal(validateAssignedTo("   "), "");
   assert.equal(validateAssignedTo("x".repeat(120)).length, 120);
-  for (const value of [null, 1, {}, [], "x".repeat(121)]) assert.throws(() => validateAssignedTo(value));
+  for (const value of [null, "", "   ", 1, {}, [], "x".repeat(121)]) assert.throws(() => validateAssignedTo(value));
 });
 
-test("staff sheet returns the saved assignment and supports older unassigned orders", () => {
+test("staff sheet returns saved assignments and flags older unassigned orders for review", () => {
   assert.equal(buildFulfillmentSheet({ ...order, assignedTo: "Ahmed" }, [allocation(4)]).assignedTo, "Ahmed");
-  assert.equal(buildFulfillmentSheet(order, [allocation(4)]).assignedTo, "");
+  const unassigned = buildFulfillmentSheet({ ...order, assignedTo: undefined }, [allocation(4)]);
+  assert.equal(unassigned.assignedTo, "");
+  assert.ok(unassigned.problems.includes("Assign this order before copying."));
 });
 
 test("default contacts can differ from account identity and blank overrides restore inheritance", () => {

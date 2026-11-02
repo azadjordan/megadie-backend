@@ -76,7 +76,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     const before = JSON.stringify(await Order.findById(orderId).lean());
     const result = await api(`/orders/${orderId}/fulfillment-sheet`);
     assert.equal(result.status, 200);
-    assert.deepEqual(result.body.data.problems, []);
+    assert.ok(result.body.data.problems.includes("Assign this order before copying."));
     assert.equal(result.body.data.label, "ABC-023AD");
     assert.deepEqual(result.body.data.picks.map((p) => p.slot), ["A2-AE1", "A10-AE1"]);
     assert.equal(result.body.data.delivery.details.address, newDetails.address);
@@ -106,7 +106,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal(winner.deliveryRevision, 3);
     assert.equal(winner.assignedTo, winner.deliveryDetails.contactName);
   });
-  await t.test("assignment saves on the order, survives Courier edits, clears, and stays admin-only", async () => {
+  await t.test("assignment saves on the order, survives Courier edits, cannot be cleared, and stays admin-only", async () => {
     const assigned = await api(endpoint, { method: "PUT", body: { expectedRevision: 3, deliveryDetails: newDetails, assignedTo: "  Ahmed  " } });
     assert.equal(assigned.status, 200);
     assert.equal(assigned.body.data.assignedTo, "Ahmed");
@@ -121,14 +121,17 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal(courierEdit.body.data.assignedTo, "Ahmed", "Omission must not clear the saved assignee");
     assert.equal((await api(endpoint, { as: customer, method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo: "Unauthorized" } })).status, 403);
     assert.equal((await api(`/orders/${orderId}`, { method: "PUT", body: { assignedTo: "Bypass" } })).status, 400);
-    for (const assignedTo of [null, 123, {}, "x".repeat(121)]) {
+    for (const assignedTo of [null, "", "   ", 123, {}, "x".repeat(121)]) {
       assert.equal((await api(endpoint, { method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo } })).status, 400);
     }
     assert.equal((await Order.findById(orderId)).deliveryRevision, 5);
     const cleared = await api(endpoint, { method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo: "  " } });
-    assert.equal(cleared.status, 200);
-    assert.equal(cleared.body.data.assignedTo, "");
-    assert.equal((await api(`/orders/${orderId}/fulfillment-sheet`)).body.data.assignedTo, "");
+    assert.equal(cleared.status, 400);
+    assert.equal((await Order.findById(orderId)).deliveryRevision, 5);
+    assert.equal((await api(`/orders/${orderId}/fulfillment-sheet`)).body.data.assignedTo, "Ahmed");
+    const replaced = await api(endpoint, { method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo: "Samir" } });
+    assert.equal(replaced.status, 200);
+    assert.equal(replaced.body.data.assignedTo, "Samir");
     assert.equal((await Order.findById(second._id)).assignedTo, "");
     assert.equal((await User.findById(customer._id)).phoneNumber, "client-phone");
   });
@@ -154,7 +157,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal(result.status, 200);
     assert.equal(result.body.data.resolvedDelivery.details.address, "");
     assert.equal(result.body.data.resolvedDelivery.savedToOrder, true);
-    await api(`/orders/${legacy._id}/delivery-details`, { method: "PUT", body: { expectedRevision: 1, deliveryDetails: { address: "Location only" } } });
+    await api(`/orders/${legacy._id}/delivery-details`, { method: "PUT", body: { expectedRevision: 1, deliveryDetails: { address: "Location only" }, assignedTo: "Ahmed" } });
     await OrderAllocation.collection.insertOne({ order: legacy._id, product, slot: slots[0], qty: 1, status: "Reserved" });
     const locationOnly = await api(`/orders/${legacy._id}/fulfillment-sheet`);
     assert.deepEqual(locationOnly.body.data.problems, []);

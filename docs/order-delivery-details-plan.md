@@ -53,7 +53,7 @@ contactName, phoneNumber, secondaryPhoneNumber,
 address, googleMapsUrl, notes
 ```
 
-Add optional top-level `assignedTo` (trimmed text, maximum 120 characters, default empty). Add `deliveryRevision`, a nonnegative integer protecting both delivery and assignment edits. Existing orders without the field read as revision 0. New order destinations start at 1; every explicit destination save increments it. No saved source enum, separate timestamps, or editor fields are needed for this feature.
+Add top-level `assignedTo` (trimmed text, maximum 120 characters). New/legacy orders may initially be unassigned, but Prepare & Deliver requires a nonblank name. Add `deliveryRevision`, a nonnegative integer protecting both delivery and assignment edits. Existing orders without the field read as revision 0. New order destinations start at 1; every explicit destination save increments it. No saved source enum, separate timestamps, or editor fields are needed for this feature.
 
 - In the existing quote-to-order transaction, read the customer's defaults using the same session and save a copy on the new order. Incomplete details must not block order creation.
 - The saved object is authoritative as a whole. A deliberately empty order field must not be filled from today's profile. Its presence, even when incomplete, distinguishes a saved destination from an older order without one.
@@ -158,8 +158,16 @@ Compact-format verification: 10 frontend helper/formatter tests and 9 delivery b
 
 ## 13. Saved assignee and mandatory review modal
 
-Order.assignedTo is an optional free-text name, trimmed and limited to 120 characters, with empty as the default for new and legacy orders. The existing admin delivery-details PUT accepts it alongside deliveryDetails and expectedRevision and saves both in one conditional update. Omission preserves the existing assignment for Courier and older clients; an explicit empty string clears it. The response and fresh fulfillment sheet include assignedTo. No customer/profile field, new endpoint, employee directory, or data backfill is required.
+Order.assignedTo is a free-text name, trimmed and limited to 120 characters. New and legacy orders can initially be unassigned, but a nonblank assignee is mandatory for Prepare & Deliver. The existing admin delivery-details PUT accepts it alongside deliveryDetails and expectedRevision and saves both in one conditional update. Omission preserves the existing assignment for Courier and older clients; explicit empty or whitespace-only updates are rejected. The response and fresh fulfillment sheet include assignedTo. No customer/profile field, new endpoint, employee directory, or data backfill is required.
 
 The same revision guard prevents competing address/assignment edits from silently overwriting each other; closed orders remain read-only. Ordinary order PUT cannot bypass the guard. Owner detail/list responses omit the internal assignee. The frontend now always opens a review modal rather than copying on row click, then uses explicit Copy or Save & Copy. Clipboard retries after a successful save must not save or refresh again.
 
 Assignment/review verification: 25 backend/helper/API integration/regression tests, 11 frontend formatter/helper tests, and 11 browser tests on each of the dev and production builds passed. Full frontend lint/build passed. Coverage includes no copy on opening, one fresh read per opening, live assignment preview without requests, explicit save/reopen/clear, discarded unsaved edits, conflicts, hidden-contact preservation, optional legacy assignment, and clipboard retry without another write or refresh. Deploy the backend before the frontend; no database backfill is needed.
+
+## 14. Mandatory Assigned To
+
+validateAssignedTo rejects empty/whitespace names as well as invalid types or oversized values. Fulfillment-sheet problems flag unassigned orders for review, while the GET still loads so an administrator can enter the assignee. New-order creation and Courier-only destination editing do not require choosing a worker; no migration or fabricated default name is introduced.
+
+The frontend blocks both normal and draft copying without a name. Save & Copy Draft shares the guarded save/copy pipeline, so an unsaved assignee must be persisted before a draft is copied. Customer-facing assignment privacy, revision conflicts, and closed-order restrictions are retained.
+
+Mandatory-assignee verification: 25 backend/helper/API integration/regression tests, 11 frontend helper/formatter tests, and 12 browser tests on each of the dev and production builds passed. Full frontend lint/build passed. Tests reject empty and whitespace-only assignment updates, retain saved names on rejected clears, disable normal and draft copy while blank, and verify Save & Copy Draft persists a valid assignee before copying.

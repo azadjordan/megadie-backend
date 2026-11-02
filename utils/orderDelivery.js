@@ -14,6 +14,9 @@ export const normalizeDeliveryDetails = (value = {}) => Object.fromEntries(
 );
 
 export function validateAssignedTo(value) {
+  if (typeof value === "string" && !value.trim()) {
+    throw new Error("Assigned To is required.");
+  }
   if (typeof value !== "string" || value.trim().length > 120) {
     throw new Error("Assigned To must be a name of at most 120 characters.");
   }
