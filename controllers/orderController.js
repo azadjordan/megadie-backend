@@ -163,6 +163,7 @@ const sanitizeOrderForClient = (order) => {
   delete o.totalPrice;
   delete o.deliveryCharge;
   delete o.extraFee;
+  delete o.assignedTo;
 
   // Strip item pricing
   if (Array.isArray(o.orderItems)) {
@@ -1356,8 +1357,8 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision")) {
-    res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination.");
+  if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision") || Object.hasOwn(req.body, "assignedTo")) {
+    res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination or assignment.");
   }
 
   // ❌ Order items are never editable after creation

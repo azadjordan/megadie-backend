@@ -19,7 +19,7 @@ This is an address-and-copy feature. It does not change quoting, pricing, invoic
 | StoreLocation collection or SiteSettings store editor | Omit store-location storage, APIs, and UI from this feature | Staff use the one known AE1 store; slot labels are sufficient |
 | Source enums, capture/edit timestamps, editor identity | Saved order value plus one delivery revision | No current feature needs a separate address audit system |
 | Read-only snapshot transaction for every sheet | Ordinary bounded database reads | Copying is an informational read, not a stock operation |
-| Preview, fetch again on Copy, compare responses, confirm changes | One fresh request per normal copy click | Preserve the existing simple copying interaction |
+| Preview, fetch again on Copy, compare responses, confirm changes | One fresh request per review-modal opening | Preserve the existing simple copying interaction |
 | New full customer profile delivery interface | Extend existing admin fields; retain the current customer profile form | Avoid a separate profile redesign |
 | Google host allowlist and detailed phone parsing | Length/type checks, a valid HTTPS map link, and ordinary international phone text | No provider-specific URL parser or phone normalization project |
 
@@ -53,7 +53,7 @@ contactName, phoneNumber, secondaryPhoneNumber,
 address, googleMapsUrl, notes
 ```
 
-Add `deliveryRevision`, a nonnegative integer. Existing orders without the field read as revision 0. New order destinations start at 1; every explicit destination save increments it. No saved source enum, separate timestamps, or editor fields are needed for this feature.
+Add optional top-level `assignedTo` (trimmed text, maximum 120 characters, default empty). Add `deliveryRevision`, a nonnegative integer protecting both delivery and assignment edits. Existing orders without the field read as revision 0. New order destinations start at 1; every explicit destination save increments it. No saved source enum, separate timestamps, or editor fields are needed for this feature.
 
 - In the existing quote-to-order transaction, read the customer's defaults using the same session and save a copy on the new order. Incomplete details must not block order creation.
 - The saved object is authoritative as a whole. A deliberately empty order field must not be filled from today's profile. Its presence, even when incomplete, distinguishes a saved destination from an older order without one.
@@ -90,7 +90,7 @@ Use the existing response envelope and authorization conventions.
 | Existing GET/PUT `/api/users/account/profile` | Add the two optional delivery contact overrides; retain current fields and account semantics |
 | Existing GET/PUT `/api/users/:id` (admin) | Same additional fields on user details/editing |
 | Existing GET `/api/orders/:id` | Add `resolvedDelivery` using current owner/admin access rules |
-| PUT `/api/orders/:id/delivery-details` (admin) | Body `{ deliveryDetails, expectedRevision }`; update this order only; return saved details and revision |
+| PUT `/api/orders/:id/delivery-details` (admin) | Body `{ deliveryDetails, expectedRevision, assignedTo? }`; update this order only; return saved details and revision |
 | GET `/api/orders/:id/fulfillment-sheet` (admin) | One fresh staff-sheet read; no state changes |
 
 Do not load fulfillment data for order-list rows or add address-specific work to every list query. Preserve owner pricing sanitization and existing access checks. General order updates must not accept delivery details through an unguarded second path.
@@ -155,3 +155,11 @@ Refinement verification: 22 backend/helper/API integration/regression tests, 8 f
 This follow-up changes the frontend text presentation only; the API payload is unchanged. The header uses `*PREPARE & DELIVER*`, `_Order:_`, and `_Carton Tag:_` with a bold compact identifier. One shared numbered SKU list drives PICK and PACK & CHECK. Slot quantities are indented arrow lines; per-SKU totals appear only as bold numbers on the packing checkbox lines. Delivery includes only italic-labeled address and map lines. The browser regression expectations cover the new exact header, grouping, numbering, and compact markup.
 
 Compact-format verification: 10 frontend helper/formatter tests and 9 delivery browser tests on each of the dev and production builds passed, together with full frontend lint and build. Exact-output coverage includes the supplied WhatsApp template, matching item numbers above 99, multiple slots, no PICK subtotals, location-only delivery, and compact address lines. This presentation update changes no backend runtime logic.
+
+## 13. Saved assignee and mandatory review modal
+
+Order.assignedTo is an optional free-text name, trimmed and limited to 120 characters, with empty as the default for new and legacy orders. The existing admin delivery-details PUT accepts it alongside deliveryDetails and expectedRevision and saves both in one conditional update. Omission preserves the existing assignment for Courier and older clients; an explicit empty string clears it. The response and fresh fulfillment sheet include assignedTo. No customer/profile field, new endpoint, employee directory, or data backfill is required.
+
+The same revision guard prevents competing address/assignment edits from silently overwriting each other; closed orders remain read-only. Ordinary order PUT cannot bypass the guard. Owner detail/list responses omit the internal assignee. The frontend now always opens a review modal rather than copying on row click, then uses explicit Copy or Save & Copy. Clipboard retries after a successful save must not save or refresh again.
+
+Assignment/review verification: 25 backend/helper/API integration/regression tests, 11 frontend formatter/helper tests, and 11 browser tests on each of the dev and production builds passed. Full frontend lint/build passed. Coverage includes no copy on opening, one fresh read per opening, live assignment preview without requests, explicit save/reopen/clear, discarded unsaved edits, conflicts, hidden-contact preservation, optional legacy assignment, and clipboard retry without another write or refresh. Deploy the backend before the frontend; no database backfill is needed.

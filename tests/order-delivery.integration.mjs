@@ -100,9 +100,37 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal((await api(`/orders/${orderId}`, { method: "PUT", body: { deliveryDetails: newDetails } })).status, 400);
   });
   await t.test("racing destination edits have one winner", async () => {
-    const results = await Promise.all(["First", "Second"].map((contactName) => api(endpoint, { method: "PUT", body: { expectedRevision: 2, deliveryDetails: { ...newDetails, contactName } } })));
+    const results = await Promise.all(["First", "Second"].map((contactName) => api(endpoint, { method: "PUT", body: { expectedRevision: 2, deliveryDetails: { ...newDetails, contactName }, assignedTo: contactName } })));
     assert.deepEqual(results.map((r) => r.status).sort(), [200, 409]);
-    assert.equal((await Order.findById(orderId)).deliveryRevision, 3);
+    const winner = await Order.findById(orderId);
+    assert.equal(winner.deliveryRevision, 3);
+    assert.equal(winner.assignedTo, winner.deliveryDetails.contactName);
+  });
+  await t.test("assignment saves on the order, survives Courier edits, clears, and stays admin-only", async () => {
+    const assigned = await api(endpoint, { method: "PUT", body: { expectedRevision: 3, deliveryDetails: newDetails, assignedTo: "  Ahmed  " } });
+    assert.equal(assigned.status, 200);
+    assert.equal(assigned.body.data.assignedTo, "Ahmed");
+    assert.equal((await Order.findById(orderId)).assignedTo, "Ahmed");
+    assert.equal((await api(`/orders/${orderId}`)).body.data.assignedTo, "Ahmed");
+    assert.equal((await api(`/orders/${orderId}/fulfillment-sheet`)).body.data.assignedTo, "Ahmed");
+    assert.equal((await api(`/orders/${orderId}`, { as: customer })).body.data.assignedTo, undefined);
+    const ownList = await api("/orders/my", { as: customer });
+    assert.equal(ownList.body.data.find((row) => row._id === orderId).assignedTo, undefined);
+    const courierEdit = await api(endpoint, { method: "PUT", body: { expectedRevision: 4, deliveryDetails: { ...newDetails, notes: "Courier-only edit" } } });
+    assert.equal(courierEdit.status, 200);
+    assert.equal(courierEdit.body.data.assignedTo, "Ahmed", "Omission must not clear the saved assignee");
+    assert.equal((await api(endpoint, { as: customer, method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo: "Unauthorized" } })).status, 403);
+    assert.equal((await api(`/orders/${orderId}`, { method: "PUT", body: { assignedTo: "Bypass" } })).status, 400);
+    for (const assignedTo of [null, 123, {}, "x".repeat(121)]) {
+      assert.equal((await api(endpoint, { method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo } })).status, 400);
+    }
+    assert.equal((await Order.findById(orderId)).deliveryRevision, 5);
+    const cleared = await api(endpoint, { method: "PUT", body: { expectedRevision: 5, deliveryDetails: newDetails, assignedTo: "  " } });
+    assert.equal(cleared.status, 200);
+    assert.equal(cleared.body.data.assignedTo, "");
+    assert.equal((await api(`/orders/${orderId}/fulfillment-sheet`)).body.data.assignedTo, "");
+    assert.equal((await Order.findById(second._id)).assignedTo, "");
+    assert.equal((await User.findById(customer._id)).phoneNumber, "client-phone");
   });
   await t.test("customer reassignment replaces the destination and preserves invoice locks", async () => {
     const changed = await api(`/orders/${second._id}`, { method: "PUT", body: { user: String(other._id) } });
@@ -137,7 +165,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     await Order.collection.updateOne({ _id: legacy._id }, { $unset: { deliveryDetails: "", deliveryRevision: "" }, $set: { status: "Delivered" } });
     assert.equal((await api(`/orders/${legacy._id}`)).body.data.resolvedDelivery.details, null);
     assert.equal((await api(`/orders/${legacy._id}/fulfillment-sheet`)).status, 409);
-    assert.equal((await api(`/orders/${legacy._id}/delivery-details`, { method: "PUT", body: { expectedRevision: 0, deliveryDetails: newDetails } })).status, 409);
+    assert.equal((await api(`/orders/${legacy._id}/delivery-details`, { method: "PUT", body: { expectedRevision: 0, deliveryDetails: newDetails, assignedTo: "Closed" } })).status, 409);
     await Order.collection.updateOne({ _id: legacy._id }, { $set: { status: "Cancelled" } });
     assert.equal((await api(`/orders/${legacy._id}/fulfillment-sheet`)).status, 409);
   });

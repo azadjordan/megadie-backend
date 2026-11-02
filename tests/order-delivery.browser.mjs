@@ -11,7 +11,7 @@ const profile = { _id: "200000000000000000000001", name: "Admin", email: "admin@
 test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
-  async function fixture(t, { legacy = false, mobile = false, status = "Shipping", locationOnly = false } = {}) {
+  async function fixture(t, { legacy = false, mobile = false, status = "Shipping", locationOnly = false, assignedTo = "" } = {}) {
     const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1400, height: 1000 } });
     t.after(() => context.close());
     await context.addInitScript(() => {
@@ -24,13 +24,13 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       document.execCommand = () => false;
     });
     const state = { requests: [], unexpected: [], errors: [], conflict: false,
-      order: { _id: id, orderNumber: "ORD-261102-023AD", status, createdAt: "2026-11-02T10:00:00Z", user: { _id: "client", name: "Alpha Beta Company", phoneNumber: "ACCOUNT-PHONE", address: "LIVE-PROFILE-ADDRESS" },
+      order: { _id: id, orderNumber: "ORD-261102-023AD", status, assignedTo, createdAt: "2026-11-02T10:00:00Z", user: { _id: "client", name: "Alpha Beta Company", phoneNumber: "ACCOUNT-PHONE", address: "LIVE-PROFILE-ADDRESS" },
         orderItems: [{ product: "p1", sku: "SKU1", productName: "Grosgrain ribbon", qty: 4, unitPrice: 10 }], totalPrice: 40, allocationStatus: "Allocated", invoice: null,
         resolvedDelivery: { details: locationOnly ? { address: details.address, googleMapsUrl: details.googleMapsUrl } : { ...details }, savedToOrder: !legacy, revision: legacy ? 0 : 1, missingFields: locationOnly ? ["contactName", "phoneNumber"] : [] } },
     };
     state.customer = { ...state.order.user, email: "client@test.invalid", deliveryContactName: "", deliveryPhoneNumber: "" };
     const sheet = () => ({ orderId: id, orderNumber: state.order.orderNumber, status: state.order.status,
-      generatedAt: "2026-11-02T10:00:00Z", label: "ABC-023AD", delivery: { ...state.order.resolvedDelivery, missingFields: state.order.resolvedDelivery.missingFields.filter((key) => key === "addressOrLocation") },
+      generatedAt: "2026-11-02T10:00:00Z", label: "ABC-023AD", assignedTo: state.order.assignedTo, delivery: { ...state.order.resolvedDelivery, missingFields: state.order.resolvedDelivery.missingFields.filter((key) => key === "addressOrLocation") },
       problems: state.order.resolvedDelivery.savedToOrder ? [] : ["Review and save the delivery details for this order."], notices: [],
       picks: [{ slot: "A10-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 1 }, { slot: "A2-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 3 }],
       items: [{ productId: "p1", sku: "SKU1", name: "Grosgrain ribbon", orderedQty: 4, allocatedQty: 4 }],
@@ -55,13 +55,15 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       if (path === `/orders/${id}/delivery-details` && method === "PUT") {
         if (state.conflict) {
           state.conflict = false;
+          if (state.conflictAssignedTo !== undefined) state.order.assignedTo = state.conflictAssignedTo;
           state.order.resolvedDelivery = { ...state.order.resolvedDelivery, revision: 2, details: { ...details, contactName: "Other admin" } };
           return reply({ message: "Order changed. Reload and review before saving." }, 409);
         }
         const body = request.postDataJSON();
+        if (Object.hasOwn(body, "assignedTo")) state.order.assignedTo = body.assignedTo.trim();
         assert.equal(body.expectedRevision, state.order.resolvedDelivery.revision);
         state.order.resolvedDelivery = { details: body.deliveryDetails, savedToOrder: true, revision: body.expectedRevision + 1, missingFields: [] };
-        return reply({ data: { _id: id, resolvedDelivery: state.order.resolvedDelivery } });
+        return reply({ data: { _id: id, assignedTo: state.order.assignedTo, resolvedDelivery: state.order.resolvedDelivery } });
       }
       state.unexpected.push(`${method} ${path}`);
       return reply({ message: "Unexpected test request" }, 500);
@@ -70,36 +72,42 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     page.on("pageerror", (error) => state.errors.push(error.message));
     t.after(() => { assert.deepEqual(state.errors, []); assert.deepEqual(state.unexpected, []); });
     await page.goto(origin + "/admin/orders");
-    await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).waitFor();
+    await page.getByRole("button", { name: "Prepare and deliver order" }).waitFor();
     return { page, state };
   }
 
-  await t.test("complete order copies the compact WhatsApp layout once and each later click reads fresh", async (t) => {
+  await t.test("every opening reviews fresh details with one fetch and no automatic copying", async (t) => {
     const { page, state } = await fixture(t);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
-    await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
+    await page.getByRole("button", { name: "Prepare and deliver order" }).click();
+    await page.getByRole("dialog").waitFor();
+    assert.equal(await page.evaluate(() => window.__copies.length), 0);
+    const preview = await page.getByLabel("Message preview").inputValue();
+    assert.ok(preview.startsWith("*PREPARE & DELIVER*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ *ABC-023AD*\n*1 item — 4 units*"));
+    assert.match(preview, /\*01\)\* SKU1\n   ↳ A2-AE1: \*3 units\*\n   ↳ A10-AE1: \*1 unit\*/);
+    assert.ok(preview.includes("☐ *01)* SKU1 — *4*\n*Total: 1 item — 4 units*"));
+    assert.doesNotMatch(preview, /LIVE-PROFILE|ACCOUNT-PHONE|PICKUP|Order total|Grosgrain ribbon|Order Recipient|Contact:|Phone:|Notes:|Receiving hours/);
+    assert.equal(await page.getByLabel("Message preview").getAttribute("readonly"), "");
+    assert.equal(await page.getByLabel("Recipient name", { exact: true }).count(), 0);
+    assert.equal(await page.getByLabel("Primary phone", { exact: true }).count(), 0);
+    assert.equal(await page.getByLabel("Delivery notes", { exact: true }).count(), 0);
+    assert.equal(await page.getByRole("link", { name: "View order and reservations" }).getAttribute("href"), `/admin/orders/${id}`);
+    await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
-    let text = await page.evaluate(() => window.__copies[0]);
-    assert.equal(text.split("\n")[0], "*PREPARE & DELIVER*");
-    assert.ok(text.startsWith("*PREPARE & DELIVER*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ *ABC-023AD*\n*1 item — 4 units*\n\n*1. PICK*\n"));
-    assert.match(text, /Order-only address/);
-    assert.doesNotMatch(text, /LIVE-PROFILE|ACCOUNT-PHONE|PICKUP|Order total|Grosgrain ribbon|Order Recipient|Contact:|Phone:|Notes:|Receiving hours/);
-    assert.match(text, /1 item — 4 units/);
-    assert.match(text, /\*01\)\* SKU1\n   ↳ A2-AE1: \*3 units\*\n   ↳ A10-AE1: \*1 unit\*/);
-    assert.ok(text.includes("☐ *01)* SKU1 — *4*\n*Total: 1 item — 4 units*"));
-    assert.doesNotMatch(text.split("*1. PICK*")[1].split("*2. PACK & CHECK*")[0], /Total:/);
-    assert.equal(await page.getByRole("dialog").count(), 0);
     state.order.resolvedDelivery.details.address = "NEW-ADDRESS";
-    await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
+    await page.getByRole("button", { name: "Prepare and deliver order" }).click();
+    await page.getByRole("dialog").waitFor();
+    assert.equal(await page.evaluate(() => window.__copies.length), 1);
+    assert.match(await page.getByLabel("Message preview").inputValue(), /NEW-ADDRESS/);
+    await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 2);
-    text = await page.evaluate(() => window.__copies[1]);
-    assert.match(text, /NEW-ADDRESS/);
+    assert.match(await page.evaluate(() => window.__copies[1]), /NEW-ADDRESS/);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 2);
     assert.equal(state.requests.filter((r) => r.method !== "GET").length, 0);
   });
   await t.test("legacy destination is reviewed and saved to the order, then the updated sheet copies", async (t) => {
     const { page, state } = await fixture(t, { legacy: true });
-    await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
+    await page.getByRole("button", { name: "Prepare and deliver order" }).click();
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.evaluate(() => window.__copies.length), 0);
     const close = page.getByRole("button", { name: "Close prepare and deliver" });
@@ -121,19 +129,72 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("staff copying accepts location-only details for current and legacy orders", async (t) => {
     for (const legacy of [false, true]) {
       const { page, state } = await fixture(t, { locationOnly: true, legacy });
-      await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
-      if (legacy) {
-        await page.getByRole("dialog").waitFor();
-        const save = page.getByRole("button", { name: "Save & Copy", exact: true });
-        assert.equal(await save.isEnabled(), true);
-        await save.click();
-      }
+      await page.getByRole("button", { name: "Prepare and deliver order" }).click();
+      await page.getByRole("dialog").waitFor();
+      const copy = page.getByRole("dialog").getByRole("button", { name: legacy ? "Save & Copy" : "Copy", exact: true });
+      assert.equal(await copy.isEnabled(), true);
+      await copy.click();
       await page.waitForFunction(() => window.__copies.length === 1);
       const text = await page.evaluate(() => window.__copies[0]);
       assert.match(text, /_Address:_ Order-only address/);
-      assert.doesNotMatch(text, /Contact:|Phone:|Notes:|Grosgrain ribbon|Order Recipient/);
+      assert.doesNotMatch(text, /Contact:|Phone:|Notes:|Grosgrain ribbon|Order Recipient|_Assigned To:_/);
       assert.equal(state.requests.filter((r) => r.method === "PUT").length, legacy ? 1 : 0);
     }
+  });
+  await t.test("assignment previews live, saves only on request, reopens and can be cleared", async (t) => {
+    const { page, state } = await fixture(t);
+    const open = async () => {
+      await page.getByRole("button", { name: "Prepare and deliver order" }).click();
+      await page.getByRole("dialog").waitFor();
+    };
+    await open();
+    await page.getByLabel("Assigned To (optional)").fill("Unsaved name");
+    await page.getByRole("button", { name: "Close prepare and deliver", exact: true }).click();
+    await open();
+    assert.equal(await page.getByLabel("Assigned To (optional)").inputValue(), "");
+    assert.equal(state.requests.filter((r) => r.method === "PUT").length, 0);
+    const readsBefore = state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length;
+    await page.getByLabel("Assigned To (optional)").fill("  Ahmed  ");
+    assert.match(await page.getByLabel("Message preview").inputValue(), /_Carton Tag:_ \*ABC-023AD\*\n_Assigned To:_ \*Ahmed\*/);
+    assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*/);
+    assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, readsBefore);
+    await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
+    await page.waitForFunction(() => window.__copies.length === 1);
+    assert.equal(state.order.assignedTo, "Ahmed");
+    assert.match(await page.evaluate(() => window.__copies[0]), /_Assigned To:_ \*Ahmed\*/);
+    const write = state.requests.find((r) => r.method === "PUT");
+    assert.equal(write.body.assignedTo, "Ahmed");
+    assert.equal(write.body.deliveryDetails.contactName, "Order Recipient");
+    assert.equal(write.body.deliveryDetails.phoneNumber, "+123456");
+    assert.equal(write.body.deliveryDetails.notes, "Receiving hours");
+    await open();
+    assert.equal(await page.getByLabel("Assigned To (optional)").inputValue(), "Ahmed");
+    await page.getByLabel("Assigned To (optional)").fill("");
+    await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
+    await page.waitForFunction(() => window.__copies.length === 2);
+    assert.equal(state.order.assignedTo, "");
+    assert.doesNotMatch(await page.evaluate(() => window.__copies[1]), /_Assigned To:_/);
+    assert.equal(state.requests.filter((r) => r.method === "PUT").length, 2);
+    assert.equal(state.requests.filter((r) => r.method === "PUT" && r.path.startsWith("/users/")).length, 0);
+  });
+  await t.test("a conflicting assignment preserves entered text and reloads the winning assignee", async (t) => {
+    const { page, state } = await fixture(t, { assignedTo: "Existing worker" });
+    await page.getByRole("button", { name: "Prepare and deliver order" }).click();
+    await page.getByRole("dialog").waitFor();
+    await page.getByLabel("Assigned To (optional)").fill("My edited worker");
+    state.conflict = true;
+    state.conflictAssignedTo = "Other worker";
+    await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
+    await page.getByText("Order changed. Reload and review before saving.").first().waitFor();
+    assert.equal(await page.getByLabel("Assigned To (optional)").inputValue(), "My edited worker");
+    assert.equal(await page.evaluate(() => window.__copies.length), 0);
+    page.once("dialog", (dialog) => dialog.accept());
+    await page.getByRole("button", { name: "Reload details" }).click();
+    await page.waitForFunction(() => document.querySelector("#order-assigned-to")?.value === "Other worker");
+    await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).click();
+    await page.waitForFunction(() => window.__copies.length === 1);
+    assert.match(await page.evaluate(() => window.__copies[0]), /_Assigned To:_ \*Other worker\*/);
+    assert.equal(state.requests.filter((r) => r.method === "PUT").length, 1);
   });
   await t.test("Courier edits are order-only and conflicting saves keep entered text", async (t) => {
     const { page, state } = await fixture(t);
@@ -179,13 +240,19 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     assert.equal(state.customer.deliveryPhoneNumber, "DEFAULT-RECIPIENT-PHONE");
     assert.equal(state.customer.phoneNumber, "ACCOUNT-PHONE");
   });
-  await t.test("clipboard retry uses the prepared preview without another request", async (t) => {
+  await t.test("clipboard retry keeps the saved assignee without another write or refresh", async (t) => {
     const { page, state } = await fixture(t, { mobile: true });
     await page.evaluate(() => { window.__copyFailure = true; });
-    await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
+    await page.getByRole("button", { name: "Prepare and deliver order" }).click();
     await page.getByRole("dialog").waitFor();
     assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ \*ABC-023AD\*\n/);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    await page.getByLabel("Assigned To (optional)").fill("Ahmed");
+    await page.getByRole("dialog").getByRole("button", { name: "Save & Copy", exact: true }).click();
+    await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).waitFor();
+    assert.equal(await page.evaluate(() => window.__copies.length), 0);
+    assert.equal(state.order.assignedTo, "Ahmed");
+    assert.equal(state.requests.filter((r) => r.method === "PUT").length, 1);
     // Dismiss the temporary clipboard-error toast before checking modal/navigation stacking.
     await page.locator(".Toastify__close-button").first().click();
     await page.locator(".Toastify__toast").waitFor({ state: "detached" });
@@ -196,12 +263,14 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.evaluate(() => { window.__copyFailure = false; });
     await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
-    assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 1);
+    assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 2);
+    assert.equal(state.requests.filter((r) => r.method === "PUT").length, 1);
+    assert.match(await page.evaluate(() => window.__copies[0]), /_Assigned To:_ \*Ahmed\*/);
   });
   await t.test("closed orders cannot initiate staff copying", async (t) => {
     for (const status of ["Delivered", "Cancelled"]) {
       const { page, state } = await fixture(t, { status });
-      assert.equal(await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "Prepare and deliver order" }).isDisabled(), true);
       assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
     }
   });

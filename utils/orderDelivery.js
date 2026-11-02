@@ -13,6 +13,13 @@ export const normalizeDeliveryDetails = (value = {}) => Object.fromEntries(
   Object.keys(DELIVERY_FIELDS).map((key) => [key, clean(value?.[key])])
 );
 
+export function validateAssignedTo(value) {
+  if (typeof value !== "string" || value.trim().length > 120) {
+    throw new Error("Assigned To must be a name of at most 120 characters.");
+  }
+  return value.trim();
+}
+
 export function validateDeliveryDetails(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Delivery details must be an object.");

@@ -67,6 +67,7 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
   return {
     orderId: id(order), orderNumber: order.orderNumber, status: order.status,
     label: buildCartonLabel(order.user?.name, order.orderNumber, id(order)),
+    assignedTo: order.assignedTo || "",
     generatedAt: generatedAt.toISOString(), delivery,
     picks, items: [...products.values()],
     problems: [...new Set(problems)], notices,

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildCartonLabel, getCustomerDeliveryDefaults, resolveOrderDelivery, validateDeliveryDetails } from "../utils/orderDelivery.js";
+import { buildCartonLabel, getCustomerDeliveryDefaults, resolveOrderDelivery, validateAssignedTo, validateDeliveryDetails } from "../utils/orderDelivery.js";
 import { buildFulfillmentSheet } from "../utils/orderFulfillment.js";
 
 const user = { name: "Alpha Beta Company", phoneNumber: "account-phone", address: "Default address", deliveryGoogleMapsUrl: "https://maps.app.goo.gl/example" };
@@ -14,6 +14,18 @@ test("compact carton label uses initials and the full last order segment", () =>
   assert.equal(buildCartonLabel("Jane Mary Doe", "ORD-261102-ABC123"), "JMD-ABC123");
   assert.equal(buildCartonLabel(" أحمد علي ", "ORD-261102-012345"), "أع-012345");
   assert.doesNotMatch(buildCartonLabel("A. B. C.", order.orderNumber), /[.\s]/);
+});
+
+test("assignment is an optional trimmed name with a bounded length", () => {
+  assert.equal(validateAssignedTo("  Ahmed  "), "Ahmed");
+  assert.equal(validateAssignedTo("   "), "");
+  assert.equal(validateAssignedTo("x".repeat(120)).length, 120);
+  for (const value of [null, 1, {}, [], "x".repeat(121)]) assert.throws(() => validateAssignedTo(value));
+});
+
+test("staff sheet returns the saved assignment and supports older unassigned orders", () => {
+  assert.equal(buildFulfillmentSheet({ ...order, assignedTo: "Ahmed" }, [allocation(4)]).assignedTo, "Ahmed");
+  assert.equal(buildFulfillmentSheet(order, [allocation(4)]).assignedTo, "");
 });
 
 test("default contacts can differ from account identity and blank overrides restore inheritance", () => {

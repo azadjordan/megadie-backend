@@ -39,6 +39,7 @@ const orderSchema = new mongoose.Schema(
     orderNumber: { type: String, required: true, unique: true, index: true },
     deliveryDetails: { type: deliveryDetailsSchema, default: undefined },
     deliveryRevision: { type: Number, default: 0, min: 0, validate: Number.isInteger },
+    assignedTo: { type: String, trim: true, maxlength: 120, default: "" },
 
     // link to quote (optional, 1:1 when exists)
     quote: { type: mongoose.Schema.Types.ObjectId, ref: "Quote", default: null },
