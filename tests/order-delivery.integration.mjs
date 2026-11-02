@@ -126,6 +126,14 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal(result.status, 200);
     assert.equal(result.body.data.resolvedDelivery.details.address, "");
     assert.equal(result.body.data.resolvedDelivery.savedToOrder, true);
+    await api(`/orders/${legacy._id}/delivery-details`, { method: "PUT", body: { expectedRevision: 1, deliveryDetails: { address: "Location only" } } });
+    await OrderAllocation.collection.insertOne({ order: legacy._id, product, slot: slots[0], qty: 1, status: "Reserved" });
+    const locationOnly = await api(`/orders/${legacy._id}/fulfillment-sheet`);
+    assert.deepEqual(locationOnly.body.data.problems, []);
+    assert.deepEqual(locationOnly.body.data.delivery.missingFields, []);
+    assert.equal(locationOnly.body.data.picks[0].name, undefined);
+    const courier = await api(`/orders/${legacy._id}`);
+    assert.deepEqual(courier.body.data.resolvedDelivery.missingFields, ["contactName", "phoneNumber"]);
     await Order.collection.updateOne({ _id: legacy._id }, { $unset: { deliveryDetails: "", deliveryRevision: "" }, $set: { status: "Delivered" } });
     assert.equal((await api(`/orders/${legacy._id}`)).body.data.resolvedDelivery.details, null);
     assert.equal((await api(`/orders/${legacy._id}/fulfillment-sheet`)).status, 409);

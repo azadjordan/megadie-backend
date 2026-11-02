@@ -11,7 +11,7 @@ const profile = { _id: "200000000000000000000001", name: "Admin", email: "admin@
 test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
-  async function fixture(t, { legacy = false, mobile = false, status = "Shipping" } = {}) {
+  async function fixture(t, { legacy = false, mobile = false, status = "Shipping", locationOnly = false } = {}) {
     const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1400, height: 1000 } });
     t.after(() => context.close());
     await context.addInitScript(() => {
@@ -26,13 +26,13 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     const state = { requests: [], unexpected: [], errors: [], conflict: false,
       order: { _id: id, orderNumber: "ORD-261102-023AD", status, createdAt: "2026-11-02T10:00:00Z", user: { _id: "client", name: "Alpha Beta Company", phoneNumber: "ACCOUNT-PHONE", address: "LIVE-PROFILE-ADDRESS" },
         orderItems: [{ product: "p1", sku: "SKU1", productName: "Grosgrain ribbon", qty: 4, unitPrice: 10 }], totalPrice: 40, allocationStatus: "Allocated", invoice: null,
-        resolvedDelivery: { details: { ...details }, savedToOrder: !legacy, revision: legacy ? 0 : 1, missingFields: [] } },
+        resolvedDelivery: { details: locationOnly ? { address: details.address, googleMapsUrl: details.googleMapsUrl } : { ...details }, savedToOrder: !legacy, revision: legacy ? 0 : 1, missingFields: locationOnly ? ["contactName", "phoneNumber"] : [] } },
     };
     state.customer = { ...state.order.user, email: "client@test.invalid", deliveryContactName: "", deliveryPhoneNumber: "" };
     const sheet = () => ({ orderId: id, orderNumber: state.order.orderNumber, status: state.order.status,
-      generatedAt: "2026-11-02T10:00:00Z", label: "ABC-023AD", delivery: state.order.resolvedDelivery,
+      generatedAt: "2026-11-02T10:00:00Z", label: "ABC-023AD", delivery: { ...state.order.resolvedDelivery, missingFields: state.order.resolvedDelivery.missingFields.filter((key) => key === "addressOrLocation") },
       problems: state.order.resolvedDelivery.savedToOrder ? [] : ["Review and save the delivery details for this order."], notices: [],
-      picks: [{ slot: "A2-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 4 }],
+      picks: [{ slot: "A10-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 1 }, { slot: "A2-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 3 }],
       items: [{ productId: "p1", sku: "SKU1", name: "Grosgrain ribbon", orderedQty: 4, allocatedQty: 4 }],
     });
     await context.route("**/*", async (route) => {
@@ -80,15 +80,17 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     let text = await page.evaluate(() => window.__copies[0]);
-    assert.equal(text.split("\n")[0], "ABC-023AD");
+    assert.equal(text.split("\n")[0], "*Carton Tag: ABC-023AD*");
     assert.match(text, /Order-only address/);
-    assert.doesNotMatch(text, /LIVE-PROFILE|ACCOUNT-PHONE|PICKUP|Order total/);
+    assert.doesNotMatch(text, /LIVE-PROFILE|ACCOUNT-PHONE|PICKUP|Order total|Grosgrain ribbon|Order Recipient|Contact:|Phone:|Notes:|Receiving hours/);
+    assert.match(text, /1 item — 4 units/);
+    assert.match(text, /• \*SKU1\*\n\n- A2-AE1: 3 units\n- A10-AE1: 1 unit\n- Total: 4 units/);
     assert.equal(await page.getByRole("dialog").count(), 0);
-    state.order.resolvedDelivery.details.phoneNumber = "NEW-PHONE";
+    state.order.resolvedDelivery.details.address = "NEW-ADDRESS";
     await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
     await page.waitForFunction(() => window.__copies.length === 2);
     text = await page.evaluate(() => window.__copies[1]);
-    assert.match(text, /NEW-PHONE/);
+    assert.match(text, /NEW-ADDRESS/);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 2);
     assert.equal(state.requests.filter((r) => r.method !== "GET").length, 0);
   });
@@ -103,15 +105,32 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     assert.equal(await page.evaluate(() => document.activeElement?.textContent), "Save & Copy");
     await page.keyboard.press("Tab");
     assert.equal(await close.evaluate((node) => node === document.activeElement), true);
-    await page.getByLabel("Recipient name").fill("New receiving contact");
+    await page.getByLabel("Address", { exact: true }).fill("New order destination");
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
-    assert.match(await page.evaluate(() => window.__copies[0]), /New receiving contact/);
+    assert.match(await page.evaluate(() => window.__copies[0]), /New order destination/);
     const writes = state.requests.filter((r) => r.method !== "GET");
     assert.equal(writes.length, 1);
     assert.equal(writes[0].path, `/orders/${id}/delivery-details`);
     assert.equal(writes[0].body.expectedRevision, 0);
     assert.equal(state.order.user.address, "LIVE-PROFILE-ADDRESS");
+  });
+  await t.test("staff copying accepts location-only details for current and legacy orders", async (t) => {
+    for (const legacy of [false, true]) {
+      const { page, state } = await fixture(t, { locationOnly: true, legacy });
+      await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
+      if (legacy) {
+        await page.getByRole("dialog").waitFor();
+        const save = page.getByRole("button", { name: "Save & Copy", exact: true });
+        assert.equal(await save.isEnabled(), true);
+        await save.click();
+      }
+      await page.waitForFunction(() => window.__copies.length === 1);
+      const text = await page.evaluate(() => window.__copies[0]);
+      assert.match(text, /Address: Order-only address/);
+      assert.doesNotMatch(text, /Contact:|Phone:|Notes:|Grosgrain ribbon|Order Recipient/);
+      assert.equal(state.requests.filter((r) => r.method === "PUT").length, legacy ? 1 : 0);
+    }
   });
   await t.test("Courier edits are order-only and conflicting saves keep entered text", async (t) => {
     const { page, state } = await fixture(t);
@@ -162,7 +181,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.evaluate(() => { window.__copyFailure = true; });
     await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
     await page.getByRole("dialog").waitFor();
-    assert.match(await page.getByLabel("Message preview").inputValue(), /^ABC-023AD\n/);
+    assert.match(await page.getByLabel("Message preview").inputValue(), /^\*Carton Tag: ABC-023AD\*\n/);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     // Dismiss the temporary clipboard-error toast before checking modal/navigation stacking.
     await page.locator(".Toastify__close-button").first().click();

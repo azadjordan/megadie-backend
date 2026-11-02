@@ -50,7 +50,20 @@ test("sheet naturally sorts slots, aggregates duplicate order lines, and allowli
   assert.deepEqual(sheet.picks.map((p) => p.slot), ["A2-AE1", "A10-AE1"]);
   assert.equal(sheet.items[0].orderedQty, 6);
   assert.equal(sheet.items[0].allocatedQty, 6);
+  assert.equal(sheet.items[0].name, undefined);
+  assert.equal(sheet.picks[0].name, undefined);
   assert.doesNotMatch(JSON.stringify(sheet), /SECRET|9876|totalPrice|unitPrice|email|storeAddress/);
+});
+
+test("staff sheets need only a delivery location while Courier retains its contact requirements", () => {
+  for (const location of [{ address: "Location only" }, { googleMapsUrl: "https://maps.app.goo.gl/place" }]) {
+    const locationOnly = { ...order, deliveryDetails: location };
+    const sheet = buildFulfillmentSheet(locationOnly, [allocation(4)]);
+    assert.deepEqual(sheet.problems, []);
+    assert.deepEqual(sheet.delivery.missingFields, []);
+    assert.deepEqual(resolveOrderDelivery(locationOnly).missingFields, ["contactName", "phoneNumber"]);
+  }
+  assert.ok(buildFulfillmentSheet({ ...order, deliveryDetails: {} }, [allocation(4)]).problems.some((p) => p.includes("location is missing")));
 });
 
 test("allocation problems produce drafts rather than silently dropping discrepancies", () => {

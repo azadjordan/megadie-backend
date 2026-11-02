@@ -37,7 +37,7 @@ export const getOrderFulfillmentSheet = asyncHandler(async (req, res) => {
   res.set("Cache-Control", "no-store");
   requireId(req.params.id, res);
   const order = await Order.findById(req.params.id)
-    .select("user orderNumber orderItems.product orderItems.sku orderItems.productName orderItems.qty status stockFinalizedAt deliveryDetails deliveryRevision")
+    .select("user orderNumber orderItems.product orderItems.sku orderItems.qty status stockFinalizedAt deliveryDetails deliveryRevision")
     .populate("user", "name phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes deliveryContactName deliveryPhoneNumber")
     .lean();
   if (!order) { res.status(404); throw new Error("Order not found."); }

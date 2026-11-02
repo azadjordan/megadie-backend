@@ -10,9 +10,11 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
   const notices = [];
   const products = new Map();
   const delivery = resolveOrderDelivery(order);
+  // Staff messages share only the destination; Courier still requires contact details.
+  delivery.missingFields = delivery.missingFields.filter((key) => key === "addressOrLocation");
   if (order.status !== "Shipping") problems.push("Order is not Shipping. Confirm reservations before preparing it.");
   if (!delivery.savedToOrder) problems.push("Review and save the delivery details for this order.");
-  if (delivery.missingFields.length) problems.push("Delivery details are incomplete: add a contact, phone, and address or map.");
+  if (delivery.missingFields.length) problems.push("Delivery location is missing: add an address or map.");
 
   for (const item of order.orderItems || []) {
     const productId = id(item.product);
@@ -23,7 +25,7 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
     const previous = products.get(productId);
     if (previous) previous.orderedQty += item.qty;
     else products.set(productId, {
-      productId, sku: item.sku || "Unknown SKU", name: item.productName || "",
+      productId, sku: item.sku || "Unknown SKU",
       orderedQty: item.qty, allocatedQty: 0,
     });
   }
@@ -48,7 +50,7 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
       problems.push(`${product.sku}: missing slot or unexpected store; confirm the stock location.`);
     }
     picks.push({
-      slot: row.slot?.label || "Unknown slot", sku: product.sku, name: product.name,
+      slot: row.slot?.label || "Unknown slot", sku: product.sku,
       qty: row.qty, deducted: row.status === "Deducted",
     });
   }
