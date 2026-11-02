@@ -1,207 +1,133 @@
-# Order delivery details — backend and shared contract
+# Order delivery details — reviewed backend plan
 
-Status: proposed implementation plan; no schema, API, or database changes applied.
-Date: 2026-11-02.
+Status: planning only; no application or database changes.
+Reviewed: 2026-11-02. This version replaces the first plan.
 Branch in both repositories: `feat/order-delivery-details`.
-Backend starting commit: `93c2970` (`main`, synchronized with GitHub when branching).
-Frontend starting commit: `d1f574e`.
-Frontend companion: `../../megadie-frontend-v2/docs/order-delivery-details-plan.md`.
+Companion: [frontend plan](../../megadie-frontend-v2/docs/order-delivery-details-plan.md).
 
-## 1. Outcome
+## 1. Goal and scope
 
-An administrator can give one person a clear **Prepare & Deliver** sheet: collect the reserved items from the correct physical stores, check the packed quantities, and deliver to the recipient saved for that order. The existing **Courier** action stays available for an external delivery company. Both actions use the same order destination.
+Keep three clear owners: a store has a pickup location, a customer has usual delivery details, and an order has its own saved destination. Courier and Prepare & Deliver use the same order destination. Editing an order never updates the customer's account or other orders. Editing customer defaults affects future orders, not saved destinations.
 
-The data belongs in three places:
+This is an address-and-copy feature. It does not change quoting, pricing, invoices, payments, reservations, order statuses, or stock deduction. Copying is read-only. No address book, driver management, route planning, geocoding, map SDK, or new dependency is required.
 
-| Owner | Meaning | When it changes |
+## 2. Review corrections and simplifications
+
+| First plan | Reviewed decision | Reason |
 | --- | --- | --- |
-| Store location | Where AE1 or AE2 physically is | An administrator edits that store |
-| Customer default | The customer's usual delivery contact and destination | Customer or administrator edits the default |
-| Order destination | Delivery details chosen for one order | Administrator explicitly edits that order |
+| New nested customer default plus mirrored legacy fields | Keep existing customer address fields; add only two optional contact overrides | One stored value per field; no migration or synchronization layer |
+| Separate StoreLocation collection and CRUD | Two fixed locations inside existing SiteSettings | Existing settings model, controller, and routes are sufficient |
+| Source enums, capture/edit timestamps, editor identity | Saved order value plus one delivery revision | No current feature needs a separate address audit system |
+| Read-only snapshot transaction for every sheet | Ordinary bounded database reads | Copying is an informational read, not a stock operation |
+| Preview, fetch again on Copy, compare responses, confirm changes | One fresh request per normal copy click | Preserve the existing simple copying interaction |
+| New full customer profile delivery interface | Extend existing admin fields; retain the current customer profile form | Avoid a separate profile redesign |
+| Google host allowlist and detailed phone parsing | Length/type checks, a valid HTTPS map link, and ordinary international phone text | No provider-specific URL parser or phone normalization project |
 
-Changing a customer default must not change existing order destinations. Editing one order must not change the customer's account or other orders. Copying a sheet must not reserve, deduct, deliver, or otherwise change the order.
+The earlier profile path was wrong: the existing route is **`/api/users/account/profile`**, not `/api/users/profile`.
 
-## 2. Current behavior and affected code
+## 3. Customer defaults: retain current storage
 
-- `models/userModel.js`: flat `phoneNumber`, `secondaryPhoneNumber`, `address`, `deliveryGoogleMapsUrl`, and `deliveryNotes`. `name` doubles as the recipient name. The account `phoneNumber` has a unique index.
-- `models/orderModel.js`: references `user`, with no saved delivery destination.
-- `controllers/orderController.js`: single/admin order reads populate the customer's current profile; `createOrderFromQuote` creates orders inside an existing transaction. General order updates can change the customer when no invoice exists.
-- `controllers/userController.js` and `routes/userRoutes.js`: profile and administrator user editing already exist.
-- `models/slotModel.js`: slots reference the stable store codes `AE1` and `AE2`. There is no physical-location directory. `StoreSnapshot` is an inventory summary, not an address record.
-- `controllers/orderAllocationController.js`: allocation reads populate products and slots; the current response also includes internal staff fields that do not belong in shared sheets.
-- Frontend courier copying currently saves edited delivery fields back to the **User**. The unfinished local worker pick-list prototype reads an order and its allocations separately.
+The current User fields already describe a default destination: `address`, `secondaryPhoneNumber`, `deliveryGoogleMapsUrl`, and `deliveryNotes`. Keep their names and existing API behavior. Add optional strings `deliveryContactName` and `deliveryPhoneNumber` so a receptionist/recipient can differ from the account holder.
 
-## 3. Scope and boundaries
+A small backend helper produces this common value:
 
-Implement the three data owners, their editing flows, and the two copy actions. Keep existing inventory store codes, slots, allocations, quote pricing, invoice addresses, payments, and stock workflows intact except where their integration with the new destination must be explicit.
-
-One customer default and one destination per order are sufficient for this version. Multiple address books, coordinates, geocoding, route optimization, driver accounts, and delivery tracking are outside this feature. Do not infer that allocated or deducted stock has physically been packed.
-
-## 4. Data design
-
-### Shared delivery-details value
-
-Use the same field names for the customer default and the order copy:
-
-```json
-{
-  "contactName": "Recipient or company contact",
-  "phoneNumber": "+971...",
-  "secondaryPhoneNumber": "",
-  "address": "Building, street, area, city, and useful landmarks",
-  "googleMapsUrl": "https://maps.app.goo.gl/...",
-  "notes": "Entrance instructions or receiving hours"
-}
+```text
+contactName          = nonblank deliveryContactName, otherwise account name
+phoneNumber          = nonblank deliveryPhoneNumber, otherwise account phoneNumber
+secondaryPhoneNumber = existing secondaryPhoneNumber
+address              = existing address
+googleMapsUrl        = existing deliveryGoogleMapsUrl
+notes                = existing deliveryNotes
 ```
 
-These are trimmed strings, not foreign-key references to a mutable address. Explicitly clearing a field must keep it cleared; do not fill individual empty fields from another source after a value has been saved.
+The two optional overrides are explicitly labeled that way in the UI. Clearing an override means use the account contact for future orders. Clearing an address/map/notes clears that field. The account's unique phone constraint stays as it is; delivery phone overrides are not unique. Neither an order edit nor an override edit writes to the account name/phone.
 
-Allow incomplete defaults and order destinations to be saved. A complete destination for final sharing needs a contact name, primary delivery phone, and **address or Google Maps link**. A map is encouraged but not mandatory when the written address is sufficient. Validate provided phone values without assuming every recipient has a UAE number. Accept ordinary Google Maps links, including existing short links; parse URLs and require HTTPS and an approved Google Maps host/path. Do not resolve short links or call a maps service on page loads.
+Extend existing profile/admin user allowlists and detail responses for those two fields. Omitted update fields stay unchanged. Do not introduce a nested customer object, aliases, dual writes, new user-list queries, or a bulk customer migration. Account name/phone changes affect future default resolution only when no contact override is set.
 
-Set finite lengths in the shared validation helper: name 200, phones 50 each, address 1000, map URL 2048, notes 1000 characters. Reject malformed provided values with field errors, not silently truncated text. Preserve international characters and readable addresses.
+## 4. Order destination: the necessary new storage
 
-### Customer: `User.defaultDeliveryDetails`
+Add optional embedded `Order.deliveryDetails`, with these six string fields:
 
-- Add an optional embedded value with the shape above; absence means a legacy customer, not a saved blank default.
-- Keep account `name`, `email`, and unique `phoneNumber` as account identity/contact fields. A delivery phone is not unique and may belong to a receptionist, branch, or another recipient.
-- When the new object is absent, derive a suggested default from the old fields: `name` → `contactName`, account phone → delivery phone, old address/secondary phone/maps/notes → matching delivery fields.
-- Once the new object exists, use the whole saved object. Account name/phone changes do not silently rewrite it.
-- No bulk user rewrite is necessary. The new object is persisted when the default is explicitly saved; new orders may copy the derived legacy default.
-
-### Physical store: `StoreLocation`
-
-Create a small directory with `code` (unique, fixed `AE1`/`AE2`), `name`, `address`, `googleMapsUrl`, `phoneNumbers` (at most two), optional `contactName`/`notes`, and timestamps. Store codes are immutable. Two short editing forms are enough; no generic warehouse-management feature is required.
-
-Slots continue storing their existing code. A store's latest physical details are resolved from that code when a sheet is requested. Do not copy an address onto every slot or reuse `StoreSnapshot`. An absent/incomplete store record produces a visible missing-pickup warning, not a guessed address.
-
-AE1 and AE2 are confirmed to be separate physical locations. Their actual addresses, maps, and phones still need to be entered/confirmed. The existing hard-coded courier pickup pin has **not** been identified as either location. Keep that courier handoff configuration until its meaning is confirmed; do not assign it to both stores. If it is confirmed to be AE1/AE2, the courier action can reference that directory entry. Otherwise it remains the separately named courier handoff point for this release.
-
-### Order: saved `deliveryDetails`
-
-Add an optional embedded `deliveryDetails` value and `deliveryDetailsMeta`:
-
-```json
-{
-  "source": "customer_default",
-  "revision": 1,
-  "capturedAt": "server timestamp of first capture",
-  "updatedAt": "server timestamp of latest edit",
-  "updatedBy": "administrator id"
-}
+```text
+contactName, phoneNumber, secondaryPhoneNumber,
+address, googleMapsUrl, notes
 ```
 
-Source values: `customer_default`, `order_override`, `legacy_confirmed`. Metadata is server-controlled. Old orders without a saved object have revision `0`. New orders receive a normalized copy of the resolved customer default inside the order-creation transaction, even if some details are missing. Missing delivery information does not prevent creating the order from a confirmed quote.
+Add `deliveryRevision`, a nonnegative integer. Existing orders without the field read as revision 0. New order destinations start at 1; every explicit destination save increments it. No saved source enum, separate timestamps, or editor fields are needed for this feature.
 
-The snapshot freezes the selected values against later profile edits; it is still explicitly editable while the order is `Processing` or `Shipping`. Delivered/cancelled orders are read-only through this feature. Each successful change increments the revision. A repeated identical save need not increment it; first capture/legacy confirmation must persist it.
+- In the existing quote-to-order transaction, read the customer's defaults using the same session and save a copy on the new order. Incomplete details must not block order creation.
+- The saved object is authoritative as a whole. A deliberately empty order field must not be filled from today's profile. Its presence, even when incomplete, distinguishes a saved destination from an older order without one.
+- Administrators can edit destinations while Processing or Shipping. Delivered/cancelled orders are read-only through this endpoint.
+- Save the destination and increment its revision in one conditional update, checking expected revision and active status. Require `expectedRevision` in the request. Return 409 on a stale edit and retain the administrator's entered text in the UI.
+- The existing API permits changing an order's customer when no invoice exists. If that happens, copy the new customer's default and increment the delivery revision in the same protected write. Never retain the previous customer's destination. Preserve existing invoice restrictions and guard against concurrent delivery edits. Do not add a new customer-reassignment interface or refactor unrelated order updates.
 
-If the existing general order-update flow changes `user`, replace the destination from the new customer's default in the same protected update and increment its revision. Return a visible destination-reset result. Never retain the previous customer's destination or silently overwrite a concurrent destination edit. Existing invoice/customer-change restrictions still apply.
+### Older orders
 
-## 5. Resolution and older orders
+Use one backend resolver for order details and staff-sheet reads:
 
-Implement one backend resolver used by both order reads and the fulfillment-sheet endpoint:
+1. Saved order value exists: return it without consulting profile fields for replacements.
+2. Older Processing/Shipping order without a saved value: return the current customer default as a suggestion. The administrator reviews and explicitly saves it before a final delivery copy.
+3. Older Delivered/Cancelled order without a saved value: historical destination is unavailable. Do not invent it from today's profile.
 
-1. Saved `order.deliveryDetails` exists: return it as a whole, independent of current User data.
-2. Legacy active order without saved details: return the current customer default as a **suggestion**, with `requiresConfirmation: true` and `source: legacy_customer_profile`. Reading does not write a snapshot.
-3. Legacy delivered/cancelled order without saved details: return historical destination unavailable. Do not substitute today's profile as a historical address.
+Return a small `resolvedDelivery` view: `details` (or null), `savedToOrder`, `revision`, and `missingFields`. No second persisted default or historical backfill is required. GET requests never save an address. A button labeled Save & Copy may perform an explicit save followed by a read/copy; a plain Copy action does not save anything.
 
-Expose this read contract as `resolvedDelivery`:
+## 5. AE1 and AE2: reuse SiteSettings
 
-```json
-{
-  "details": { "contactName": "...", "phoneNumber": "...", "secondaryPhoneNumber": "", "address": "...", "googleMapsUrl": "", "notes": "" },
-  "source": "order_override",
-  "revision": 2,
-  "requiresConfirmation": false,
-  "missingFields": [],
-  "updatedAt": "server timestamp or null"
-}
-```
+The existing singleton `SiteSettings` record can hold fixed `storeLocations.AE1` and `storeLocations.AE2` embedded values. Each contains `name`, `address`, `googleMapsUrl`, `phoneNumbers` (up to two), and optional `notes`. Store code remains the existing slot code; a blank display name can fall back to that code.
 
-An administrator reviews and saves an active legacy order before final delivery copying. A clearly marked preparation draft may be copied earlier. Never backfill completed orders with current profile data and call it their original destination. Do not create snapshots from GET requests or clipboard actions.
+Expose two admin-only operations in the existing settings controller/router: read both locations, and save one fixed code. Update only `storeLocations.<code>` so saving AE1 cannot replace AE2 or the maintenance notice. Keep the public maintenance-notice response explicitly allowlisted; store details are not public. No separate collection, index, generic warehouse CRUD, store deletion, or settings version protocol is needed.
 
-## 6. API contract
+For a usable pickup, an address **or** map is sufficient. Pickup phone and notes are useful but optional. Missing configuration produces a clear draft warning, never a guessed location.
 
-Follow the existing `{ success, message, data }` response envelope except where existing endpoints already return another shape. Share validation/resolution code; do not maintain two different definitions of a complete destination.
+The actual AE1/AE2 addresses and map links still need confirmation. The current hard-coded external-courier pickup point has not been identified as either store. Preserve its existing configuration for now; do not assign it to AE1/AE2 or change the external courier's collection route without that business information.
 
-| Route | Access | Behavior |
-| --- | --- | --- |
-| Existing `GET /api/users/profile`, `GET /api/users/:id` | Self / admin | Return resolved `defaultDeliveryDetails` and indicate `saved_default` or `legacy_profile` |
-| Existing `PUT /api/users/profile`, `PUT /api/users/:id` | Self / admin | Accept `defaultDeliveryDetails`; when present it replaces that normalized value; omission leaves it unchanged |
-| `GET /api/store-locations` | Admin | Return AE1/AE2 configuration and completeness; two records maximum |
-| `PUT /api/store-locations/:code` | Admin | Upsert the fixed-code location; validate provided fields, permit incomplete setup; protect stale edits using expected `updatedAt` |
-| Existing order detail/admin reads | Existing owner/admin rules | Include saved details and `resolvedDelivery`; customer responses omit internal editor metadata and stock locations |
-| `PUT /api/orders/:id/delivery-details` | Admin | Save this order only; body `{ deliveryDetails, expectedRevision }`; server determines source and timestamps |
-| `GET /api/orders/:id/fulfillment-sheet` | Admin | Fresh, purpose-built DTO for Prepare & Deliver; no writes |
+## 6. Small API additions
 
-Require `expectedRevision` as a nonnegative integer in every destination-update request. Use a conditional database update: that revision, active status, and the customer loaded for the update must still match. A missing revision in an old stored order is treated as `0`; an omitted request revision is invalid. Return `409` with a refresh/review message if the record changed; return `400` for invalid values, `404` for unknown orders/codes, and existing auth errors for unauthorized requests. The client must not force an overwrite after a conflict.
+Use the existing response envelope and authorization conventions.
 
-### Compatibility during deployment
-
-- Keep legacy User fields and response aliases during this feature. Audit reads/writes in registration, profile, admin editing, and any document generation before changing their behavior.
-- New nested delivery writes mirror delivery-only aliases (`address`, `secondaryPhoneNumber`, `deliveryGoogleMapsUrl`, `deliveryNotes`) for older readers. They **never** overwrite account name or account phone.
-- Older clients sending a subset of those delivery-only aliases patch that subset of the normalized default, initializing from the legacy profile first if needed. Unsubmitted fields are preserved.
-- Old account name/phone writes keep their account semantics. Once a saved default exists, they do not automatically change its independent contact. The old courier UI still has its current account-editing behavior until the new frontend deploys; backend compatibility alone does not fix that UI.
-- Preserve pricing sanitization and ownership checks when extending order responses. Do not let new customer API fields expose internal notes/editor identities or store details.
-
-## 7. Prepare & Deliver read model and rules
-
-Use one request when the administrator opens/copies the sheet, rather than separate per-row order/allocation/store requests. Read the order, relevant allocations/slots, referenced stores, and any needed product labels in bounded batches, with a read-only snapshot transaction for a consistent view across these collections. Existing order transactions already require transaction support. Return a generation timestamp; a copied message represents that moment and is not a live reservation or delivery guarantee.
-
-Build an explicit DTO with:
-
-- order id, number, status, stock-finalized state, generation time, and carton label;
-- the shared `resolvedDelivery`;
-- `pickups`: only stores referenced by eligible allocations, grouped by store then slot; each store includes its own address, map, contacts, and allocation lines;
-- `items`: product id, immutable order SKU/name where available, size/variant label where available, ordered quantity, active reserved quantity, deducted quantity, and unresolved balance;
-- structured warnings and a final-sheet/draft/reference state.
-
-Use order item snapshots as the expected packing list; enrich readable variant labels only when necessary. Product schema currently has no explicit selling-unit field, so use neutral `units` unless an existing product-type rule can reliably supply the correct unit. Do not label every product as rolls. Naturally sort slots (A2 before A10). Include each actual pickup only once.
-
-Only active allocations count: `Reserved`, `Deducted`, and legacy missing-status allocations treated according to existing stock rules; cancelled allocations do not count. Keep deducted quantities separate from quantities still needing collection. Flag orphaned allocations, unknown stores/slots, products outside the order, fractional/invalid quantities, under-allocation, over-allocation, and mixed states. Never silently present excess stock as an instruction to pick it.
-
-| Condition | Output behavior |
+| API | Change |
 | --- | --- |
-| Active order, destination confirmed/complete, pickups complete, quantities reconcile | Final Prepare & Deliver sheet |
-| Missing destination/pickup details, unconfirmed legacy destination, or allocation discrepancy | Clearly headed preparation draft / HOLD; final copy unavailable; identify what needs fixing |
-| Already deducted/finalized stock | Prominent warning to check packed goods; deducted lines are reference quantities, not new pick instructions |
-| Delivered | Read-only completed reference; no fresh preparation/delivery instruction |
-| Cancelled | No actionable copy; show cancellation explanation |
+| Existing GET/PUT `/api/users/account/profile` | Add the two optional delivery contact overrides; retain current fields and account semantics |
+| Existing GET/PUT `/api/users/:id` (admin) | Same additional fields on user details/editing |
+| GET `/api/site-settings/store-locations` (admin) | Return AE1/AE2 configuration |
+| PUT `/api/site-settings/store-locations/:code` (admin) | Save only AE1 or AE2 |
+| Existing GET `/api/orders/:id` | Add `resolvedDelivery` using current owner/admin access rules |
+| PUT `/api/orders/:id/delivery-details` (admin) | Body `{ deliveryDetails, expectedRevision }`; update this order only; return saved details and revision |
+| GET `/api/orders/:id/fulfillment-sheet` (admin) | One fresh staff-sheet read; no state changes |
 
-The staff formatter receives only this DTO. Exclude prices, totals, invoices/payments, internal notes, staff identities, and unrelated account fields. Delivery contact data is intentionally included for this authorized role. Courier keeps its existing financial/instruction content and single handoff pickup; reuse destination data/validation, not the entire courier template for staff.
+Do not load fulfillment data for order-list rows or add address-specific work to every list query. Preserve owner pricing sanitization and existing access checks. General order updates must not accept delivery details through an unguarded second path.
 
-## 8. Implementation sequence
+For newly edited values, trim strings, enforce reasonable length/type limits, accept international phone text, and require a valid HTTPS URL when a map is supplied. Do not dereference short links or enforce a Google domain list. A complete delivery copy requires a contact name, primary phone, and address or map. Incomplete data can be saved. Validate edited data without making an unrelated account save or order conversion fail because of legacy delivery formatting.
 
-1. **Shared contract and tests:** normalization, completeness, URL rules, whole-value resolution, legacy behavior, revision-conflict fixtures.
-2. **Models and defaults:** add embedded customer/order values and StoreLocation; extend profile/admin user APIs and compatibility adapters. No destructive migration.
-3. **Order integration:** capture defaults in quote-to-order creation, add order-only update endpoint, handle customer reassignment and owner/admin projections.
-4. **Locations and sheet:** fixed-code location API, fresh batched fulfillment read, readiness/warning rules, explicit DTO.
-5. **Frontend integration:** follow the companion plan; replace the prototype's two requests, update courier editing semantics, and use both copy actions to verify the shared destination.
-6. **End-to-end review and release:** validate customer/default/order isolation and both store pickups, review final diff, then commit/push feature work and merge/deploy only in the agreed release step.
+## 7. Prepare & Deliver read and text
 
-Each stage should remain reviewable. Include only feature changes; the unrelated untracked inventory operation scripts are excluded.
+Read the selected order, its relevant allocations/slots, and the two configured store locations using selected fields and bounded queries. Return 409 for Cancelled/Delivered orders instead of generating new preparation instructions, including when the list row was stale. Use order SKU/product-name snapshots for item identification; a missing old name can fall back to SKU. No product-by-product lookup or new selling-unit system is needed. Use neutral units.
 
-## 9. Verification and acceptance
+Return a small allowlisted response containing order number/status, generated time, carton tag, resolved destination, pickup groups, per-product ordered/allocated quantities, and two arrays: `problems` (makes the sheet a draft) and `notices` (advisory). Keep business checks in the backend and text formatting in a pure frontend helper. This is not a new fulfillment state machine.
 
-Use pure Node tests for normalization, resolution, DTO/quantity rules, and field allowlists. Use a disposable MongoDB test database for persistence, authorization, conditional updates, and transaction reads. The current development backend points to `production-db`; do not use it for mutation tests or migrations.
+- Group allocations by actual store, then naturally sorted slot (A2 before A10). Show only stores used by the order and one final per-SKU packing check across stores. Aggregate duplicate order items by product id before comparing quantities.
+- Follow existing allocation rules: Reserved and legacy missing-status rows are reservations; Deducted rows are inventory history; Cancelled rows are excluded. Flag missing slots, unknown stores, foreign-product rows, invalid quantities, quantity mismatches, or mixed reserved/deducted state. Do not hide excess rows or present them as approved picking instructions.
+- Preserve the actual workflow: **Shipping/reservations → Delivered → stock finalization**. An inventory deduction does not itself prove physical collection. Retain the existing check-before-picking-again warning rather than inventing automatic picked/packed status.
+- Complete Shipping orders get a normal sheet. Processing/unconfirmed/incomplete/inconsistent orders get a clearly labeled preparation draft / HOLD with the specific problems. This does not block existing order-status APIs or create new readiness requirements there.
+- Do not offer a new actionable staff sheet for Cancelled or Delivered orders. Keep existing order viewing; no separate completed-reference feature is needed. Finalized allocations can expire after 60 days under the existing TTL, so historical slot reconstruction is outside scope.
+- Recipient contact, destination, and delivery notes belong in the staff sheet. Prices, payment/invoice data, account email, internal order notes, and staff identities do not. Courier retains its separate commercial instructions/content but uses the same resolved destination.
 
-- A new order copies the default at creation; later profile changes leave it unchanged.
-- Changing delivery phone/name does not change account phone/name or its uniqueness rules; two customers may share a delivery contact.
-- Two orders for one customer can have different destinations; editing one affects neither the other nor the default.
-- Saved blank fields stay blank; partial form updates do not erase unsubmitted values.
-- Legacy active orders require explicit confirmation; legacy completed orders do not get fabricated historical destinations.
-- Customer reassignment cannot retain the old destination, bypass invoice restrictions, or overwrite a concurrent edit.
-- Two editors racing to save yield one success and one conflict; delivered/cancelled transitions also prevent stale destination updates.
-- Ordinary users cannot edit order destinations/manage locations/read staff sheets; owners only see permitted order fields.
-- AE1-only, AE2-only, and multi-store orders show exactly the relevant physical pickups and correctly sorted slots.
-- Complete/partial/excess/orphaned/cancelled/deducted allocations produce the specified quantities and warnings.
-- Copy/read endpoints perform no writes and do not change availability, allocation status, order status, or payment state.
-- External Courier and Prepare & Deliver show identical recipient details for the same saved order, with their separate content rules.
-- Existing catalog/availability and affected order-creation tests continue to pass; run frontend lint/build and the targeted integration flow once implemented.
+Ordinary reads are not an atomic cross-collection snapshot. The sheet is informational data fetched for the selected click; changes made during/after the read can make it stale. Show the generation time in any preview and allow retry/refresh. Keep allocation writes/delivery/finalization checks authoritative in their existing transactions. Do not add read transactions, polling, or compare-and-confirm logic for clipboard text.
 
-## 10. Rollout and remaining inputs
+## 8. Implementation order and verification
 
-Deploy the additive backend first, then the frontend. Enter and verify actual AE1/AE2 location data before relying on final staff sheets; incomplete configuration remains visibly a draft. Review and capture active legacy order destinations as staff use them. No mass backfill of historical orders or legacy-field deletion is part of this release.
+1. Implement the small default/resolution helper, two optional User fields, and saved order value/revision. Wire existing user APIs and order creation; test default/order isolation.
+2. Add guarded order-only delivery editing and the customer-reassignment safeguard. Switch Courier from editing User to editing the order.
+3. Extend existing settings with AE1/AE2 and their small admin editor.
+4. Add the combined sheet read and evolve the unfinished pick-list formatter/button into Prepare & Deliver.
+5. Run focused integration checks, frontend lint/build, and relevant existing order/catalog regression tests before coordinated review/release.
 
-Keep both repositories on `feat/order-delivery-details` during implementation and create a coordinated review for each. The plans are local at this stage; there is no deployment, database migration, or new GitHub push from planning.
+Meaningful checks: profile changes do not alter saved orders; two orders can differ; order contact edits preserve account identity/defaults; saved blanks stay blank; legacy suggestions require an explicit save; stale writes and delivered/cancelled edits fail; customer reassignment cannot leave the wrong destination; one/two-store quantities and warnings are correct; new endpoints enforce admin/owner rules; copying performs no stock/status/address writes; saving a store preserves other settings; public notice output excludes store data.
 
-Needed before production use: AE1/AE2 written addresses, map links, contact phones, and confirmation of what the existing external-courier pickup point represents. These inputs do not block planning or implementing the address forms and missing-data behavior.
+Use pure Node tests for helpers/formatters and a disposable test database for persistence and authorization. The local backend is configured for `production-db`; do not use it for mutation tests or automatic backfills.
+
+## 9. Release boundaries
+
+Deploy additive backend changes first, then the frontend in the same coordinated release. Avoid order creation and courier delivery edits between the two deployments: the old frontend still edits User while the new backend captures order destinations. If those actions did occur in the gap, review the affected active orders' destinations before using the new copy actions. This short release coordination avoids introducing a permanent feature-flag or dual-write mechanism. Enter the real AE1/AE2 locations before relying on final staff sheets. Review active legacy destinations as needed; do not bulk rewrite completed orders.
+
+Keep both repositories on `feat/order-delivery-details`. Preserve the local pick-list work and exclude unrelated inventory operation scripts from feature commits. This review updates plans only; it does not implement, push, deploy, or migrate anything.
