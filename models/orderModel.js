@@ -24,10 +24,21 @@ const OrderItemSchema = new mongoose.Schema(
 );
 
 /* ========== Main schema ========== */
+const deliveryDetailsSchema = new mongoose.Schema({
+  contactName: { type: String, default: "" },
+  phoneNumber: { type: String, default: "" },
+  secondaryPhoneNumber: { type: String, default: "" },
+  address: { type: String, default: "" },
+  googleMapsUrl: { type: String, default: "" },
+  notes: { type: String, default: "" },
+}, { _id: false });
+
 const orderSchema = new mongoose.Schema(
   {
     user:        { type: mongoose.Schema.Types.ObjectId, required: true, ref: "User", index: true },
     orderNumber: { type: String, required: true, unique: true, index: true },
+    deliveryDetails: { type: deliveryDetailsSchema, default: undefined },
+    deliveryRevision: { type: Number, default: 0, min: 0, validate: Number.isInteger },
 
     // link to quote (optional, 1:1 when exists)
     quote: { type: mongoose.Schema.Types.ObjectId, ref: "Quote", default: null },

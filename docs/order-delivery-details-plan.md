@@ -1,6 +1,6 @@
 # Order delivery details — reviewed backend plan
 
-Status: planning only; no application or database changes.
+Status: implemented and locally verified; merge/push to main authorized. No data migration is required.
 Reviewed: 2026-11-02. This version replaces the first plan.
 Branch in both repositories: `feat/order-delivery-details`.
 Companion: [frontend plan](../../megadie-frontend-v2/docs/order-delivery-details-plan.md).
@@ -112,6 +112,10 @@ Return a small allowlisted response containing order number/status, generated ti
 
 Ordinary reads are not an atomic cross-collection snapshot. The sheet is informational data fetched for the selected click; changes made during/after the read can make it stale. Show the generation time in any preview and allow retry/refresh. Keep allocation writes/delivery/finalization checks authoritative in their existing transactions. Do not add read transactions, polling, or compare-and-confirm logic for clipboard text.
 
+### Carton label
+
+The first line of the staff message is the plain compact label: customer initials, uppercase and without dots/spaces, followed by a hyphen and the full final segment of the order number. Example: `ABC-023AD`. Preserve the whole suffix, including six-character suffixes used by generated orders. Use `ORD` if the customer name is unavailable. Do not repeat the label lower in the message.
+
 ## 8. Implementation order and verification
 
 1. Implement the small default/resolution helper, two optional User fields, and saved order value/revision. Wire existing user APIs and order creation; test default/order isolation.
@@ -127,4 +131,15 @@ Use pure Node tests for helpers/formatters and a disposable test database for pe
 
 Deploy additive backend changes first, then the frontend in the same coordinated release. Avoid order creation and courier delivery edits between the two deployments: the old frontend still edits User while the new backend captures order destinations. If those actions did occur in the gap, review the affected active orders' destinations before using the new copy actions. This short release coordination avoids introducing a permanent feature-flag or dual-write mechanism. No new store setup is required. An unexpected AE2 allocation requires data review, since AE2 is unused. Review active legacy destinations as needed; do not bulk rewrite completed orders.
 
-Keep both repositories on `feat/order-delivery-details`. Preserve the local pick-list work and exclude unrelated inventory operation scripts from feature commits. This review updates plans only; it does not implement, push, deploy, or migrate anything.
+Developed on `feat/order-delivery-details`; the user authorized merging and pushing the verified feature to `main` in both repositories. The pick-list prototype was evolved into this feature. Unrelated inventory operation scripts are excluded; no production data backfill or Render deployment was performed.
+
+## 10. Verification record
+
+- 21 backend/helper/integration/regression tests passed, including real order creation and persistence on an isolated local MongoDB replica set.
+- 6 frontend formatter/delivery helper tests passed.
+- 8 delivery browser tests passed against the dev server and the same 8 against the compiled production build.
+- 19 catalog browser regression tests passed against the production build.
+- Frontend full ESLint and production build passed. The existing large-bundle advisory remains unrelated to this feature.
+- Mobile dialog checked visually and for overflow, keyboard focus handling, and navigation overlap; API/clipboard browser fixtures prevent production access and OS clipboard writes.
+
+Run pure tests with `node --test tests/order-delivery.test.mjs`. The integration suite `tests/order-delivery.integration.mjs` needs an explicit `DELIVERY_TEST_URI` (or `DELIVERY_TEST_URI_FILE`) pointing to `127.0.0.1` and database `megadie_delivery_test`; it never reads `.env` and skips when no test URI is supplied. Browser tests: `node --test tests/order-delivery.browser.mjs`, optionally with `DELIVERY_TEST_ORIGIN` set to the local production-preview origin.

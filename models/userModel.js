@@ -75,6 +75,8 @@ const userSchema = new mongoose.Schema(
     secondaryPhoneNumber: { type: String, trim: true },
     deliveryGoogleMapsUrl: { type: String, trim: true },
     deliveryNotes: { type: String, trim: true, maxlength: 1000, default: "" },
+    deliveryContactName: { type: String, trim: true, maxlength: 200 },
+    deliveryPhoneNumber: { type: String, trim: true, maxlength: 50 },
     approvalStatus: {
       type: String,
       enum: ["Pending", "Approved", "Rejected"],

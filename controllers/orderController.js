@@ -11,6 +11,7 @@ import OrderAllocation from "../models/orderAllocationModel.js";
 import { logInventoryMovement } from "../utils/inventoryMovement.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
 import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
+import { deliveryRevisionFilter, getCustomerDeliveryDefaults, resolveOrderDelivery } from "../utils/orderDelivery.js";
 
 /* =========================
    Helpers (pagination)
@@ -58,6 +59,8 @@ const ORDER_USER_DELIVERY_SELECT = [
   "address",
   "deliveryGoogleMapsUrl",
   "deliveryNotes",
+  "deliveryContactName",
+  "deliveryPhoneNumber",
 ].join(" ");
 
 const ORDER_PAYMENT_FILTER_VALUES = new Set([
@@ -758,7 +761,8 @@ export const getOrderById = asyncHandler(async (req, res) => {
   }
 
   // Admin sees full order (unchanged). Owner sees sanitized order (no pricing).
-  const payload = isAdmin ? order : sanitizeOrderForClient(order);
+  const payload = isAdmin ? order.toObject() : sanitizeOrderForClient(order);
+  payload.resolvedDelivery = resolveOrderDelivery(order);
 
   res.status(200).json({
     success: true,
@@ -1034,11 +1038,15 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
   session.startTransaction();
 
   try {
-    // Create order
+    const customer = await User.findById(quote.user).select(ORDER_USER_DELIVERY_SELECT).session(session);
+    if (!customer) { res.status(404); throw new Error("Customer not found."); }
+    // Copy defaults once; later profile changes must not alter this order.
     const order = await Order.create(
       [
         {
           user: quote.user,           // always trust quote.user
+          deliveryDetails: getCustomerDeliveryDefaults(customer),
+          deliveryRevision: 1,
           quote: quote._id,            // link quote → order
           orderItems,
           deliveryCharge: quote.deliveryCharge,
@@ -1348,6 +1356,10 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
+  if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision")) {
+    res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination.");
+  }
+
   // ❌ Order items are never editable after creation
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {
     res.status(400);
@@ -1493,8 +1505,27 @@ export const updateOrder = asyncHandler(async (req, res) => {
     changes.status = { from: prevStatus, to: nextStatus };
   }
 
+  if (order.isModified("user")) {
+    if (!["Processing", "Shipping"].includes(nextStatus)) {
+      res.status(409); throw new Error("Customer cannot be changed on a closed order.");
+    }
+    const customer = await User.findById(order.user).select(ORDER_USER_DELIVERY_SELECT);
+    if (!customer) { res.status(404); throw new Error("Customer not found."); }
+    const revision = order.deliveryRevision || 0;
+    order.$where = { status: prevStatus, ...deliveryRevisionFilter(revision), invoice: null };
+    order.deliveryDetails = getCustomerDeliveryDefaults(customer);
+    order.deliveryRevision = revision + 1;
+    changes.deliveryDetails = { resetToCustomerDefault: true };
+  }
   const didTouchDeliveredAt = order.isModified("deliveredAt");
-  const updated = await order.save();
+  let updated;
+  try { updated = await order.save(); }
+  catch (error) {
+    if (error.name === "DocumentNotFoundError") {
+      res.status(409); throw new Error("Order changed. Reload and review before changing its customer.");
+    }
+    throw error;
+  }
 
   if (didTouchDeliveredAt) {
     const afterVal = updated.deliveredAt ?? null;

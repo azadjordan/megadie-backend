@@ -20,6 +20,16 @@ import sendTransactionalEmail from "../utils/sendTransactionalEmail.js";
 /* =========================
    Helpers
    ========================= */
+function assignDeliveryOverrides(user, body, res) {
+  for (const [key, max] of [["deliveryContactName", 200], ["deliveryPhoneNumber", 50]]) {
+    if (!Object.hasOwn(body, key)) continue;
+    if (typeof body[key] !== "string" || body[key].trim().length > max) {
+      res.status(400); throw new Error(`Invalid ${key} (maximum ${max} characters).`);
+    }
+    user[key] = body[key].trim();
+  }
+}
+
 function toInt(v, fallback) {
   const n = Number.parseInt(String(v), 10);
   return Number.isFinite(n) ? n : fallback;
@@ -418,6 +428,8 @@ export const getUserProfile = asyncHandler(async (req, res) => {
       secondaryPhoneNumber: user.secondaryPhoneNumber,
       deliveryGoogleMapsUrl: user.deliveryGoogleMapsUrl,
       deliveryNotes: user.deliveryNotes,
+      deliveryContactName: user.deliveryContactName,
+      deliveryPhoneNumber: user.deliveryPhoneNumber,
       isAdmin: user.isAdmin,
       approvalStatus: user.approvalStatus,
     },
@@ -436,6 +448,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
     throw new Error("User not found.");
   }
 
+  assignDeliveryOverrides(user, req.body, res);
   user.name = req.body.name ?? user.name;
   user.phoneNumber = req.body.phoneNumber ?? user.phoneNumber;
   user.address = req.body.address ?? user.address;
@@ -459,6 +472,8 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
       secondaryPhoneNumber: updatedUser.secondaryPhoneNumber,
       deliveryGoogleMapsUrl: updatedUser.deliveryGoogleMapsUrl,
       deliveryNotes: updatedUser.deliveryNotes,
+      deliveryContactName: updatedUser.deliveryContactName,
+      deliveryPhoneNumber: updatedUser.deliveryPhoneNumber,
       isAdmin: updatedUser.isAdmin,
       approvalStatus: updatedUser.approvalStatus,
     },
@@ -673,6 +688,7 @@ export const updateUser = asyncHandler(async (req, res) => {
     throw new Error("User not found.");
   }
 
+  assignDeliveryOverrides(user, req.body, res);
   if (req.body.name != null) user.name = req.body.name;
   if (req.body.email != null) user.email = req.body.email.trim().toLowerCase();
   if (req.body.phoneNumber != null) user.phoneNumber = req.body.phoneNumber;
@@ -718,6 +734,8 @@ export const updateUser = asyncHandler(async (req, res) => {
         secondaryPhoneNumber: updatedUser.secondaryPhoneNumber,
         deliveryGoogleMapsUrl: updatedUser.deliveryGoogleMapsUrl,
         deliveryNotes: updatedUser.deliveryNotes,
+        deliveryContactName: updatedUser.deliveryContactName,
+        deliveryPhoneNumber: updatedUser.deliveryPhoneNumber,
         isAdmin: updatedUser.isAdmin,
         approvalStatus: updatedUser.approvalStatus,
         adminNote: updatedUser.adminNote,

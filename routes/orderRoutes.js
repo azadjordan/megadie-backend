@@ -19,6 +19,7 @@ import {
   finalizeOrderAllocations,
 } from "../controllers/orderAllocationController.js";
 import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
+import { getOrderFulfillmentSheet, updateOrderDelivery } from "../controllers/orderDeliveryController.js";
 
 const router = express.Router();
 
@@ -37,6 +38,8 @@ router.put("/:id/deliver", protect, admin, markOrderDelivered);
 router.post("/:id/cancel", protect, admin, cancelOrderAndCleanup);
 // Preview order delete cleanup (admin)
 router.get("/:id/delete-preview", protect, admin, getOrderDeletePreview);
+router.get("/:id/fulfillment-sheet", protect, admin, getOrderFulfillmentSheet);
+router.put("/:id/delivery-details", protect, admin, updateOrderDelivery);
 
 // Order allocations (admin)
 router.get("/:id/allocations", protect, admin, getOrderAllocations);
