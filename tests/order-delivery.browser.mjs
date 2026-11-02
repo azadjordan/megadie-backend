@@ -74,17 +74,20 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     return { page, state };
   }
 
-  await t.test("complete order copies once with compact label first, and each later click reads fresh", async (t) => {
+  await t.test("complete order copies the compact WhatsApp layout once and each later click reads fresh", async (t) => {
     const { page, state } = await fixture(t);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
     await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     let text = await page.evaluate(() => window.__copies[0]);
-    assert.equal(text.split("\n")[0], "*Carton Tag: ABC-023AD*");
+    assert.equal(text.split("\n")[0], "*PREPARE & DELIVER*");
+    assert.ok(text.startsWith("*PREPARE & DELIVER*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ *ABC-023AD*\n*1 item — 4 units*\n\n*1. PICK*\n"));
     assert.match(text, /Order-only address/);
     assert.doesNotMatch(text, /LIVE-PROFILE|ACCOUNT-PHONE|PICKUP|Order total|Grosgrain ribbon|Order Recipient|Contact:|Phone:|Notes:|Receiving hours/);
     assert.match(text, /1 item — 4 units/);
-    assert.match(text, /• \*SKU1\*\n\n- A2-AE1: 3 units\n- A10-AE1: 1 unit\n- Total: 4 units/);
+    assert.match(text, /\*01\)\* SKU1\n   ↳ A2-AE1: \*3 units\*\n   ↳ A10-AE1: \*1 unit\*/);
+    assert.ok(text.includes("☐ *01)* SKU1 — *4*\n*Total: 1 item — 4 units*"));
+    assert.doesNotMatch(text.split("*1. PICK*")[1].split("*2. PACK & CHECK*")[0], /Total:/);
     assert.equal(await page.getByRole("dialog").count(), 0);
     state.order.resolvedDelivery.details.address = "NEW-ADDRESS";
     await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
@@ -127,7 +130,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       }
       await page.waitForFunction(() => window.__copies.length === 1);
       const text = await page.evaluate(() => window.__copies[0]);
-      assert.match(text, /Address: Order-only address/);
+      assert.match(text, /_Address:_ Order-only address/);
       assert.doesNotMatch(text, /Contact:|Phone:|Notes:|Grosgrain ribbon|Order Recipient/);
       assert.equal(state.requests.filter((r) => r.method === "PUT").length, legacy ? 1 : 0);
     }
@@ -181,7 +184,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.evaluate(() => { window.__copyFailure = true; });
     await page.getByRole("button", { name: "Copy prepare and deliver sheet" }).click();
     await page.getByRole("dialog").waitFor();
-    assert.match(await page.getByLabel("Message preview").inputValue(), /^\*Carton Tag: ABC-023AD\*\n/);
+    assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ \*ABC-023AD\*\n/);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     // Dismiss the temporary clipboard-error toast before checking modal/navigation stacking.
     await page.locator(".Toastify__close-button").first().click();

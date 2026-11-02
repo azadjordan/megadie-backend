@@ -103,7 +103,7 @@ Read the selected order and its relevant allocations/slots using selected fields
 
 Return a small allowlisted response containing order number/status, generated time, carton tag, resolved destination, slot pick lines, per-product ordered/allocated quantities, and two arrays: `problems` (makes the sheet a draft) and `notices` (advisory). Keep business checks in the backend and text formatting in a pure frontend helper. This is not a new fulfillment state machine.
 
-- Return SKU/slot/quantity lines for SKU-first display: the formatter groups all slots under each SKU, naturally sorts them, and shows a per-SKU pick total. Pack & Check lists each SKU with its ordered total. Show distinct-item count and ordered-unit count at the top and repeat the summary below packing totals. Omit product names/descriptions and store location/contact information. Continue aggregating duplicate order items by product id before validating allocation quantities.
+- Return SKU/slot/quantity lines for SKU-first display: the formatter groups all slots under each SKU, naturally sorts them, and assigns matching item numbers in PICK and PACK & CHECK. PICK has no per-SKU subtotal. Pack & Check lists each SKU with its ordered total. Show distinct-item count and ordered-unit count at the top and repeat the summary below packing totals. Omit product names/descriptions and store location/contact information. Continue aggregating duplicate order items by product id before validating allocation quantities.
 - Follow existing allocation rules: Reserved and legacy missing-status rows are reservations; Deducted rows are inventory history; Cancelled rows are excluded. Flag missing slots, unknown stores, foreign-product rows, invalid quantities, quantity mismatches, or mixed reserved/deducted state. Do not hide excess rows or present them as approved picking instructions.
 - Preserve the actual workflow: **Shipping/reservations → Delivered → stock finalization**. An inventory deduction does not itself prove physical collection. Retain the existing check-before-picking-again warning rather than inventing automatic picked/packed status.
 - Complete Shipping orders get a normal sheet. Processing/unconfirmed/incomplete/inconsistent orders get a clearly labeled preparation draft / HOLD with the specific problems. This does not block existing order-status APIs or create new readiness requirements there.
@@ -114,7 +114,7 @@ Ordinary reads are not an atomic cross-collection snapshot. The sheet is informa
 
 ### Carton label
 
-The first line is explicitly labeled `Carton Tag:` followed by the compact identifier: customer initials, uppercase and without dots/spaces, followed by a hyphen and the full final segment of the order number. Example: `Carton Tag: ABC-023AD`. Preserve the whole suffix, including six-character suffixes used by generated orders. Use `ORD` if the customer name is unavailable. Do not repeat the label lower in the message.
+After the title and order line, `_Carton Tag:_` labels the bold compact identifier: customer initials, uppercase and without dots/spaces, followed by a hyphen and the full final segment of the order number. Example: `Carton Tag: ABC-023AD`. Preserve the whole suffix, including six-character suffixes used by generated orders. Use `ORD` if the customer name is unavailable. Do not repeat the label lower in the message.
 
 ## 8. Implementation order and verification
 
@@ -149,3 +149,9 @@ Run pure tests with `node --test tests/order-delivery.test.mjs`. The integration
 Prepare & Deliver now omits product names from item/pick DTOs and checks delivery location only. This is purpose-specific: `resolveOrderDelivery` and Courier still report missing contact name/phone. Tests cover a saved location with no contacts, legacy confirmation, and continued Courier validation. The frontend exact-message regression covers the requested carton-tag heading, two item/unit summaries, multi-slot SKU grouping, and address/map-only delivery output. No persisted order data or customer contact fields are removed by the presentation change.
 
 Refinement verification: 22 backend/helper/API integration/regression tests, 8 frontend helper/formatter tests, and 9 delivery browser tests against each of the dev and production builds passed. Full frontend lint and production build passed. Database mutations used an isolated local replica set; browser API/clipboard interception prevented production access and OS clipboard writes.
+
+## 12. Compact WhatsApp presentation
+
+This follow-up changes the frontend text presentation only; the API payload is unchanged. The header uses `*PREPARE & DELIVER*`, `_Order:_`, and `_Carton Tag:_` with a bold compact identifier. One shared numbered SKU list drives PICK and PACK & CHECK. Slot quantities are indented arrow lines; per-SKU totals appear only as bold numbers on the packing checkbox lines. Delivery includes only italic-labeled address and map lines. The browser regression expectations cover the new exact header, grouping, numbering, and compact markup.
+
+Compact-format verification: 10 frontend helper/formatter tests and 9 delivery browser tests on each of the dev and production builds passed, together with full frontend lint and build. Exact-output coverage includes the supplied WhatsApp template, matching item numbers above 99, multiple slots, no PICK subtotals, location-only delivery, and compact address lines. This presentation update changes no backend runtime logic.
