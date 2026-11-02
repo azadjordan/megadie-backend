@@ -16,7 +16,7 @@ This is an address-and-copy feature. It does not change quoting, pricing, invoic
 | First plan | Reviewed decision | Reason |
 | --- | --- | --- |
 | New nested customer default plus mirrored legacy fields | Keep existing customer address fields; add only two optional contact overrides | One stored value per field; no migration or synchronization layer |
-| Separate StoreLocation collection and CRUD | Two fixed locations inside existing SiteSettings | Existing settings model, controller, and routes are sufficient |
+| Separate StoreLocation collection and CRUD | Configure the confirmed store inside existing SiteSettings | Existing settings model, controller, and routes are sufficient |
 | Source enums, capture/edit timestamps, editor identity | Saved order value plus one delivery revision | No current feature needs a separate address audit system |
 | Read-only snapshot transaction for every sheet | Ordinary bounded database reads | Copying is an informational read, not a stock operation |
 | Preview, fetch again on Copy, compare responses, confirm changes | One fresh request per normal copy click | Preserve the existing simple copying interaction |
@@ -71,15 +71,17 @@ Use one backend resolver for order details and staff-sheet reads:
 
 Return a small `resolvedDelivery` view: `details` (or null), `savedToOrder`, `revision`, and `missingFields`. No second persisted default or historical backfill is required. GET requests never save an address. A button labeled Save & Copy may perform an explicit save followed by a read/copy; a plain Copy action does not save anything.
 
-## 5. AE1 and AE2: reuse SiteSettings
+## 5. Current store AE1: reuse SiteSettings
 
-The existing singleton `SiteSettings` record can hold fixed `storeLocations.AE1` and `storeLocations.AE2` embedded values. Each contains `name`, `address`, `googleMapsUrl`, `phoneNumbers` (up to two), and optional `notes`. Store code remains the existing slot code; a blank display name can fall back to that code.
+AE1 identifies the first UAE store; the user has confirmed there is currently only one store in the UAE. The previous assumption that AE1 and AE2 are two existing physical stores is withdrawn. AE2's meaning remains to be clarified. Do not create another store record, duplicate AE1's location under AE2, or alter existing slot/inventory codes based on this assumption.
 
-Expose two admin-only operations in the existing settings controller/router: read both locations, and save one fixed code. Update only `storeLocations.<code>` so saving AE1 cannot replace AE2 or the maintenance notice. Keep the public maintenance-notice response explicitly allowlisted; store details are not public. No separate collection, index, generic warehouse CRUD, store deletion, or settings version protocol is needed.
+The existing singleton `SiteSettings` record can hold `storeLocations.AE1`, containing `name`, `address`, `googleMapsUrl`, `phoneNumbers` (up to two), and optional `notes`. Keep the existing store code and show a readable label such as Megadie UAE (AE1). Other codes can receive location details later when their actual physical meaning is confirmed; no generic store-management feature is needed now.
+
+Expose two admin-only operations in the existing settings controller/router: read configured locations, and save a confirmed existing store code. Start with AE1 only. Update only `storeLocations.<code>` so a store save cannot replace other settings or the maintenance notice. Keep the public maintenance-notice response explicitly allowlisted; store details are not public. No separate collection, index, generic warehouse CRUD, store deletion, or settings version protocol is needed.
 
 For a usable pickup, an address **or** map is sufficient. Pickup phone and notes are useful but optional. Missing configuration produces a clear draft warning, never a guessed location.
 
-The actual AE1/AE2 addresses and map links still need confirmation. The current hard-coded external-courier pickup point has not been identified as either store. Preserve its existing configuration for now; do not assign it to AE1/AE2 or change the external courier's collection route without that business information.
+AE1's actual address and map link still need confirmation. Confirm whether the current hard-coded external-courier pickup point is AE1 before reusing it; preserve the current configuration until then. An allocation using an unconfigured code produces a location warning, not an assumed extra pickup or an automatic alias to AE1.
 
 ## 6. Small API additions
 
@@ -89,8 +91,8 @@ Use the existing response envelope and authorization conventions.
 | --- | --- |
 | Existing GET/PUT `/api/users/account/profile` | Add the two optional delivery contact overrides; retain current fields and account semantics |
 | Existing GET/PUT `/api/users/:id` (admin) | Same additional fields on user details/editing |
-| GET `/api/site-settings/store-locations` (admin) | Return AE1/AE2 configuration |
-| PUT `/api/site-settings/store-locations/:code` (admin) | Save only AE1 or AE2 |
+| GET `/api/site-settings/store-locations` (admin) | Return configured store locations; initially AE1 |
+| PUT `/api/site-settings/store-locations/:code` (admin) | Save a confirmed store code; initially AE1; do not invent new inventory codes |
 | Existing GET `/api/orders/:id` | Add `resolvedDelivery` using current owner/admin access rules |
 | PUT `/api/orders/:id/delivery-details` (admin) | Body `{ deliveryDetails, expectedRevision }`; update this order only; return saved details and revision |
 | GET `/api/orders/:id/fulfillment-sheet` (admin) | One fresh staff-sheet read; no state changes |
@@ -101,11 +103,11 @@ For newly edited values, trim strings, enforce reasonable length/type limits, ac
 
 ## 7. Prepare & Deliver read and text
 
-Read the selected order, its relevant allocations/slots, and the two configured store locations using selected fields and bounded queries. Return 409 for Cancelled/Delivered orders instead of generating new preparation instructions, including when the list row was stale. Use order SKU/product-name snapshots for item identification; a missing old name can fall back to SKU. No product-by-product lookup or new selling-unit system is needed. Use neutral units.
+Read the selected order, its relevant allocations/slots, and the relevant configured pickup location using selected fields and bounded queries. Return 409 for Cancelled/Delivered orders instead of generating new preparation instructions, including when the list row was stale. Use order SKU/product-name snapshots for item identification; a missing old name can fall back to SKU. No product-by-product lookup or new selling-unit system is needed. Use neutral units.
 
 Return a small allowlisted response containing order number/status, generated time, carton tag, resolved destination, pickup groups, per-product ordered/allocated quantities, and two arrays: `problems` (makes the sheet a draft) and `notices` (advisory). Keep business checks in the backend and text formatting in a pure frontend helper. This is not a new fulfillment state machine.
 
-- Group allocations by actual store, then naturally sorted slot (A2 before A10). Show only stores used by the order and one final per-SKU packing check across stores. Aggregate duplicate order items by product id before comparing quantities.
+- For the current AE1 operation, show one pickup heading followed by its naturally sorted slots (A2 before A10) and one final per-SKU packing check. Group by actual store code if additional physical locations are confirmed later; never fabricate a second pickup from a code alone. Aggregate duplicate order items by product id before comparing quantities.
 - Follow existing allocation rules: Reserved and legacy missing-status rows are reservations; Deducted rows are inventory history; Cancelled rows are excluded. Flag missing slots, unknown stores, foreign-product rows, invalid quantities, quantity mismatches, or mixed reserved/deducted state. Do not hide excess rows or present them as approved picking instructions.
 - Preserve the actual workflow: **Shipping/reservations → Delivered → stock finalization**. An inventory deduction does not itself prove physical collection. Retain the existing check-before-picking-again warning rather than inventing automatic picked/packed status.
 - Complete Shipping orders get a normal sheet. Processing/unconfirmed/incomplete/inconsistent orders get a clearly labeled preparation draft / HOLD with the specific problems. This does not block existing order-status APIs or create new readiness requirements there.
@@ -118,16 +120,16 @@ Ordinary reads are not an atomic cross-collection snapshot. The sheet is informa
 
 1. Implement the small default/resolution helper, two optional User fields, and saved order value/revision. Wire existing user APIs and order creation; test default/order isolation.
 2. Add guarded order-only delivery editing and the customer-reassignment safeguard. Switch Courier from editing User to editing the order.
-3. Extend existing settings with AE1/AE2 and their small admin editor.
+3. Extend existing settings with AE1's pickup details and a small editor; clarify AE2 before assigning it a location or alias.
 4. Add the combined sheet read and evolve the unfinished pick-list formatter/button into Prepare & Deliver.
 5. Run focused integration checks, frontend lint/build, and relevant existing order/catalog regression tests before coordinated review/release.
 
-Meaningful checks: profile changes do not alter saved orders; two orders can differ; order contact edits preserve account identity/defaults; saved blanks stay blank; legacy suggestions require an explicit save; stale writes and delivered/cancelled edits fail; customer reassignment cannot leave the wrong destination; one/two-store quantities and warnings are correct; new endpoints enforce admin/owner rules; copying performs no stock/status/address writes; saving a store preserves other settings; public notice output excludes store data.
+Meaningful checks: profile changes do not alter saved orders; two orders can differ; order contact edits preserve account identity/defaults; saved blanks stay blank; legacy suggestions require an explicit save; stale writes and delivered/cancelled edits fail; customer reassignment cannot leave the wrong destination; AE1 has one pickup heading with correct slot quantities; unknown/unconfigured codes produce warnings rather than guessed routes; new endpoints enforce admin/owner rules; copying performs no stock/status/address writes; saving a store preserves other settings; public notice output excludes store data.
 
 Use pure Node tests for helpers/formatters and a disposable test database for persistence and authorization. The local backend is configured for `production-db`; do not use it for mutation tests or automatic backfills.
 
 ## 9. Release boundaries
 
-Deploy additive backend changes first, then the frontend in the same coordinated release. Avoid order creation and courier delivery edits between the two deployments: the old frontend still edits User while the new backend captures order destinations. If those actions did occur in the gap, review the affected active orders' destinations before using the new copy actions. This short release coordination avoids introducing a permanent feature-flag or dual-write mechanism. Enter the real AE1/AE2 locations before relying on final staff sheets. Review active legacy destinations as needed; do not bulk rewrite completed orders.
+Deploy additive backend changes first, then the frontend in the same coordinated release. Avoid order creation and courier delivery edits between the two deployments: the old frontend still edits User while the new backend captures order destinations. If those actions did occur in the gap, review the affected active orders' destinations before using the new copy actions. This short release coordination avoids introducing a permanent feature-flag or dual-write mechanism. Enter AE1's real pickup location before relying on final staff sheets, and clarify AE2 if it is referenced by an order's allocations. Review active legacy destinations as needed; do not bulk rewrite completed orders.
 
 Keep both repositories on `feat/order-delivery-details`. Preserve the local pick-list work and exclude unrelated inventory operation scripts from feature commits. This review updates plans only; it does not implement, push, deploy, or migrate anything.
