@@ -1,4 +1,4 @@
-import { buildCartonLabel, resolveOrderDelivery } from "./orderDelivery.js";
+import { buildCartonLabel, getCustomerLocation, resolveOrderDelivery } from "./orderDelivery.js";
 
 const id = (value) => String(value?._id || value?.id || value || "");
 const positiveInteger = (value) => Number.isInteger(value) && value > 0;
@@ -13,9 +13,6 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
   // Staff messages share only the destination; Courier still requires contact details.
   delivery.missingFields = delivery.missingFields.filter((key) => key === "addressOrLocation");
   if (order.status !== "Shipping") problems.push("Order is not Shipping. Confirm reservations before preparing it.");
-  if (!delivery.savedToOrder) problems.push("Review and save the delivery details for this order.");
-  if (!order.assignedTo?.trim()) problems.push("Assign this order before copying.");
-  if (delivery.missingFields.length) problems.push("Delivery location is missing: add an address or map.");
 
   for (const item of order.orderItems || []) {
     const productId = id(item.product);
@@ -65,10 +62,18 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
     notices.push("Stock already deducted — check what has physically been collected before picking again.");
   }
   picks.sort((a, b) => sort.compare(a.slot, b.slot) || sort.compare(a.sku, b.sku));
+  const preparationProblems = [...new Set(problems)];
+  if (!order.assignedTo?.trim()) problems.push("Assign this order before copying.");
+  if (!["prepare_only", "prepare_deliver"].includes(order.preparationMode)) problems.push("Choose Prepare Only or Prepare & Deliver.");
+  if (order.preparationMode === "prepare_deliver") {
+    if (!delivery.savedToOrder) problems.push("Review and save the delivery details for this order.");
+    if (delivery.missingFields.length) problems.push("Delivery location is missing: add an address or map.");
+  }
   return {
     orderId: id(order), orderNumber: order.orderNumber, status: order.status,
     label: buildCartonLabel(order.user?.name, order.orderNumber, id(order)),
-    assignedTo: order.assignedTo || "",
+    assignedTo: order.assignedTo || "", preparationMode: order.preparationMode || "",
+    customerLocation: getCustomerLocation(order.user), preparationProblems,
     generatedAt: generatedAt.toISOString(), delivery,
     picks, items: [...products.values()],
     problems: [...new Set(problems)], notices,

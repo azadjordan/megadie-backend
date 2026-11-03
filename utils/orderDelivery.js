@@ -13,6 +13,17 @@ export const normalizeDeliveryDetails = (value = {}) => Object.fromEntries(
   Object.keys(DELIVERY_FIELDS).map((key) => [key, clean(value?.[key])])
 );
 
+export const PREPARATION_MODES = ["prepare_only", "prepare_deliver"];
+
+export function validatePreparationMode(value) {
+  if (!PREPARATION_MODES.includes(value)) throw new Error("Choose Prepare Only or Prepare & Deliver.");
+  return value;
+}
+
+export const getCustomerLocation = (user) => ({
+  address: clean(user?.address), googleMapsUrl: clean(user?.deliveryGoogleMapsUrl),
+});
+
 export function validateAssignedTo(value) {
   if (typeof value === "string" && !value.trim()) {
     throw new Error("Assigned To is required.");

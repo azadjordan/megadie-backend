@@ -164,6 +164,7 @@ const sanitizeOrderForClient = (order) => {
   delete o.deliveryCharge;
   delete o.extraFee;
   delete o.assignedTo;
+  delete o.preparationMode;
 
   // Strip item pricing
   if (Array.isArray(o.orderItems)) {
@@ -1357,7 +1358,7 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision") || Object.hasOwn(req.body, "assignedTo")) {
+  if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision") || Object.hasOwn(req.body, "assignedTo") || Object.hasOwn(req.body, "preparationMode")) {
     res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination or assignment.");
   }
 

@@ -146,7 +146,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal((await api(`/orders/${second._id}`, { method: "PUT", body: { user: String(customer._id) } })).status, 400);
   });
   await t.test("legacy defaults need explicit capture; saved blanks and completed history are preserved", async () => {
-    const legacy = await Order.create({ user: customer._id, status: "Shipping", orderItems: [{ product, sku: "SKU1", qty: 1, unitPrice: 1 }] });
+    const legacy = await Order.create({ user: customer._id, status: "Shipping", preparationMode: "prepare_deliver", orderItems: [{ product, sku: "SKU1", qty: 1, unitPrice: 1 }] });
     let result = await api(`/orders/${legacy._id}`);
     assert.equal(result.body.data.resolvedDelivery.savedToOrder, false);
     assert.equal(result.body.data.resolvedDelivery.details.address, "New default");
@@ -172,4 +172,57 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     await Order.collection.updateOne({ _id: legacy._id }, { $set: { status: "Cancelled" } });
     assert.equal((await api(`/orders/${legacy._id}/fulfillment-sheet`)).status, 409);
   });
+  await t.test("task modes and explicit customer defaults save safely without changing other orders", async () => {
+    const task = await Order.create({ user: customer._id, status: "Shipping", orderItems: [{ product, sku: "SKU1", qty: 1, unitPrice: 1 }] });
+    await OrderAllocation.collection.insertOne({ order: task._id, product, slot: slots[0], qty: 1, status: "Reserved" });
+    const path = `/orders/${task._id}/delivery-details`;
+    const body = { expectedRevision: 0, preparationMode: "prepare_only", assignedTo: "Ahmed", deliveryDetails: {} };
+    for (const patch of [{ preparationMode: "invalid" }, { assignedTo: " " }, { saveCustomerLocation: "yes" }, { saveCustomerLocation: true }]) {
+      assert.equal((await api(path, { method: "PUT", body: { ...body, ...patch } })).status, 400);
+    }
+    assert.equal((await api(path, { method: "PUT", body })).status, 200);
+    let sheet = (await api(`/orders/${task._id}/fulfillment-sheet`)).body.data;
+    assert.equal(sheet.preparationMode, "prepare_only");
+    assert.deepEqual(sheet.problems, []);
+    const customerBefore = await User.findById(customer._id).lean();
+    const originalOtherDestination = (await Order.findById(orderId)).deliveryDetails.address;
+    const defaults = { address: "Reusable destination", googleMapsUrl: "https://maps.app.goo.gl/reusable" };
+    const request = { expectedRevision: 1, preparationMode: "prepare_deliver", assignedTo: "Ahmed", deliveryDetails: defaults, saveCustomerLocation: true, expectedCustomerLocation: sheet.customerLocation };
+    assert.equal((await api(path, { method: "PUT", body: { ...request, deliveryDetails: {} } })).status, 400);
+    assert.equal((await api(path, { method: "PUT", body: { ...request, expectedCustomerLocation: undefined } })).status, 400);
+    assert.equal((await api(path, { method: "PUT", body: { ...request, expectedRevision: 0 } })).status, 409);
+    assert.equal((await User.findById(customer._id)).address, customerBefore.address);
+    const saved = await api(path, { method: "PUT", body: request });
+    assert.equal(saved.status, 200, JSON.stringify(saved.body));
+    assert.equal(saved.body.data.preparationMode, "prepare_deliver");
+    const customerAfter = await User.findById(customer._id).lean();
+    assert.equal(customerAfter.address, defaults.address);
+    assert.equal(customerAfter.deliveryGoogleMapsUrl, defaults.googleMapsUrl);
+    for (const key of ["phoneNumber", "deliveryPhoneNumber", "deliveryContactName", "deliveryNotes"]) assert.equal(customerAfter[key], customerBefore[key]);
+    assert.equal((await Order.findById(orderId)).deliveryDetails.address, originalOtherDestination);
+    sheet = (await api(`/orders/${task._id}/fulfillment-sheet`)).body.data;
+    assert.deepEqual(sheet.customerLocation, defaults);
+    assert.deepEqual(sheet.problems, []);
+    const newQuote = await Quote.create({ user: customer._id, status: "Confirmed", requestedItems: [{ product, qty: 1, unitPrice: 10 }] });
+    const newOrder = await api(`/orders/from-quote/${newQuote._id}`, { method: "POST" });
+    assert.equal(newOrder.status, 201);
+    assert.equal(newOrder.body.deliveryDetails.address, defaults.address);
+    assert.equal(newOrder.body.deliveryDetails.googleMapsUrl, defaults.googleMapsUrl);
+    // A concurrent customer-profile edit must roll back the order part of the save too.
+    await User.updateOne({ _id: customer._id }, { $set: { address: "Changed by another admin" } });
+    const stale = await api(path, { method: "PUT", body: { ...request, expectedRevision: 2, expectedCustomerLocation: defaults, assignedTo: "Do not persist" } });
+    assert.equal(stale.status, 409);
+    const unchanged = await Order.findById(task._id);
+    assert.equal(unchanged.deliveryRevision, 2);
+    assert.equal(unchanged.assignedTo, "Ahmed");
+    assert.equal((await User.findById(customer._id)).address, "Changed by another admin");
+    const own = (await api(`/orders/${task._id}`, { as: customer })).body.data;
+    assert.equal(own.preparationMode, undefined);
+    assert.equal((await api(`/orders/${task._id}`, { method: "PUT", body: { preparationMode: "prepare_only" } })).status, 400);
+    // Courier edits omit mode and keep the selected task and customer defaults intact.
+    assert.equal((await api(path, { method: "PUT", body: { expectedRevision: 2, deliveryDetails: { address: "One-off address" } } })).status, 200);
+    assert.equal((await Order.findById(task._id)).preparationMode, "prepare_deliver");
+    assert.equal((await User.findById(customer._id)).address, "Changed by another admin");
+  });
+
 });

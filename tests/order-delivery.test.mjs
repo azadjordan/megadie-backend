@@ -5,7 +5,7 @@ import { buildFulfillmentSheet } from "../utils/orderFulfillment.js";
 
 const user = { name: "Alpha Beta Company", phoneNumber: "account-phone", address: "Default address", deliveryGoogleMapsUrl: "https://maps.app.goo.gl/example" };
 const details = { contactName: "Recipient", phoneNumber: "+123", address: "Order address", secondaryPhoneNumber: "", googleMapsUrl: "", notes: "" };
-const order = { _id: "o1", orderNumber: "ORD-261102-023AD", status: "Shipping", user, assignedTo: "Ahmed", deliveryDetails: details, deliveryRevision: 1,
+const order = { _id: "o1", orderNumber: "ORD-261102-023AD", status: "Shipping", user, preparationMode: "prepare_deliver", assignedTo: "Ahmed", deliveryDetails: details, deliveryRevision: 1,
   totalPrice: 9876, adminToAdminNote: "SECRET", orderItems: [{ product: "p1", sku: "SKU1", productName: "Ribbon", qty: 4 }] };
 const allocation = (qty, label = "A2-AE1", status = "Reserved", store = "AE1") => ({ product: "p1", qty, status, slot: { label, store } });
 
@@ -87,4 +87,16 @@ test("allocation problems produce drafts rather than silently dropping discrepan
   const mixed = buildFulfillmentSheet(order, [allocation(2), allocation(2, "A3-AE1", "Deducted")]);
   assert.ok(mixed.problems.some((p) => p.includes("partly deducted")));
   assert.ok(mixed.notices.some((p) => p.includes("physically")));
+});
+
+
+test("preparation-only needs no destination but retains stock and assignment checks", () => {
+  const only = { ...order, preparationMode: "prepare_only", deliveryDetails: undefined };
+  const sheet = buildFulfillmentSheet(only, [allocation(4)]);
+  assert.deepEqual(sheet.problems, []);
+  assert.deepEqual(sheet.preparationProblems, []);
+  assert.deepEqual(sheet.customerLocation, { address: user.address, googleMapsUrl: user.deliveryGoogleMapsUrl });
+  assert.ok(buildFulfillmentSheet({ ...only, assignedTo: "" }, [allocation(4)]).problems.some((p) => p.includes("Assign")));
+  assert.ok(buildFulfillmentSheet(only, [allocation(3)]).problems.some((p) => p.includes("allocated 3")));
+  assert.ok(buildFulfillmentSheet({ ...only, preparationMode: "" }, [allocation(4)]).problems.some((p) => p.includes("Choose")));
 });
