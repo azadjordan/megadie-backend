@@ -20,7 +20,7 @@ try {
       if (request.method() === 'PUT') enabled = request.postDataJSON().enabled;
       data = { enabled, message, updatedBy: 'Test Admin', updatedAt: '2026-10-11T12:00:00Z' };
     } else if (url.pathname.endsWith('/users/account/profile')) {
-      data = { _id: 'test-admin', name: 'Test Admin', isAdmin: true, approvalStatus: 'Approved' };
+      data = { sessionExpiresAt: Date.now() + 1200000, sessionServerTime: Date.now(), _id: 'test-admin', name: 'Test Admin', isAdmin: true, approvalStatus: 'Approved' };
     }
     await route.fulfill({ json: { data, total: 0 } });
   });

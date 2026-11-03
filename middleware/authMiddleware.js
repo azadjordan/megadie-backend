@@ -1,6 +1,7 @@
 import jwt from "jsonwebtoken";
 import asyncHandler from "./asyncHandler.js";
 import User from "../models/userModel.js";
+import { getSessionExpiry, sessionCookieOptions } from "../utils/sessionPolicy.js";
 
 //////////////////// Protect Middleware:
 // Protect routes (Only logged-in users can access)
@@ -15,12 +16,18 @@ const protect = asyncHandler(async (req, res, next) => {
                 res.status(401);
                 throw new Error("Not authorized, user not found");
             }
+            const expiresAt = getSessionExpiry(decoded, user);
+            if (expiresAt != null && expiresAt <= Math.floor(Date.now() / 1000)) {
+                throw new Error("Session expired. Please sign in again.");
+            }
             req.user = user;
+            req.sessionExpiresAt = expiresAt;
             next();
         } catch (error) {
             console.error("JWT Verification Failed:", error.message); // ✅ Log token errors
+            res.clearCookie("jwt", sessionCookieOptions());
             res.status(401);
-            throw new Error("Not authorized, token failed");
+            throw new Error("Session expired or invalid. Please sign in again.");
         }
     } else {
         res.status(401);

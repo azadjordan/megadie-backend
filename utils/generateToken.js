@@ -1,22 +1,18 @@
-// utils/generateToken.js
-import jwt from 'jsonwebtoken';
+import jwt from "jsonwebtoken";
+import { ADMIN_SESSION_SECONDS, CUSTOMER_SESSION_SECONDS, sessionCookieOptions, sessionMetadata } from "./sessionPolicy.js";
 
-const generateToken = (res, userId) => {
-  const token = jwt.sign({ userId }, process.env.JWT_SECRET, {
-    expiresIn: '30d',
+// Always pass the authenticated database user, including for password-reset sign-in.
+const generateToken = (res, user) => {
+  const duration = user.isAdmin ? ADMIN_SESSION_SECONDS : CUSTOMER_SESSION_SECONDS;
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const token = jwt.sign({ userId: user._id, iat: issuedAt }, process.env.JWT_SECRET, {
+    expiresIn: duration,
   });
-
-  const isProd = process.env.NODE_ENV === 'production';
-
-  res.cookie('jwt', token, {
-    httpOnly: true,
-    secure: isProd,     // ✅ HTTPS only in production
-    sameSite: isProd ? 'none' : 'lax',
-    path: '/',          // ✅ ensures consistent clearing
-    maxAge: 30 * 24 * 60 * 60 * 1000,
+  res.cookie("jwt", token, {
+    ...sessionCookieOptions(),
+    maxAge: duration * 1000,
   });
+  return sessionMetadata(issuedAt + duration);
 };
 
 export default generateToken;
-
-

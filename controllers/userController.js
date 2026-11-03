@@ -5,6 +5,7 @@ import Order from "../models/orderModel.js";
 import Invoice from "../models/invoiceModel.js";
 import Quote from "../models/quoteModel.js";
 import generateToken from "../utils/generateToken.js";
+import { sessionCookieOptions, sessionMetadata } from "../utils/sessionPolicy.js";
 import sendTelegramAlert from "../utils/sendTelegramAlert.js";
 import {
   buildBrowserContextFilter,
@@ -111,11 +112,12 @@ export const authUser = asyncHandler(async (req, res) => {
       res.status(403);
       throw new Error("Your account was rejected. Contact support.");
     }
-    generateToken(res, user._id);
+    const session = generateToken(res, user);
     return res.status(200).json({
       success: true,
       message: "Login successful.",
       data: {
+        ...session,
         _id: user._id,
         name: user.name,
         phoneNumber: user.phoneNumber,
@@ -136,14 +138,7 @@ export const authUser = asyncHandler(async (req, res) => {
    Public — Logout user
    ========================= */
 export const logoutUser = asyncHandler(async (req, res) => {
-  const isProd = process.env.NODE_ENV === "production";
-
-  res.clearCookie("jwt", {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? "none" : "lax",
-    path: "/",
-  });
+  res.clearCookie("jwt", sessionCookieOptions());
 
   return res.status(200).json({
     success: true,
@@ -396,7 +391,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
   await user.save();
 
   // Optional: auto-login after reset
-  generateToken(res, user._id);
+  generateToken(res, user);
 
   return res.status(200).json({
     success: true,
@@ -409,6 +404,7 @@ export const resetPassword = asyncHandler(async (req, res) => {
    Private — Get my profile
    ========================= */
 export const getUserProfile = asyncHandler(async (req, res) => {
+  res.set("Cache-Control", "no-store");
   const user = req.user;
 
   if (!user) {
@@ -420,6 +416,7 @@ export const getUserProfile = asyncHandler(async (req, res) => {
     success: true,
     message: "Profile retrieved successfully.",
     data: {
+      ...sessionMetadata(req.sessionExpiresAt),
       _id: user._id,
       name: user.name,
       email: user.email,
@@ -464,6 +461,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
     success: true,
     message: "Profile updated successfully.",
     data: {
+      ...sessionMetadata(req.sessionExpiresAt),
       _id: updatedUser._id,
       name: updatedUser.name,
       email: updatedUser.email,

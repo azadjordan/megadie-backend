@@ -63,7 +63,7 @@ test('Ribbon catalog shared shopping flow', {timeout:120000}, async t => {
           state.unexpected.push(`${request.method()} ${path}`);
           return route.abort();
         }
-        if (path === '/users/account/profile') return signedIn ? reply({data:{_id:'fixture-user', name:'Catalog reviewer', isAdmin:admin, approvalStatus}}) : reply({message:'Not authenticated'},401);
+        if (path === '/users/account/profile') return signedIn ? reply({data:{sessionExpiresAt:Date.now()+1200000,sessionServerTime:Date.now(),_id:'fixture-user', name:'Catalog reviewer', isAdmin:admin, approvalStatus}}) : reply({message:'Not authenticated'},401);
         if (path === '/site-settings/maintenance-notice') return reply({data:{enabled:false}});
         if (path === '/filter-configs') return reply({data:['Ribbon', 'Creasing Matrix', 'Double Face Tape'].map(productType => ({productType, fields:[
           {key:'categoryKeys', label:'Material', ui:'chips', allowedValues:materials.map(m => m.key), multi:false},

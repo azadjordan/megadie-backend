@@ -46,7 +46,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       const reply = (body, status = 200) => route.fulfill({ status, headers, contentType: "application/json", body: JSON.stringify(body) });
       if (method === "OPTIONS") return route.fulfill({ status: 204, headers });
       state.requests.push({ path, method, body: method === "PUT" ? request.postDataJSON() : undefined });
-      if (path === "/users/account/profile" && method === "GET") return reply({ data: profile });
+      if (path === "/users/account/profile" && method === "GET") return reply({ data: { ...profile, sessionExpiresAt: Date.now() + 1200000, sessionServerTime: Date.now() } });
       if (path === "/site-settings/maintenance-notice") return reply({ data: { enabled: false } });
       if (path === "/users/client" && method === "GET") return reply({ data: state.customer });
       if (path === "/users/client" && method === "PUT") { state.customer = { ...state.customer, ...request.postDataJSON() }; return reply({ data: state.customer }); }
