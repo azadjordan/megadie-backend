@@ -17,6 +17,7 @@ const slotItemSchema = new mongoose.Schema(
         message: "qty must be a whole number",
       },
     },
+    reservationRevision: { type: Number, default: 0, select: false },
 
     // TOTAL CBM for this row (always recalculated = qty * product.cbm)
     cbm: { type: Number, required: true, min: 0 },

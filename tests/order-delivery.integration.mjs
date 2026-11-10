@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import mongoose from "mongoose";
 import express from "express";
 import cookieParser from "cookie-parser";
-import jwt from "jsonwebtoken";
+import { testSessionCookies } from "./helpers/sessionCookie.mjs";
 import orderRoutes from "../routes/orderRoutes.js";
 import userRoutes from "../routes/userRoutes.js";
 import User from "../models/userModel.js";
@@ -40,9 +40,10 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
   const server = await new Promise((resolve) => { const s = app.listen(0, "127.0.0.1", () => resolve(s)); });
   t.after(() => new Promise((resolve) => server.close(resolve)));
   const origin = `http://127.0.0.1:${server.address().port}`;
+  const sessionCookie = testSessionCookies();
   async function api(path, { as = admin, method = "GET", body } = {}) {
     const headers = { "Content-Type": "application/json" };
-    if (as) headers.Cookie = `jwt=${jwt.sign({ userId: String(as._id) }, process.env.JWT_SECRET)}`;
+    if (as) headers.Cookie = await sessionCookie(as);
     const response = await fetch(origin + "/api" + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
     return { status: response.status, body: await response.json() };
   }
@@ -77,7 +78,8 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     const result = await api(`/orders/${orderId}/fulfillment-sheet`);
     assert.equal(result.status, 200);
     assert.ok(result.body.data.problems.includes("Assign this order before copying."));
-    assert.equal(result.body.data.label, "ABC-023AD");
+    assert.equal(result.body.data.customerName, "Alpha Beta Company");
+    assert.equal(result.body.data.label, "Alpha Beta Company — 023AD");
     assert.deepEqual(result.body.data.picks.map((p) => p.slot), ["A2-AE1", "A10-AE1"]);
     assert.equal(result.body.data.delivery.details.address, newDetails.address);
     assert.doesNotMatch(JSON.stringify(result.body), /INTERNAL-SECRET|unitPrice|totalPrice|admin@test|storeAddress/);

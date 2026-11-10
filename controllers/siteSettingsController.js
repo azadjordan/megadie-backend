@@ -1,14 +1,19 @@
 import SiteSettings from "../models/siteSettingsModel.js";
 import asyncHandler from "../middleware/asyncHandler.js";
+import { MAINTENANCE_MESSAGE, normalizeNoticeMessage } from "../utils/maintenanceNotice.js";
 
-export const MAINTENANCE_MESSAGE = "We’re carrying out temporary maintenance. Please contact us to confirm stock availability during this time.";
+export { MAINTENANCE_MESSAGE } from "../utils/maintenanceNotice.js";
 
-const publicNotice = settings => ({
+const noticeState = settings => ({
   enabled: settings?.maintenanceNoticeEnabled === true,
-  message: MAINTENANCE_MESSAGE,
+  message: settings?.maintenanceNoticeMessage || MAINTENANCE_MESSAGE,
 });
+const publicNotice = settings => {
+  const notice = noticeState(settings);
+  return { ...notice, message: notice.enabled ? notice.message : MAINTENANCE_MESSAGE };
+};
 const adminNotice = settings => ({
-  ...publicNotice(settings),
+  ...noticeState(settings),
   updatedAt: settings?.noticeUpdatedAt || null,
   updatedBy: settings?.noticeUpdatedBy?.name || null,
 });
@@ -24,13 +29,25 @@ export const getAdminMaintenanceNotice = asyncHandler(async (_req, res) => {
 });
 
 export const updateMaintenanceNotice = asyncHandler(async (req, res) => {
-  if (typeof req.body?.enabled !== "boolean") {
+  const hasEnabled = Object.hasOwn(req.body || {}, "enabled");
+  const hasMessage = Object.hasOwn(req.body || {}, "message");
+  if (!hasEnabled && !hasMessage) {
+    res.status(400);
+    throw new Error("Provide a notice message or visibility change.");
+  }
+  if (hasEnabled && typeof req.body.enabled !== "boolean") {
     res.status(400);
     throw new Error("enabled must be true or false.");
   }
+  let message;
+  if (hasMessage) {
+    try { message = normalizeNoticeMessage(req.body.message); }
+    catch (error) { res.status(400); throw error; }
+  }
   const settings = await SiteSettings.findByIdAndUpdate("site", {
     $set: {
-      maintenanceNoticeEnabled: req.body.enabled,
+      ...(hasEnabled ? { maintenanceNoticeEnabled: req.body.enabled } : {}),
+      ...(hasMessage ? { maintenanceNoticeMessage: message } : {}),
       noticeUpdatedBy: req.user._id,
       noticeUpdatedAt: new Date(),
     },

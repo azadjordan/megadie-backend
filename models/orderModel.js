@@ -80,6 +80,7 @@ const orderSchema = new mongoose.Schema(
     },
     allocatedAt: { type: Date },
     stockFinalizedAt: { type: Date },
+    reservationRevision: { type: Number, default: 0, select: false },
 
     clientToAdminNote: { type: String },
     adminToAdminNote:  { type: String },

@@ -23,6 +23,8 @@ import {
   blockHoneypotSubmission,
   rateLimit,
 } from "../middleware/abuseProtectionMiddleware.js";
+import { requireTrustedOrigin } from "../config/trustedOrigins.js";
+import { reportAdminActivity } from "../controllers/adminSessionController.js";
 
 // Public
 router.route("/").post(
@@ -31,6 +33,9 @@ router.route("/").post(
   registerUser
 );
 router.post("/logout", logoutUser);
+router.post("/session/activity", requireTrustedOrigin,
+  rateLimit({ windowMs: 60 * 1000, max: 120, keyPrefix: "admin-activity" }),
+  protect, admin, reportAdminActivity);
 router.post(
   "/auth",
   rateLimit({ windowMs: 15 * 60 * 1000, max: 20, keyPrefix: "login" }),

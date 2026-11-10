@@ -97,9 +97,8 @@ export const deliveryRevisionFilter = (revision) => revision === 0
   : { deliveryRevision: revision };
 
 export function buildCartonLabel(name, orderNumber, fallbackId = "") {
-  const words = clean(name).normalize("NFKC").match(/[\p{L}\p{N}]+/gu) || [];
-  const initials = words.map((word) => [...word][0]).join("").toUpperCase() || "ORD";
+  const customerName = clean(name).normalize("NFKC").replace(/\s+/gu, " ") || "Unknown client";
   const suffix = (clean(orderNumber).split("-").at(-1) || clean(fallbackId).slice(-6))
     .replace(/[^\p{L}\p{N}]/gu, "").toUpperCase() || "UNKNOWN";
-  return `${initials}-${suffix}`;
+  return `${customerName} — ${suffix}`;
 }

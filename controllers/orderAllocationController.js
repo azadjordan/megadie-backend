@@ -5,6 +5,7 @@ import OrderAllocation from "../models/orderAllocationModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
 import { logInventoryMovement } from "../utils/inventoryMovement.js";
+import { ReservationError, recomputeAllocationStatus, saveOrderReservation, removeOrderReservation, reserveAllOrderItems } from "../utils/orderReservations.js";
 
 const isValidId = (id) => mongoose.Types.ObjectId.isValid(id);
 
@@ -27,77 +28,18 @@ const parsePositiveInteger = (res, value, message) => {
   return n;
 };
 
-const recomputeAllocationStatus = async (orderId, session = null) => {
-  const orderQuery = Order.findById(orderId).select(
-    "orderItems allocationStatus allocatedAt"
-  );
-  if (session) {
-    orderQuery.session(session);
-  }
-  const order = await orderQuery;
-  if (!order) return null;
+const reservationWarning = "Invoice exists for this order. Verify shipment documents after reservation changes.";
 
-  const allocationsQuery = OrderAllocation.find({
-    order: orderId,
-    $or: [
-      { status: "Reserved" },
-      { status: "Deducted" },
-      { status: { $exists: false } },
-    ],
-  })
-    .select("product qty")
-    .lean();
-  if (session) {
-    allocationsQuery.session(session);
-  }
-  const allocations = await allocationsQuery;
-
-  const totalsByProduct = new Map();
-  for (const row of allocations) {
-    const key = String(row.product);
-    const qty = Number(row.qty) || 0;
-    totalsByProduct.set(key, (totalsByProduct.get(key) || 0) + qty);
-  }
-
-  let anyAllocated = false;
-  let fullyAllocated = true;
-
-  for (const item of order.orderItems || []) {
-    const productId = String(item.product);
-    const orderedQty = Number(item.qty) || 0;
-    const allocatedQty = totalsByProduct.get(productId) || 0;
-
-    if (allocatedQty > 0) {
-      anyAllocated = true;
-    }
-    if (allocatedQty < orderedQty) {
-      fullyAllocated = false;
-    }
-  }
-
-  const nextStatus = fullyAllocated && anyAllocated
-    ? "Allocated"
-    : anyAllocated
-    ? "PartiallyAllocated"
-    : "Unallocated";
-
-  if (order.allocationStatus !== nextStatus) {
-    order.allocationStatus = nextStatus;
-  }
-
-  if (nextStatus === "Allocated") {
-    if (!order.allocatedAt) order.allocatedAt = new Date();
-  } else if (order.allocatedAt) {
-    order.allocatedAt = null;
-  }
-
-  if (session) {
-    await order.save({ session });
-  } else {
-    await order.save();
-  }
-  return order;
-};
+function sendReservationError(error, res) {
+  if (!(error instanceof ReservationError)) throw error;
+  return res.status(error.statusCode).json({
+    success: false,
+    code: error.issues ? "RESERVATION_BLOCKED" : "RESERVATION_REJECTED",
+    message: error.message,
+    noNewReservations: true,
+    ...(error.issues ? { issues: error.issues } : {}),
+  });
+}
 
 /* =========================
    GET /api/orders/:id/allocations
@@ -132,164 +74,23 @@ export const getOrderAllocations = asyncHandler(async (req, res) => {
 export const upsertOrderAllocation = asyncHandler(async (req, res) => {
   const { id: orderId } = req.params;
   const { productId, slotId, qty, note } = req.body || {};
+  for (const [value, label] of [[orderId, "order"], [productId, "product"], [slotId, "slot"]]) {
+    if (!isValidId(value)) { res.status(400); throw new Error(`Invalid ${label} id.`); }
+  }
+  const qtyValue = parsePositiveInteger(res, qty, "Reserve qty must be a positive integer.");
+  try {
+    const result = await saveOrderReservation({ orderId, productId: String(productId), slotId: String(slotId), qty: qtyValue, note, actor: req.user?._id || null });
+    res.json({ success: true, message: "Order allocation saved.", ...(result.hasInvoice ? { warning: reservationWarning } : {}), data: result.allocation });
+  } catch (error) { sendReservationError(error, res); }
+});
 
-  if (!isValidId(orderId)) {
-    res.status(400);
-    throw new Error("Invalid order id.");
-  }
-  if (!isValidId(productId)) {
-    res.status(400);
-    throw new Error("Invalid product id.");
-  }
-  if (!isValidId(slotId)) {
-    res.status(400);
-    throw new Error("Invalid slot id.");
-  }
-
-  const qtyValue = parsePositiveInteger(
-    res,
-    qty,
-    "Reserve qty must be a positive integer."
-  );
-
-  const order = await Order.findById(orderId).select(
-    "orderItems status invoice stockFinalizedAt"
-  );
-  if (!order) {
-    res.status(404);
-    throw new Error("Order not found.");
-  }
-  if (order.stockFinalizedAt) {
-    res.status(409);
-    throw new Error("Stock finalized. Allocations are locked.");
-  }
-  if (["Delivered", "Cancelled"].includes(order.status)) {
-    res.status(409);
-    throw new Error("Allocations are locked for delivered or cancelled orders.");
-  }
-  if (order.status !== "Shipping") {
-    res.status(409);
-    throw new Error("Reservations are allowed only when the order is Shipping.");
-  }
-  const hasDeducted = await OrderAllocation.exists({
-    order: orderId,
-    status: "Deducted",
-  });
-  if (hasDeducted) {
-    res.status(409);
-    throw new Error("Allocations are finalized and cannot be changed.");
-  }
-
-  const item = (order.orderItems || []).find(
-    (it) => String(it.product) === String(productId)
-  );
-  if (!item) {
-    res.status(400);
-    throw new Error("Product is not part of this order.");
-  }
-
-  const slotItem = await SlotItem.findOne({
-    product: productId,
-    slot: slotId,
-  })
-    .select("qty")
-    .lean();
-  if (!slotItem) {
-    res.status(404);
-    throw new Error("Slot item not found for this product.");
-  }
-
-  const existing = await OrderAllocation.find({
-    order: orderId,
-    product: productId,
-  })
-    .select("slot qty")
-    .lean();
-
-  let existingQty = 0;
-  let totalAllocated = 0;
-  for (const row of existing) {
-    const rowQty = Number(row.qty) || 0;
-    totalAllocated += rowQty;
-    if (String(row.slot) === String(slotId)) {
-      existingQty = rowQty;
-    }
-  }
-
-  const reservedRows = await OrderAllocation.find({
-    product: productId,
-    slot: slotId,
-    order: { $ne: orderId },
-    $or: [{ status: "Reserved" }, { status: { $exists: false } }],
-  })
-    .select("qty")
-    .lean();
-  const reservedQty = reservedRows.reduce(
-    (sum, row) => sum + (Number(row.qty) || 0),
-    0
-  );
-  const availableQty = Math.max(0, Number(slotItem.qty || 0) - reservedQty);
-  const availableForOrder = Math.max(0, availableQty - existingQty);
-  if (availableForOrder <= 0 && qtyValue >= existingQty) {
-    res.status(400);
-    throw new Error("No available stock in this slot.");
-  }
-  if (qtyValue > availableQty) {
-    res.status(400);
-    throw new Error(`Reserve qty exceeds available stock (${availableQty}).`);
-  }
-
-  const orderedQty = Number(item.qty) || 0;
-  const proposedTotal = totalAllocated - existingQty + qtyValue;
-  if (proposedTotal > orderedQty) {
-    res.status(400);
-    throw new Error("Reserve qty exceeds ordered quantity.");
-  }
-
-  const updated = await OrderAllocation.findOneAndUpdate(
-    { order: orderId, product: productId, slot: slotId },
-    {
-      $set: {
-        qty: qtyValue,
-        note: note ? String(note).trim() : "",
-        by: req.user?._id || null,
-        status: "Reserved",
-        deductedAt: null,
-        deductedBy: null,
-      },
-    },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
-  )
-    .populate("product", "name sku")
-    .populate("slot", "label store unit position")
-    .populate("by", "name email");
-
-  await recomputeAllocationStatus(orderId);
-
-  const deltaQty = qtyValue - existingQty;
-  if (deltaQty !== 0) {
-    await logInventoryMovement({
-      type: deltaQty > 0 ? "RESERVE" : "RELEASE",
-      product: productId,
-      slot: slotId,
-      order: orderId,
-      allocation: updated?._id || null,
-      qty: Math.abs(deltaQty),
-      actor: req.user?._id || null,
-      note: note ? String(note).trim() : undefined,
-    });
-  }
-
-  const warning = order.invoice
-    ? "Invoice exists for this order. Verify shipment documents after reservation changes."
-    : "";
-
-  res.status(200).json({
-    success: true,
-    message: "Order allocation saved.",
-    ...(warning ? { warning } : {}),
-    data: updated,
-  });
+export const reserveAllOrderAllocations = asyncHandler(async (req, res) => {
+  const orderId = req.params.id;
+  if (!isValidId(orderId)) { res.status(400); throw new Error("Invalid order id."); }
+  try {
+    const result = await reserveAllOrderItems({ orderId, actor: req.user?._id || null });
+    res.json({ success: true, message: "All items fully reserved.", ...(result.hasInvoice ? { warning: reservationWarning } : {}), data: result });
+  } catch (error) { sendReservationError(error, res); }
 });
 
 /* =========================
@@ -298,78 +99,13 @@ export const upsertOrderAllocation = asyncHandler(async (req, res) => {
    ========================= */
 export const deleteOrderAllocation = asyncHandler(async (req, res) => {
   const { id: orderId, allocationId } = req.params;
-
-  if (!isValidId(orderId)) {
-    res.status(400);
-    throw new Error("Invalid order id.");
+  for (const [value, label] of [[orderId, "order"], [allocationId, "allocation"]]) {
+    if (!isValidId(value)) { res.status(400); throw new Error(`Invalid ${label} id.`); }
   }
-  if (!isValidId(allocationId)) {
-    res.status(400);
-    throw new Error("Invalid allocation id.");
-  }
-
-  const allocation = await OrderAllocation.findById(allocationId);
-  if (!allocation) {
-    res.status(404);
-    throw new Error("Allocation not found.");
-  }
-  const order = await Order.findById(orderId).select(
-    "status invoice stockFinalizedAt"
-  );
-  if (!order) {
-    res.status(404);
-    throw new Error("Order not found.");
-  }
-  if (order.stockFinalizedAt) {
-    res.status(409);
-    throw new Error("Stock finalized. Allocations are locked.");
-  }
-  if (["Delivered", "Cancelled"].includes(order.status)) {
-    res.status(409);
-    throw new Error("Allocations are locked for delivered or cancelled orders.");
-  }
-  if (order.status !== "Shipping") {
-    res.status(409);
-    throw new Error("Reservations are allowed only when the order is Shipping.");
-  }
-  const hasDeducted = await OrderAllocation.exists({
-    order: orderId,
-    status: "Deducted",
-  });
-  if (hasDeducted) {
-    res.status(409);
-    throw new Error("Allocations are finalized and cannot be changed.");
-  }
-
-  if (String(allocation.order) !== String(orderId)) {
-    res.status(400);
-    throw new Error("Allocation does not belong to this order.");
-  }
-
-  await logInventoryMovement({
-    type: "RELEASE",
-    product: allocation.product,
-    slot: allocation.slot,
-    order: allocation.order,
-    allocation: allocation._id,
-    qty: Number(allocation.qty) || 0,
-    actor: req.user?._id || null,
-    note: allocation.note || undefined,
-  });
-
-  await allocation.deleteOne();
-  await recomputeAllocationStatus(orderId);
-
-  const warning = order.invoice
-    ? "Invoice exists for this order. Verify shipment documents after reservation changes."
-    : "";
-
-  res.status(200).json({
-    success: true,
-    message: "Allocation deleted.",
-    ...(warning ? { warning } : {}),
-    data: { id: allocationId },
-  });
+  try {
+    const result = await removeOrderReservation({ orderId, allocationId, actor: req.user?._id || null });
+    res.json({ success: true, message: "Allocation deleted.", ...(result.hasInvoice ? { warning: reservationWarning } : {}), data: { id: allocationId } });
+  } catch (error) { sendReservationError(error, res); }
 });
 
 /* =========================

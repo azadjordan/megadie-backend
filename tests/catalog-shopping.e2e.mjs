@@ -30,6 +30,8 @@ test('Ribbon catalog shared shopping flow', {timeout:120000}, async t => {
   async function fixture(t, {admin = false, mobile = false, approvalStatus = 'Approved', signedIn = true} = {}) {
     const context = await browser.newContext({viewport:mobile ? {width:390, height:844} : {width:1280, height:900}});
     t.after(() => context.close());
+    const sessionAbsolute = Date.now()+28800000;
+    const sessionMetadata = () => ({sessionId:'catalog-test-session',sessionExpiresAt:Date.now()+1800000,sessionAbsoluteExpiresAt:sessionAbsolute,sessionServerTime:Date.now()});
     const state = {catalogActive:true, catalogStatus:200, hiddenEntries:[], selectionStatus:200, emptyProducts:false, productCount:17, reverseProducts:false, apiDelay:0, stockDelay:0, stockStatus:200, stockMaterial:null, products:[], requests:[], stockBatches:[], productStockBatches:[], unexpected:[], errors:[]};
     await context.route('**/*', async route => {
       const request = route.request();
@@ -59,11 +61,12 @@ test('Ribbon catalog shared shopping flow', {timeout:120000}, async t => {
             return {entryId, inStock, noStock:!inStock && !entryId.endsWith('-2')};
           })});
         }
+        if (path === '/users/session/activity' && request.method() === 'POST') return reply({data:sessionMetadata()});
         if (request.method() !== 'GET') {
           state.unexpected.push(`${request.method()} ${path}`);
           return route.abort();
         }
-        if (path === '/users/account/profile') return signedIn ? reply({data:{sessionExpiresAt:Date.now()+1200000,sessionServerTime:Date.now(),_id:'fixture-user', name:'Catalog reviewer', isAdmin:admin, approvalStatus}}) : reply({message:'Not authenticated'},401);
+        if (path === '/users/account/profile') return signedIn ? reply({data:{...sessionMetadata(),_id:'fixture-user', name:'Catalog reviewer', isAdmin:admin, approvalStatus}}) : reply({message:'Not authenticated'},401);
         if (path === '/site-settings/maintenance-notice') return reply({data:{enabled:false}});
         if (path === '/filter-configs') return reply({data:['Ribbon', 'Creasing Matrix', 'Double Face Tape'].map(productType => ({productType, fields:[
           {key:'categoryKeys', label:'Material', ui:'chips', allowedValues:materials.map(m => m.key), multi:false},

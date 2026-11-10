@@ -71,6 +71,7 @@ export function buildFulfillmentSheet(order, allocations, generatedAt = new Date
   }
   return {
     orderId: id(order), orderNumber: order.orderNumber, status: order.status,
+    customerName: typeof order.user?.name === "string" ? order.user.name.trim().replace(/\s+/gu, " ") : "",
     label: buildCartonLabel(order.user?.name, order.orderNumber, id(order)),
     assignedTo: order.assignedTo || "", preparationMode: order.preparationMode || "",
     customerLocation: getCustomerLocation(order.user), preparationProblems,

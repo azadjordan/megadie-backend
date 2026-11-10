@@ -112,7 +112,7 @@ export const getSlotItemsByProduct = asyncHandler(async (req, res) => {
 
   let items = await SlotItem.find({ product: productId })
     .populate("slot", "label store unit position")
-    .sort({ qty: 1, createdAt: -1 })
+    .sort({ qty: 1, createdAt: -1, _id: 1 })
     .lean();
 
   const slotIds = items

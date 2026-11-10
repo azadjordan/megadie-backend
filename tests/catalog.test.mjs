@@ -7,6 +7,7 @@ import Catalog from '../models/catalogModel.js';
 import CatalogEntry from '../models/catalogEntryModel.js';
 import Category from '../models/categoryModel.js';
 import User from '../models/userModel.js';
+import AdminSession from '../models/adminSessionModel.js';
 import routes from '../routes/catalogRoutes.js';
 
 const cid='100000000000000000000001';
@@ -28,6 +29,9 @@ test('catalog access, saved pages, literal search and selected product filters',
  const catalog={_id:cid,name:'Ribbon colors',productType:'Ribbon',layout:'color-grid',isActive:false};
  const categories=['grosgrain','satin'].map((key,i)=>({_id:gids[i],key,label:key,productType:'Ribbon',isActive:true}));
  const entries=categories.flatMap((cat,m)=>Array.from({length:196},(_,i)=>({_id:(300000000000000000000000n+BigInt(m*196+i)).toString(),catalog:cid,category:cat._id,code:String(i).padStart(3,'0'),label:i===195?'Last Color':'Color '+i,imageUrl:'https://example.com/image.jpg',page:Math.floor(i/49)+1,position:i%49+1,isActive:false})));
+ const sessionId = 'a'.repeat(64);
+ const issuedAt = Math.floor(Date.now()/1000);
+ t.mock.method(AdminSession,'findOne',()=>({lean:async()=>({_id:sessionId,user:'admin',startedAt:new Date(issuedAt*1000),idleExpiresAt:new Date((issuedAt+1800)*1000),absoluteExpiresAt:new Date((issuedAt+28800)*1000)})}));
  t.mock.method(User,'findById',role=>({select:async()=>({_id:role,isAdmin:role==='admin',approvalStatus:role==='pending'?'Pending':'Approved'})}));
  t.mock.method(Catalog,'findOne',filter=>query([catalog].find(r=>match(r,filter))||null));
  t.mock.method(Category,'find',filter=>query(categories.filter(r=>match(r,filter))));
@@ -41,7 +45,7 @@ test('catalog access, saved pages, literal search and selected product filters',
  const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));
  t.after(async()=>{await new Promise(r=>server.close(r));if(previous===undefined)delete process.env.JWT_SECRET;else process.env.JWT_SECRET=previous;});
  const base=`http://127.0.0.1:${server.address().port}`;
- const request=(url,role='customer')=>fetch(base+url,{headers:role?{Cookie:`jwt=${jwt.sign({userId:role},process.env.JWT_SECRET)}`}:{}});
+ const request=(url,role='customer')=>fetch(base+url,{headers:role?{Cookie:`jwt=${jwt.sign({userId:role,iat:issuedAt,...(role==='admin'?{sessionId}:{})},process.env.JWT_SECRET,{expiresIn:'8h'})}`}:{}});
  assert.equal((await request('/?productType=Ribbon',null)).status,401);
  assert.equal((await request('/?productType=Ribbon','pending')).status,403);
  for(const role of ['customer','admin']) {

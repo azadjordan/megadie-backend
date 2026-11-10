@@ -6,6 +6,8 @@ import { chromium } from "playwright";
 const origin = process.env.DELIVERY_TEST_ORIGIN || "http://localhost:5173";
 const details = { contactName: "Order Recipient", phoneNumber: "+123456", secondaryPhoneNumber: "", address: "Order-only address", googleMapsUrl: "https://maps.app.goo.gl/client", notes: "Receiving hours" };
 const id = "100000000000000000000001";
+const sessionAbsoluteExpiresAt = Date.now() + 28800000;
+const sessionMetadata = () => ({ sessionId: "fixture-admin-session", sessionAbsoluteExpiresAt, sessionExpiresAt: Date.now() + 1800000, sessionServerTime: Date.now() });
 const profile = { _id: "200000000000000000000001", name: "Admin", email: "admin@test.invalid", isAdmin: true, approvalStatus: "Approved" };
 
 test("order delivery browser flow", { timeout: 120000 }, async (t) => {
@@ -30,10 +32,10 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     };
     state.customer = { ...state.order.user, email: "client@test.invalid", deliveryContactName: "", deliveryPhoneNumber: "" };
     const sheet = () => ({ orderId: id, orderNumber: state.order.orderNumber, status: state.order.status,
-      preparationMode: state.order.preparationMode,
+      preparationMode: state.order.preparationMode, customerName: state.order.user.name,
       customerLocation: { address: state.customer.address || "", googleMapsUrl: state.customer.deliveryGoogleMapsUrl || "" },
       preparationProblems: state.preparationProblems || [],
-      generatedAt: "2026-11-02T10:00:00Z", label: "ABC-023AD", assignedTo: state.order.assignedTo, delivery: { ...state.order.resolvedDelivery, missingFields: state.order.resolvedDelivery.missingFields.filter((key) => key === "addressOrLocation") },
+      generatedAt: "2026-11-02T10:00:00Z", label: "Alpha Beta Company — 023AD", assignedTo: state.order.assignedTo, delivery: { ...state.order.resolvedDelivery, missingFields: state.order.resolvedDelivery.missingFields.filter((key) => key === "addressOrLocation") },
       problems: [...(state.preparationProblems || [])], notices: [],
       picks: [{ slot: "A10-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 1 }, { slot: "A2-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 3 }],
       items: [{ productId: "p1", sku: "SKU1", name: "Grosgrain ribbon", orderedQty: 4, allocatedQty: 4 }],
@@ -46,7 +48,8 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       const reply = (body, status = 200) => route.fulfill({ status, headers, contentType: "application/json", body: JSON.stringify(body) });
       if (method === "OPTIONS") return route.fulfill({ status: 204, headers });
       state.requests.push({ path, method, body: method === "PUT" ? request.postDataJSON() : undefined });
-      if (path === "/users/account/profile" && method === "GET") return reply({ data: { ...profile, sessionExpiresAt: Date.now() + 1200000, sessionServerTime: Date.now() } });
+      if (path === "/users/account/profile" && method === "GET") return reply({ data: { ...profile, ...sessionMetadata() } });
+      if (path === "/users/session/activity") return reply({ data: sessionMetadata() });
       if (path === "/site-settings/maintenance-notice") return reply({ data: { enabled: false } });
       if (path === "/users/client" && method === "GET") return reply({ data: state.customer });
       if (path === "/users/client" && method === "PUT") { state.customer = { ...state.customer, ...request.postDataJSON() }; return reply({ data: state.customer }); }
@@ -100,7 +103,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.evaluate(() => window.__copies.length), 0);
     const preview = await page.getByLabel("Message preview").inputValue();
-    assert.ok(preview.startsWith("*PREPARE & DELIVER*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ *ABC-023AD*\n_Assigned To:_ *Ahmed*\n*1 item — 4 units*"));
+    assert.ok(preview.startsWith("*PREPARE & DELIVER*\n_Client:_ *Alpha Beta Company*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ *Alpha Beta Company — 023AD*\n_Assigned To:_ *Ahmed*\n*1 item — 4 units*"));
     assert.match(preview, /\*01\)\* SKU1\n   ↳ A2-AE1: \*3 units\*\n   ↳ A10-AE1: \*1 unit\*/);
     assert.ok(preview.includes("☐ *01)* SKU1 — *4*\n*Total: 1 item — 4 units*"));
     assert.doesNotMatch(preview, /LIVE-PROFILE|ACCOUNT-PHONE|PICKUP|Order total|Grosgrain ribbon|Order Recipient|Contact:|Phone:|Notes:|Receiving hours/);
@@ -120,7 +123,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.waitForFunction(() => window.__copies.length === 2);
     assert.match(await page.evaluate(() => window.__copies[1]), /NEW-ADDRESS/);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 2);
-    assert.equal(state.requests.filter((r) => r.method !== "GET").length, 0);
+    assert.equal(state.requests.filter((r) => r.method !== "GET" && r.path !== "/users/session/activity").length, 0);
   });
   await t.test("legacy destination is reviewed and saved to the order, then the updated sheet copies", async (t) => {
     const { page, state } = await fixture(t, { legacy: true });
@@ -137,7 +140,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     assert.match(await page.evaluate(() => window.__copies[0]), /New order destination/);
-    const writes = state.requests.filter((r) => r.method !== "GET");
+    const writes = state.requests.filter((r) => r.method !== "GET" && r.path !== "/users/session/activity");
     assert.equal(writes.length, 1);
     assert.equal(writes[0].path, `/orders/${id}/delivery-details`);
     assert.equal(writes[0].body.expectedRevision, 0);
@@ -180,7 +183,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     assert.equal(state.requests.filter((r) => r.method === "PUT").length, 0);
     const readsBefore = state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length;
     await page.getByLabel("Assigned To").fill("  Ahmed  ");
-    assert.match(await page.getByLabel("Message preview").inputValue(), /_Carton Tag:_ \*ABC-023AD\*\n_Assigned To:_ \*Ahmed\*/);
+    assert.match(await page.getByLabel("Message preview").inputValue(), /_Carton Tag:_ \*Alpha Beta Company — 023AD\*\n_Assigned To:_ \*Ahmed\*/);
     assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*/);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, readsBefore);
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
@@ -294,7 +297,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("button", { name: "Prepare order" }).click();
     await page.getByRole("dialog").waitFor();
     await page.screenshot({ path: "/tmp/megadie-prepare-deliver-mobile-top.png", fullPage: true });
-    assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ \*ABC-023AD\*\n/);
+    assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*\n_Client:_ \*Alpha Beta Company\*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ \*Alpha Beta Company — 023AD\*\n/);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await page.getByLabel("Assigned To").fill("Ahmed");
     await page.getByRole("dialog").getByRole("button", { name: "Save & Copy", exact: true }).click();

@@ -9,11 +9,13 @@ const order = { _id: "o1", orderNumber: "ORD-261102-023AD", status: "Shipping", 
   totalPrice: 9876, adminToAdminNote: "SECRET", orderItems: [{ product: "p1", sku: "SKU1", productName: "Ribbon", qty: 4 }] };
 const allocation = (qty, label = "A2-AE1", status = "Reserved", store = "AE1") => ({ product: "p1", qty, status, slot: { label, store } });
 
-test("compact carton label uses initials and the full last order segment", () => {
-  assert.equal(buildCartonLabel(user.name, order.orderNumber), "ABC-023AD");
-  assert.equal(buildCartonLabel("Jane Mary Doe", "ORD-261102-ABC123"), "JMD-ABC123");
-  assert.equal(buildCartonLabel(" أحمد علي ", "ORD-261102-012345"), "أع-012345");
-  assert.doesNotMatch(buildCartonLabel("A. B. C.", order.orderNumber), /[.\s]/);
+test("carton label keeps the full client name and full last order segment", () => {
+  assert.equal(buildCartonLabel(user.name, order.orderNumber), "Alpha Beta Company — 023AD");
+  assert.equal(buildCartonLabel("Jane Mary Doe", "ORD-261102-ABC123"), "Jane Mary Doe — ABC123");
+  assert.equal(buildCartonLabel(" أحمد علي ", "ORD-261102-012345"), "أحمد علي — 012345");
+  assert.equal(buildCartonLabel("  A. B.\n C. & Sons  ", order.orderNumber), "A. B. C. & Sons — 023AD");
+  assert.equal(buildCartonLabel("", "", "abcdef123456"), "Unknown client — 123456");
+  assert.equal(buildCartonLabel(undefined, undefined), "Unknown client — UNKNOWN");
 });
 
 test("assignment requires a nonblank trimmed name with a bounded length", () => {
@@ -59,7 +61,8 @@ test("edited delivery values are bounded strings and map links must be HTTPS", (
 test("sheet naturally sorts slots, aggregates duplicate order lines, and allowlists data", () => {
   const sheet = buildFulfillmentSheet({ ...order, orderItems: [...order.orderItems, { ...order.orderItems[0], qty: 2 }] }, [allocation(2, "A10-AE1"), allocation(4)]);
   assert.deepEqual(sheet.problems, []);
-  assert.equal(sheet.label, "ABC-023AD");
+  assert.equal(sheet.customerName, user.name);
+  assert.equal(sheet.label, "Alpha Beta Company — 023AD");
   assert.deepEqual(sheet.picks.map((p) => p.slot), ["A2-AE1", "A10-AE1"]);
   assert.equal(sheet.items[0].orderedQty, 6);
   assert.equal(sheet.items[0].allocatedQty, 6);

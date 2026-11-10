@@ -1,38 +1,35 @@
 import jwt from "jsonwebtoken";
 import asyncHandler from "./asyncHandler.js";
 import User from "../models/userModel.js";
-import { getSessionExpiry, sessionCookieOptions } from "../utils/sessionPolicy.js";
+import AdminSession from "../models/adminSessionModel.js";
+import { getSessionExpiry, SessionExpiredError } from "../utils/sessionPolicy.js";
 
 //////////////////// Protect Middleware:
 // Protect routes (Only logged-in users can access)
 const protect = asyncHandler(async (req, res, next) => {
-    let token = req.cookies.jwt;
-
-    if (token) {
-        try {
-            const decoded = jwt.verify(token, process.env.JWT_SECRET);
-            const user = await User.findById(decoded.userId).select("-password");
-            if (!user) {
-                res.status(401);
-                throw new Error("Not authorized, user not found");
-            }
-            const expiresAt = getSessionExpiry(decoded, user);
-            if (expiresAt != null && expiresAt <= Math.floor(Date.now() / 1000)) {
-                throw new Error("Session expired. Please sign in again.");
-            }
-            req.user = user;
-            req.sessionExpiresAt = expiresAt;
-            next();
-        } catch (error) {
-            console.error("JWT Verification Failed:", error.message); // ✅ Log token errors
-            res.clearCookie("jwt", sessionCookieOptions());
-            res.status(401);
-            throw new Error("Session expired or invalid. Please sign in again.");
-        }
-    } else {
-        res.status(401);
-        throw new Error("Not authorized, no token found");
+    const token = req.cookies.jwt;
+    if (!token) return res.status(401).json({ message: "Not authorized, no token found" });
+    let decoded;
+    try { decoded = jwt.verify(token, process.env.JWT_SECRET); }
+    catch { return res.status(401).json({ message: "Session expired or invalid. Please sign in again." }); }
+    const user = await User.findById(decoded.userId).select("-password");
+    if (!user) return res.status(401).json({ message: "Not authorized, user not found" });
+    // A stale response must never clear a newer login's browser cookie.
+    // Database/network failures propagate as server errors, not false logouts.
+    const session = typeof decoded.sessionId === "string" && /^[a-f0-9]{64}$/.test(decoded.sessionId)
+        ? await AdminSession.findOne({ _id: decoded.sessionId, user: user._id }).lean() : null;
+    let expiresAt;
+    try { expiresAt = getSessionExpiry(decoded, user, undefined, session); }
+    catch (error) {
+        if (!(error instanceof SessionExpiredError)) throw error;
+        return res.status(401).json({ message: error.message });
     }
+    if (expiresAt != null && expiresAt <= Math.floor(Date.now() / 1000)) return res.status(401).json({ message: "Session expired. Please sign in again." });
+    req.user = user;
+    req.jwtPayload = decoded;
+    req.adminSession = session;
+    req.sessionExpiresAt = expiresAt;
+    next();
 });
 
 ///////////////// Admin Middleware:

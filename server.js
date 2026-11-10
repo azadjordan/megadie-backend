@@ -1,6 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import { trustedOrigins } from "./config/trustedOrigins.js";
 import cookieParser from "cookie-parser";
 import path from "path";
 
@@ -44,20 +45,11 @@ app.set("trust proxy", 1);
 const port = process.env.PORT || 5000;
 
 // ✅ Fix CORS to allow cookies
-const allowedOrigins = [
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://localhost:5174",
-  "https://megadie-frontend.onrender.com",
-  "https://megadie-frontend-v2.onrender.com",
-  "https://www.megadie.com", // if you’re using the custom domain
-  "https://megadie.com",
-  "https://api.megadie.com",
-];
+
 
 app.use(
   cors({
-    origin: allowedOrigins,
+    origin: trustedOrigins,
     credentials: true, // Allow cookies
   })
 );

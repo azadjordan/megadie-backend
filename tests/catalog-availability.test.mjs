@@ -10,6 +10,7 @@ import Product from '../models/productModel.js';
 import SlotItem from '../models/slotItemModel.js';
 import OrderAllocation from '../models/orderAllocationModel.js';
 import User from '../models/userModel.js';
+import AdminSession from '../models/adminSessionModel.js';
 import catalogRoutes from '../routes/catalogRoutes.js';
 import {getProductsAvailability} from '../controllers/productController.js';
 import {protect, requireApproved} from '../middleware/authMiddleware.js';
@@ -63,6 +64,9 @@ test('catalog stock summaries share fresh SKU stock math, enforce visibility, an
   const stock = new Map(products.map((p,i) => [p._id, [0,10,5,4,100,100,2,0,0,100][i]]));
   const reserved = new Map([[products[1]._id,3], [products[2]._id,5], [products[6]._id,9]]);
 
+ const sessionId = 'a'.repeat(64);
+ const issuedAt = Math.floor(Date.now()/1000);
+ t.mock.method(AdminSession,'findOne',()=>({lean:async()=>({_id:sessionId,user:'admin',startedAt:new Date(issuedAt*1000),idleExpiresAt:new Date((issuedAt+1800)*1000),absoluteExpiresAt:new Date((issuedAt+28800)*1000)})}));
   t.mock.method(User,'findById',role => ({select:async () => ({_id:role, isAdmin:role === 'admin', approvalStatus:role === 'pending' ? 'Pending' : 'Approved'})}));
   t.mock.method(Catalog,'findOne',filter => query(matches(catalog,filter) ? catalog : null));
   t.mock.method(CatalogEntry,'find',filter => query(entries.filter(row => matches(row,filter))));
@@ -89,7 +93,7 @@ test('catalog stock summaries share fresh SKU stock math, enforce visibility, an
     if (previous === undefined) delete process.env.JWT_SECRET; else process.env.JWT_SECRET = previous;
   });
   const post = (path,body,role='admin') => fetch(`http://127.0.0.1:${server.address().port}${path}`, {
-    method:'POST', headers:{'Content-Type':'application/json', ...(role ? {Cookie:`jwt=${jwt.sign({userId:role},process.env.JWT_SECRET)}`} : {})},
+    method:'POST', headers:{'Content-Type':'application/json', ...(role ? {Cookie:`jwt=${jwt.sign({userId:role,iat:issuedAt,...(role==='admin'?{sessionId}:{})},process.env.JWT_SECRET,{expiresIn:'8h'})}`} : {})},
     body:JSON.stringify(body),
   });
   const preview = `/preview/${catalog._id}/availability`;

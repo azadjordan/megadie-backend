@@ -17,6 +17,7 @@ import {
   upsertOrderAllocation,
   deleteOrderAllocation,
   finalizeOrderAllocations,
+  reserveAllOrderAllocations,
 } from "../controllers/orderAllocationController.js";
 import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 import { getOrderFulfillmentSheet, updateOrderDelivery } from "../controllers/orderDeliveryController.js";
@@ -44,6 +45,7 @@ router.put("/:id/delivery-details", protect, admin, updateOrderDelivery);
 // Order allocations (admin)
 router.get("/:id/allocations", protect, admin, getOrderAllocations);
 router.post("/:id/allocations", protect, admin, upsertOrderAllocation);
+router.post("/:id/allocations/reserve-all", protect, admin, reserveAllOrderAllocations);
 router.post("/:id/allocations/finalize", protect, admin, finalizeOrderAllocations);
 router.delete("/:id/allocations/:allocationId", protect, admin, deleteOrderAllocation);
 

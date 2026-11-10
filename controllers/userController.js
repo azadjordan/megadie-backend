@@ -1,3 +1,6 @@
+import jwt from "jsonwebtoken";
+import AdminSession from "../models/adminSessionModel.js";
+import { trustedOrigins } from "../config/trustedOrigins.js";
 // controllers/userController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import User from "../models/userModel.js";
@@ -112,7 +115,7 @@ export const authUser = asyncHandler(async (req, res) => {
       res.status(403);
       throw new Error("Your account was rejected. Contact support.");
     }
-    const session = generateToken(res, user);
+    const session = await generateToken(res, user);
     return res.status(200).json({
       success: true,
       message: "Login successful.",
@@ -138,12 +141,19 @@ export const authUser = asyncHandler(async (req, res) => {
    Public — Logout user
    ========================= */
 export const logoutUser = asyncHandler(async (req, res) => {
-  res.clearCookie("jwt", sessionCookieOptions());
-
-  return res.status(200).json({
-    success: true,
-    message: "Logged out successfully.",
-  });
+  res.set("Cache-Control", "no-store");
+  let payload;
+  try { payload = jwt.verify(req.cookies.jwt, process.env.JWT_SECRET, { ignoreExpiration: true }); } catch { /* Already signed out. */ }
+  if (payload?.sessionId) {
+    if (!trustedOrigins.includes(req.get("Origin"))) return res.status(403).json({ message: "This session action must come from the website." });
+    if (req.body?.sessionId !== payload.sessionId) return res.status(409).json({ code: "SESSION_CHANGED", message: "The signed-in session changed." });
+    await AdminSession.updateOne({ _id: payload.sessionId, user: payload.userId, revokedAt: null }, { $set: { revokedAt: new Date() } });
+    // Revocation is authoritative. Do not send a late cookie deletion that
+    // could erase a newer login in another tab.
+  } else {
+    res.clearCookie("jwt", sessionCookieOptions());
+  }
+  res.json({ success: true, message: "Logged out successfully." });
 });
 
 /* =========================
@@ -391,7 +401,8 @@ export const resetPassword = asyncHandler(async (req, res) => {
   await user.save();
 
   // Optional: auto-login after reset
-  generateToken(res, user);
+  await AdminSession.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
+  await generateToken(res, user);
 
   return res.status(200).json({
     success: true,
@@ -416,7 +427,7 @@ export const getUserProfile = asyncHandler(async (req, res) => {
     success: true,
     message: "Profile retrieved successfully.",
     data: {
-      ...sessionMetadata(req.sessionExpiresAt),
+      ...sessionMetadata(req.sessionExpiresAt, req.adminSession),
       _id: user._id,
       name: user.name,
       email: user.email,
@@ -461,7 +472,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
     success: true,
     message: "Profile updated successfully.",
     data: {
-      ...sessionMetadata(req.sessionExpiresAt),
+      ...sessionMetadata(req.sessionExpiresAt, req.adminSession),
       _id: updatedUser._id,
       name: updatedUser.name,
       email: updatedUser.email,
@@ -686,6 +697,7 @@ export const updateUser = asyncHandler(async (req, res) => {
     throw new Error("User not found.");
   }
 
+  const wasAdmin = user.isAdmin;
   assignDeliveryOverrides(user, req.body, res);
   if (req.body.name != null) user.name = req.body.name;
   if (req.body.email != null) user.email = req.body.email.trim().toLowerCase();
@@ -720,6 +732,7 @@ export const updateUser = asyncHandler(async (req, res) => {
 
   try {
     const updatedUser = await user.save();
+  if (wasAdmin !== updatedUser.isAdmin) await AdminSession.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
     return res.status(200).json({
       success: true,
       message: "User updated successfully.",
@@ -823,6 +836,7 @@ export const updateUserPasswordByAdmin = asyncHandler(async (req, res) => {
   user.passwordResetTokenHash = undefined;
   user.passwordResetExpires = undefined;
   await user.save();
+  await AdminSession.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
 
   return res.status(200).json({
     success: true,
