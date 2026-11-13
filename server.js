@@ -35,10 +35,12 @@ import userPriceRoutes from "./routes/userPriceRoutes.js";
 import priceRuleRoutes from "./routes/priceRuleRoutes.js";
 import analyticsRoutes from "./routes/analyticsRoutes.js";
 import siteSettingsRoutes from "./routes/siteSettingsRoutes.js";
+import packingRoutes from "./routes/packingRoutes.js";
 import { notFound, errorHandler } from "./middleware/errorMiddleware.js";
+import { startPackingHelpNotifications } from "./utils/packingHelpNotifications.js";
 
 // ✅ Initialize and connect to DB
-connectDB();
+connectDB().then(startPackingHelpNotifications);
 
 const app = express();
 app.set("trust proxy", 1);
@@ -79,6 +81,7 @@ app.get("/", (req, res) => {
 app.use("/api/products", productRoutes);
 app.use("/api/users", userRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/packing", packingRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/catalogs", catalogRoutes);

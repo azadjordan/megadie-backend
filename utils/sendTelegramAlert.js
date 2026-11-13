@@ -1,13 +1,12 @@
-import dotenv from "dotenv";
-dotenv.config({ path: ".env.development" });
+// Read configuration when sending: server.js loads the environment at startup.
+const sendTelegramAlert = async (message, { plainText = false, strict = false } = {}) => {
+  const token = process.env.TELEGRAM_BOT_TOKEN, chatId = process.env.TELEGRAM_CHAT_ID;
+  if (!token || !chatId) {
+    if (strict) throw new Error("Telegram is not configured.");
+    return false;
+  }
 
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
-
-const sendTelegramAlert = async (message) => {
-  if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
-
-  const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+  const url = `https://api.telegram.org/bot${token}/sendMessage`;
 
   try {
     const res = await fetch(url, {
@@ -15,19 +14,26 @@ const sendTelegramAlert = async (message) => {
       headers: {
         "Content-Type": "application/json",
       },
+      signal: AbortSignal.timeout(8000),
       body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
+        chat_id: chatId,
         text: message,
-        parse_mode: "Markdown",
+        ...(plainText ? {} : { parse_mode: "Markdown" }),
       }),
     });
 
     if (!res.ok) {
-      const errorData = await res.text();
-      throw new Error(`Telegram API error: ${errorData}`);
+      throw new Error(`Telegram request failed (${res.status}).`);
     }
+    const result = await res.json();
+    if (!result.ok) throw new Error("Telegram did not accept the message.");
+    return true;
   } catch (error) {
-    console.error("❌ Telegram alert failed:", error.message);
+    // Never log fetch errors containing a URL with the bot token.
+    const safe = new Error(error.name === "TimeoutError" ? "Telegram request timed out." : "Telegram delivery failed.");
+    if (strict) throw safe;
+    console.error("❌ Telegram alert failed:", safe.message);
+    return false;
   }
 };
 

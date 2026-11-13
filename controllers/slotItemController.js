@@ -129,7 +129,7 @@ export const getSlotItemsByProduct = asyncHandler(async (req, res) => {
     }
 
     const reservedRows = await OrderAllocation.find(reservedFilter)
-      .select("slot qty")
+      .select("slot qty pickedQty")
       .lean();
 
     const reservedBySlot = new Map();
@@ -139,12 +139,15 @@ export const getSlotItemsByProduct = asyncHandler(async (req, res) => {
       reservedBySlot.set(slotKey, (reservedBySlot.get(slotKey) || 0) + qtyValue);
     }
 
+    const pendingRows = await OrderAllocation.find({ product: productId, slot: { $in: slotIds }, pickedQty: { $gt: 0 }, $or: [{ status: "Reserved" }, { status: { $exists: false } }] }).select("slot pickedQty").lean();
+    const pending = new Map();
+    for (const row of pendingRows) pending.set(String(row.slot), (pending.get(String(row.slot)) || 0) + row.pickedQty);
     items = items.map((item) => {
       const slotKey = String(item.slot?._id || item.slot);
       const reservedQty = reservedBySlot.get(slotKey) || 0;
       const onHand = Number(item.qty) || 0;
       const availableQty = Math.max(0, onHand - reservedQty);
-      return { ...item, reservedQty, availableQty };
+      return { ...item, reservedQty, availableQty, pendingPickedQty: pending.get(slotKey) || 0 };
     });
   }
 
@@ -182,7 +185,7 @@ export const getSlotItemsBySlot = asyncHandler(async (req, res) => {
       product: { $in: productIds },
       $or: [{ status: "Reserved" }, { status: { $exists: false } }],
     })
-      .select("product qty")
+      .select("product qty pickedQty")
       .lean();
 
     const reservedByProduct = new Map();
@@ -195,6 +198,8 @@ export const getSlotItemsBySlot = asyncHandler(async (req, res) => {
       );
     }
 
+    const pendingByProduct = new Map();
+    for (const row of reservedRows) pendingByProduct.set(String(row.product), (pendingByProduct.get(String(row.product)) || 0) + (row.pickedQty || 0));
     rows = items.map((item) => {
       const productKey = String(item.product?._id || item.product);
       const reservedQty = reservedByProduct.get(productKey) || 0;
@@ -203,6 +208,7 @@ export const getSlotItemsBySlot = asyncHandler(async (req, res) => {
         ...item,
         reservedQty,
         availableQty: Math.max(0, onHand - reservedQty),
+        pendingPickedQty: pendingByProduct.get(productKey) || 0,
       };
     });
   }
@@ -522,6 +528,10 @@ export const correctSlotItemCount = asyncHandler(async (req, res) => {
       const previousQty = Number(item?.qty || 0);
       const previousCbm = Number(item?.cbm || 0);
       const reservedQty = await getReservedQty(slotId, productId, session);
+      const pickedRows = await OrderAllocation.find({ product: productId, slot: slotId, pickedQty: { $gt: 0 }, $or: [{ status: "Reserved" }, { status: { $exists: false } }] }).select("pickedQty").session(session).lean();
+      const pendingPicked = pickedRows.reduce((sum, row) => sum + row.pickedQty, 0);
+      if (pendingPicked > 0) { res.status(409); throw new Error(`${pendingPicked} collected units are still included in recorded stock. Finalize their orders or confirm their return before correcting this shelf count.`); }
+
 
       if (actualValue < reservedQty) {
         res.status(409);

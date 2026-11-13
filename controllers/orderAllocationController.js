@@ -126,7 +126,7 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
   try {
     await session.withTransaction(async () => {
       const order = await Order.findById(orderId)
-        .select("status orderItems allocationStatus invoice stockFinalizedAt")
+        .select("status orderItems allocationStatus invoice stockFinalizedAt packingSentAt packedAt")
         .session(session);
       if (!order) {
         res.status(404);
@@ -140,6 +140,7 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
         res.status(409);
         throw new Error("Finalize is allowed only when the order is Delivered.");
       }
+      if (order.packingSentAt && !order.packedAt) { res.status(409); throw new Error("Packing must be complete before stock finalization."); }
       if (!order.invoice) {
         res.status(409);
         throw new Error("Invoice required before finalizing stock.");
@@ -155,11 +156,14 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
         (finalizedAt || new Date()).getTime() + 60 * 24 * 60 * 60 * 1000
       );
 
+      // Digital packing records retain the actual collection sources with the order.
+      const expiryUpdate = order.packingSentAt ? { $unset: { expiresAt: "" } } : { $set: { expiresAt } };
+
       if (order.stockFinalizedAt) {
         if (allocations.length) {
           await OrderAllocation.updateMany(
             { order: orderId },
-            { $set: { expiresAt } },
+            expiryUpdate,
             { session }
           );
         }
@@ -255,7 +259,7 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
         }
         await OrderAllocation.updateMany(
           { order: orderId },
-          { $set: { expiresAt } },
+          expiryUpdate,
           { session }
         );
         summary = {
@@ -389,7 +393,7 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
       }
       await OrderAllocation.updateMany(
         { order: orderId },
-        { $set: { expiresAt } },
+        expiryUpdate,
         { session }
       );
 

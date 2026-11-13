@@ -4,6 +4,8 @@ import OrderAllocation from "../models/orderAllocationModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import { logInventoryMovement } from "./inventoryMovement.js";
 import { buildOrderReservationPlan, isReserved, reservationId as id } from "./orderReservationPlan.js";
+import { packingSummary } from "./packingState.js";
+import { resolvePackingHelp } from "./packingHelpState.js";
 
 export class ReservationError extends Error {
   constructor(message, statusCode = 409, issues) {
@@ -14,9 +16,9 @@ export class ReservationError extends Error {
 }
 
 export async function recomputeAllocationStatus(orderId, session = null) {
-  const order = await Order.findById(orderId).select("orderItems allocationStatus allocatedAt").session(session);
+  const order = await Order.findById(orderId).select("orderItems deliveryCharge extraFee totalPrice allocationStatus allocatedAt packingSentAt packingSummary status stockFinalizedAt +packingHelp").session(session);
   if (!order) return null;
-  const rows = await OrderAllocation.find({ order: orderId, $or: [{ status: "Reserved" }, { status: "Deducted" }, { status: { $exists: false } }] }).select("product qty").session(session).lean();
+  const rows = await OrderAllocation.find({ order: orderId, $or: [{ status: "Reserved" }, { status: "Deducted" }, { status: { $exists: false } }] }).select("product qty pickedQty pickProblem status").session(session).lean();
   const totals = new Map();
   for (const row of rows) totals.set(id(row.product), (totals.get(id(row.product)) || 0) + row.qty);
   const ordered = new Map();
@@ -25,11 +27,13 @@ export async function recomputeAllocationStatus(orderId, session = null) {
   const full = ordered.size > 0 && [...ordered].every(([product, qty]) => totals.get(product) === qty);
   order.allocationStatus = any && full ? "Allocated" : any ? "PartiallyAllocated" : "Unallocated";
   order.allocatedAt = full && any ? order.allocatedAt || new Date() : null;
+  if (order.packingSentAt) order.packingSummary = packingSummary(order, rows);
+  resolvePackingHelp(order, rows);
   await order.save({ session });
   return order;
 }
 
-async function transaction(work) {
+export async function transaction(work) {
   const session = await mongoose.startSession();
   try {
     return await session.withTransaction(() => work(session), { readConcern: { level: "snapshot" }, writeConcern: { w: "majority" }, timeoutMS: 15000 });
@@ -38,18 +42,29 @@ async function transaction(work) {
   }
 }
 
-async function lockOrder(orderId, session) {
+export async function lockOrder(orderId, session, { expectedRevision, allowPacked = false, includeItemChanges = false } = {}) {
   // Actual writes, rather than read-only checks, force competing operations to
   // retry against a fresh snapshot. The order guard also protects its item total.
-  const order = await Order.findOneAndUpdate({ _id: orderId }, { $inc: { reservationRevision: 1 } }, { new: true, session });
-  if (!order) throw new ReservationError("Order not found.", 404);
+  const filter = { _id: orderId };
+  if (expectedRevision !== undefined) {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw new ReservationError("Reload current packing progress before saving.", 400);
+    if (expectedRevision === 0) filter.$or = [{ reservationRevision: 0 }, { reservationRevision: { $exists: false } }];
+    else filter.reservationRevision = expectedRevision;
+  }
+  const order = await Order.findOneAndUpdate(filter, { $inc: { reservationRevision: 1 } }, { new: true, session })
+    .select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp" + (includeItemChanges ? " +itemChanges" : ""));
+  if (!order) {
+    if (!await Order.exists({ _id: orderId }).session(session)) throw new ReservationError("Order not found.", 404);
+    throw new ReservationError("Order changed. Refresh packing progress and review before saving.");
+  }
   if (order.stockFinalizedAt) throw new ReservationError("Stock finalized. Allocations are locked.");
   if (order.status !== "Shipping") throw new ReservationError("Reservations are allowed only when the order is Shipping.");
+  if (order.packedAt && !allowPacked) throw new ReservationError("Order is Packed. An admin must reopen packing before changing collected stock or reservations.");
   if (await OrderAllocation.exists({ order: orderId, status: "Deducted" }).session(session)) throw new ReservationError("Allocations are finalized and cannot be changed.");
   return order;
 }
 
-async function lockStock(filter, session) {
+export async function lockStock(filter, session) {
   // Stock edits/moves/finalization write these same documents. Manual and bulk
   // reservations share this guard, preventing cross-order write skew.
   return SlotItem.updateMany(filter, { $inc: { reservationRevision: 1 } }, { session, timestamps: false });
@@ -67,6 +82,7 @@ export async function saveOrderReservation({ orderId, productId, slotId, qty, no
     const own = rows.filter(isReserved);
     const existing = own.find((row) => id(row.slot) === slotId);
     const existingQty = existing?.qty || 0;
+    if (qty < (existing?.pickedQty || 0)) throw new ReservationError("Return or correct the collected quantity before reducing this reservation.");
     const others = await OrderAllocation.find({ product: productId, slot: slotId, order: { $ne: orderId }, $or: [{ status: "Reserved" }, { status: { $exists: false } }] }).select("qty").session(session).lean();
     const available = Math.max(0, stock.qty - others.reduce((sum, row) => sum + row.qty, 0));
     if (qty > available) throw new ReservationError(`Reserve qty exceeds available stock (${available}).`, 400);
@@ -86,6 +102,7 @@ export async function removeOrderReservation({ orderId, allocationId, actor }) {
     const allocation = await OrderAllocation.findById(allocationId).session(session);
     if (!allocation) throw new ReservationError("Allocation not found.", 404);
     if (id(allocation.order) !== orderId) throw new ReservationError("Allocation does not belong to this order.", 400);
+    if (allocation.pickedQty > 0) throw new ReservationError("Collected stock cannot be released. Confirm its physical return or correct the picked quantity first.");
     await lockStock({ product: allocation.product, slot: allocation.slot }, session);
     if (isReserved(allocation)) await logInventoryMovement({ type: "RELEASE", product: allocation.product, slot: allocation.slot, order: orderId, allocation: allocation._id, qty: allocation.qty, actor, note: allocation.note }, session);
     await allocation.deleteOne({ session });

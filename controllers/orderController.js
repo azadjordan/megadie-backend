@@ -12,6 +12,8 @@ import { logInventoryMovement } from "../utils/inventoryMovement.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
 import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
 import { deliveryRevisionFilter, getCustomerDeliveryDefaults, resolveOrderDelivery } from "../utils/orderDelivery.js";
+import { lockStock } from "../utils/orderReservations.js";
+import { packingStockCheckCounts, stockChecksNeededFilter } from '../utils/packingStockReports.js';
 
 /* =========================
    Helpers (pagination)
@@ -80,6 +82,7 @@ const ORDER_WORK_FILTER_VALUES = new Set([
   "needsReservation",
   "readyToDeliver",
   "needsStockDeduction",
+  "needsStockCheck",
 ]);
 const ORDER_WORK_SUMMARY_KEYS = [
   "noInvoice",
@@ -87,6 +90,7 @@ const ORDER_WORK_SUMMARY_KEYS = [
   "needsReservation",
   "readyToDeliver",
   "needsStockDeduction",
+  "needsStockCheck",
 ];
 
 const addFilterCondition = (filter, condition) => {
@@ -116,6 +120,7 @@ const buildOrderWorkFilter = async (work) => {
       invoice: null,
     };
   }
+  if (work === 'needsStockCheck') return stockChecksNeededFilter;
 
   if (work === "paymentDue") {
     const invoiceIds = await getPaymentDueInvoiceIds();
@@ -138,6 +143,7 @@ const buildOrderWorkFilter = async (work) => {
       status: "Shipping",
       allocationStatus: "Allocated",
       stockFinalizedAt: null,
+      $or: [{ packingSentAt: null }, { packedAt: { $ne: null } }],
     };
   }
 
@@ -165,6 +171,7 @@ const sanitizeOrderForClient = (order) => {
   delete o.extraFee;
   delete o.assignedTo;
   delete o.preparationMode;
+  for (const key of ["packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
 
   // Strip item pricing
   if (Array.isArray(o.orderItems)) {
@@ -233,7 +240,7 @@ const formatProductLabel = (product) => {
 
 const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) => {
   const orderQuery = Order.findById(orderId).select(
-    "_id orderNumber status invoice quote stockFinalizedAt orderItems.product orderItems.qty"
+    "_id orderNumber status invoice quote stockFinalizedAt packingSentAt orderItems.product orderItems.qty +reservationRevision"
   );
   if (session) orderQuery.session(session);
   const order = await orderQuery.lean();
@@ -274,8 +281,8 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
   }
 
   const allocationsQuery = OrderAllocation.find({ order: order._id })
-    .select("_id product slot qty status")
-    .populate("product", "name sku cbm")
+    .select("_id product slot qty status pickedQty")
+    .populate("product", "name sku cbm packingUnit")
     .populate("slot", "label store unit position")
     .lean();
   if (session) allocationsQuery.session(session);
@@ -311,6 +318,13 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
     slotLabel: formatSlotLabel(row.slot),
     qty: qtyOf(row),
   }));
+  const returnRows = reservedRows.filter(row => row.pickedQty > 0).map(row => ({
+    allocationId: resolveId(row._id), productId: resolveId(row.product),
+    productName: formatProductLabel(row.product), sku: row.product?.sku || "",
+    slotId: resolveId(row.slot), slotLabel: formatSlotLabel(row.slot),
+    qty: row.pickedQty, unit: row.product?.packingUnit || "units",
+  }));
+  const pickedQty = returnRows.reduce((sum, row) => sum + row.qty, 0);
 
   const orderedByProduct = new Map();
   for (const item of order.orderItems || []) {
@@ -337,6 +351,12 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
   }
 
   const blockers = [];
+  if (reservedRows.some(row => !Number.isSafeInteger(row.pickedQty ?? 0) || (row.pickedQty || 0) < 0 || (row.pickedQty || 0) > qtyOf(row))) {
+    blockers.push("A reserved allocation has an invalid picked quantity. Review packing progress before deleting.");
+  }
+  if (returnRows.some(row => !row.productId || row.productName === "Unknown product" || !row.slotId || row.slotLabel === "Unknown slot")) {
+    blockers.push("Picked goods are missing their product or original slot. Review packing progress before deleting.");
+  }
   if (stockFinalized && deductedRows.length === 0) {
     blockers.push(
       "Stock was finalized, but deducted allocation records are missing. Stock cannot be restored safely."
@@ -383,6 +403,9 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
   }
 
   const actions = [];
+  if (pickedQty > 0) {
+    actions.push(`Record the confirmed return of ${pickedQty} picked unit${pickedQty === 1 ? "" : "s"} to their original slots`);
+  }
   if (deductedQty > 0) {
     actions.push(`Restore ${deductedQty} unit${deductedQty === 1 ? "" : "s"} to original slots`);
     actions.push("Log stock restore movements");
@@ -443,10 +466,14 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
       orderNumber: order.orderNumber || resolveId(order._id),
       status: order.status || "-",
       stockFinalized,
+      version: order.reservationRevision || 0,
     },
     stock: {
       mode: deductedQty > 0 ? "restore" : "release",
       stockFinalized,
+      requiresPhysicalReturn: Boolean(order.packingSentAt) || pickedQty > 0,
+      pickedQty,
+      returnRows,
       reservedQty,
       deductedQty,
       restoreRows,
@@ -595,12 +622,29 @@ export const deleteOrder = asyncHandler(async (req, res) => {
     res.status(400);
     throw new Error("Invalid order id.");
   }
+  const expectedRevision = req.body?.expectedRevision;
+  if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+    res.status(400);
+    throw new Error("Reload the delete preview before deleting this order.");
+  }
 
   const session = await mongoose.startSession();
   let summary = null;
 
   try {
     await session.withTransaction(async () => {
+      // Serialize deletion with picking, packing, reservation changes and
+      // finalization before checking the exact stock being acknowledged.
+      const filter = { _id: req.params.id };
+      if (expectedRevision === 0) filter.$or = [{ reservationRevision: 0 }, { reservationRevision: { $exists: false } }];
+      else if (expectedRevision !== undefined) filter.reservationRevision = expectedRevision;
+      const order = await Order.findOneAndUpdate(filter, { $inc: { reservationRevision: 1 } }, { new: true, session })
+        .select("_id orderNumber invoice quote packingSentAt");
+      if (!order) {
+        const exists = await Order.exists({ _id: req.params.id }).session(session);
+        res.status(exists ? 409 : 404);
+        throw new Error(exists ? "Order changed. Refresh the delete preview and confirm the latest stock return before deleting." : "Order not found.");
+      }
       const preview = await buildOrderDeletePreviewPayload(req.params.id, {
         session,
       });
@@ -613,27 +657,30 @@ export const deleteOrder = asyncHandler(async (req, res) => {
         throw new Error(preview.blockers.join(" "));
       }
 
-      const order = await Order.findById(req.params.id)
-        .select("_id orderNumber invoice quote")
-        .session(session);
-      if (!order) {
-        res.status(404);
-        throw new Error("Order not found.");
+      if (preview.stock.requiresPhysicalReturn && expectedRevision === undefined) {
+        res.status(409);
+        throw new Error("Reload the delete preview and confirm the latest stock return before deleting this packing task.");
       }
+      if (preview.stock.requiresPhysicalReturn && req.body?.confirmedPhysicalReturn !== true) { res.status(409); throw new Error("Confirm that the worker has stopped picking and all collected goods are in their original slots before deleting this packing task."); }
 
       const allocations = await OrderAllocation.find({ order: order._id })
-        .select("_id product slot qty status note")
+        .select("_id product slot qty status note pickedQty")
         .session(session);
       const reservedAllocations = allocations.filter(isReservedAllocation);
       const deductedAllocations = allocations.filter(isDeductedAllocation);
+      const activeAllocations = [...reservedAllocations, ...deductedAllocations];
+      if (activeAllocations.length) await lockStock({ $or: activeAllocations.map(row => ({ product: row.product, slot: row.slot })) }, session);
 
       let restoredQty = 0;
       let restoredCbm = 0;
       let releasedQty = 0;
+      let returnedPickedQty = 0;
 
       for (const allocation of reservedAllocations) {
         const qtyValue = qtyOf(allocation);
         releasedQty += qtyValue;
+        const returned = allocation.pickedQty || 0;
+        returnedPickedQty += returned;
         await logInventoryMovement(
           {
             type: "RELEASE",
@@ -643,7 +690,8 @@ export const deleteOrder = asyncHandler(async (req, res) => {
             allocation: allocation._id,
             qty: qtyValue,
             actor: req.user?._id || null,
-            note: allocation.note || undefined,
+            note: returned ? `Order deleted after admin confirmed ${returned} picked units returned to their original slot.` : allocation.note || undefined,
+            meta: { reason: "ORDER_DELETED", orderNumber: order.orderNumber, physicalReturnConfirmed: req.body?.confirmedPhysicalReturn === true, returnedPickedQty: returned, ...(allocation.note ? { allocationNote: allocation.note } : {}) },
           },
           session
         );
@@ -718,6 +766,7 @@ export const deleteOrder = asyncHandler(async (req, res) => {
         restoredQty,
         restoredCbm,
         releasedQty,
+        returnedPickedQty,
         allocationsDeleted: allocationResult?.deletedCount || 0,
         invoiceDeleted,
         paymentsDeleted,
@@ -764,6 +813,7 @@ export const getOrderById = asyncHandler(async (req, res) => {
 
   // Admin sees full order (unchanged). Owner sees sanitized order (no pricing).
   const payload = isAdmin ? order.toObject() : sanitizeOrderForClient(order);
+  if (isAdmin) payload.stockChecksPending = (await packingStockCheckCounts([order._id])).get(String(order._id)) || 0;
   payload.resolvedDelivery = resolveOrderDelivery(order);
 
   res.status(200).json({
@@ -945,10 +995,12 @@ export const getOrders = asyncHandler(async (req, res) => {
 
   const totalPages = Math.max(Math.ceil(total / limit), 1);
 
+  const stockCheckCounts = await packingStockCheckCounts(orders.map(order => order._id));
+
   res.status(200).json({
     success: true,
     message: "Orders retrieved successfully.",
-    data: orders,
+    data: orders.map(order => ({ ...order, stockChecksPending: stockCheckCounts.get(String(order._id)) || 0 })),
     pagination: {
       page,
       limit,
@@ -1099,6 +1151,7 @@ export const markOrderDelivered = asyncHandler(async (req, res) => {
         res.status(400);
         throw new Error("Order must be Shipping before delivery.");
       }
+      if (order.packingSentAt && !order.packedAt) { res.status(409); throw new Error("The worker must finish and mark this order Packed before delivery."); }
 
       const triesDeliveryCharge = Object.prototype.hasOwnProperty.call(
         body,
@@ -1265,11 +1318,14 @@ export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
         res.status(409);
         throw new Error("Stock finalized orders cannot be cancelled.");
       }
+      if (order.packingSentAt && req.body?.confirmedPhysicalReturn !== true) { res.status(409); throw new Error("Confirm that the worker has stopped picking and any collected goods are back in their original slots before cancelling this task."); }
 
       const allocations = await OrderAllocation.find({ order: orderId })
-        .select("product slot qty status note")
+        .select("product slot qty status note pickedQty")
         .lean()
         .session(session);
+
+      if (allocations.some(row => row.pickedQty > 0)) { res.status(409); throw new Error("Collected stock must be physically returned and its picked quantity corrected before cancelling this order."); }
 
       const hasDeducted = allocations.some(
         (row) => row?.status === "Deducted"
@@ -1329,6 +1385,8 @@ export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
       summary.allocationsDeleted = deleteResult?.deletedCount || 0;
 
       order.status = "Cancelled";
+      order.packingSentAt = undefined; order.packingWorker = undefined; order.packedAt = undefined; order.packedBy = undefined;
+      order.packingSummary = { totalItems: order.packingSummary?.totalItems || 0, collectedItems: 0, needsHelp: false };
       order.deliveredAt = null;
       order.allocationStatus = "Unallocated";
       order.allocatedAt = null;
@@ -1361,6 +1419,8 @@ export const updateOrder = asyncHandler(async (req, res) => {
   if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision") || Object.hasOwn(req.body, "assignedTo") || Object.hasOwn(req.body, "preparationMode")) {
     res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination or assignment.");
   }
+
+  if (order.packingSentAt && Object.hasOwn(req.body, "user")) { res.status(409); throw new Error("The customer cannot be changed after sending an order to a worker."); }
 
   // ❌ Order items are never editable after creation
   if (Object.prototype.hasOwnProperty.call(req.body, "orderItems")) {

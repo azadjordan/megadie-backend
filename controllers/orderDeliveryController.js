@@ -41,12 +41,13 @@ export const updateOrderDelivery = asyncHandler(async (req, res) => {
     const order = await Order.findOneAndUpdate({
       _id: req.params.id, status: { $in: ["Processing", "Shipping"] },
       ...deliveryRevisionFilter(revision),
+      ...(Object.hasOwn(req.body, "assignedTo") || Object.hasOwn(req.body, "preparationMode") ? { packingSentAt: null } : {}),
     }, {
-      $set: changes, $inc: { deliveryRevision: 1 },
+      $set: changes, $inc: { deliveryRevision: 1, reservationRevision: 1 },
     }, { new: true, runValidators: true, session });
     if (!order) {
       if (!await Order.exists({ _id: req.params.id }).session(session || null)) { res.status(404); throw new Error("Order not found."); }
-      res.status(409); throw new Error("Order changed or is closed. Reload and review before saving delivery details.");
+      res.status(409); throw new Error("Order changed, is closed, or has a worker assignment. Reload and use the packing controls for its assignment.");
     }
     if (saveDefault) {
       const customer = await User.findById(order.user).select("address deliveryGoogleMapsUrl").session(session);
@@ -73,13 +74,14 @@ export const getOrderFulfillmentSheet = asyncHandler(async (req, res) => {
   res.set("Cache-Control", "no-store");
   requireId(req.params.id, res);
   const order = await Order.findById(req.params.id)
-    .select("user orderNumber orderItems.product orderItems.sku orderItems.qty status stockFinalizedAt deliveryDetails deliveryRevision assignedTo preparationMode")
+    .select("user orderNumber orderItems.product orderItems.sku orderItems.qty status stockFinalizedAt deliveryDetails deliveryRevision assignedTo preparationMode packingSentAt")
     .populate("user", "name phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes deliveryContactName deliveryPhoneNumber")
     .lean();
   if (!order) { res.status(404); throw new Error("Order not found."); }
   if (["Cancelled", "Delivered"].includes(order.status)) {
     res.status(409); throw new Error("Closed orders cannot be prepared or dispatched.");
   }
+  if (order.packingSentAt) { res.status(409); throw new Error("This order uses live packing. Share its worker link and review the saved picking progress instead of copying another packing list."); }
   const allocations = await OrderAllocation.find({ order: order._id })
     .select("product slot qty status").populate("slot", "label store").lean();
   res.json({ success: true, data: buildFulfillmentSheet(order, allocations) });

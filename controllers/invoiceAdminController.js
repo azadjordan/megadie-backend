@@ -6,6 +6,8 @@ import Order from "../models/orderModel.js";
 import Payment from "../models/paymentModel.js";
 import User from "../models/userModel.js";
 import Quote from "../models/quoteModel.js";
+import { transaction } from '../utils/orderReservations.js';
+import { packingInvoiceLockReason } from '../utils/packingInvoicePolicy.js';
 
 /* -----------------------
    Helpers
@@ -732,13 +734,12 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
     throw new Error("Invalid order id.");
   }
 
-  const session = await mongoose.startSession();
-  session.startTransaction();
-
-  try {
-    const order = await Order.findById(orderId)
-      .select("user status totalPrice invoice orderItems deliveryCharge extraFee")
-      .session(session);
+  const invoice = await transaction(async session => {
+    const actor = await User.findOneAndUpdate({ _id: req.user._id, isAdmin: true }, { $inc: { staffRevision: 1 } }, { new: true, session });
+    if (!actor) { res.status(403); throw new Error('Admin access changed. Sign in again.'); }
+    // Serialize invoicing with publication, item changes and packing reopening.
+    const order = await Order.findOneAndUpdate({ _id: orderId }, { $inc: { reservationRevision: 1 } }, { new: true, session })
+      .select("user status totalPrice invoice orderItems deliveryCharge extraFee packingSentAt packedAt");
 
     if (!order) {
       res.status(404);
@@ -762,6 +763,8 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
       res.status(400);
       throw new Error("An invoice already exists for this order.");
     }
+    const packingReason = packingInvoiceLockReason(order);
+    if (packingReason) { res.status(409); throw new Error(packingReason); }
 
     const minorUnitFactor = Object.prototype.hasOwnProperty.call(
       req.body || {},
@@ -842,17 +845,7 @@ export const createInvoiceFromOrder = asyncHandler(async (req, res) => {
       throw new Error("Order already has an invoice.");
     }
 
-    await session.commitTransaction();
-
-    res.status(201).json({
-      success: true,
-      message: "Invoice created.",
-      data: invoice,
-    });
-  } catch (err) {
-    await session.abortTransaction();
-    throw err;
-  } finally {
-    session.endSession();
-  }
+    return invoice;
+  });
+  res.status(201).json({ success: true, message: 'Invoice created.', data: invoice });
 });

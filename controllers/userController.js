@@ -111,7 +111,7 @@ export const authUser = asyncHandler(async (req, res) => {
 
   const user = await User.findOne({ email });
   if (user && (await user.matchPassword(password))) {
-    if (!user.isAdmin && user.approvalStatus === "Rejected") {
+    if (!user.isAdmin && !user.isWorker && user.approvalStatus === "Rejected") {
       res.status(403);
       throw new Error("Your account was rejected. Contact support.");
     }
@@ -126,6 +126,7 @@ export const authUser = asyncHandler(async (req, res) => {
         phoneNumber: user.phoneNumber,
         email: user.email,
         isAdmin: user.isAdmin,
+        isWorker: Boolean(user.isWorker),
         address: user.address,
         approvalStatus: user.approvalStatus,
       },
@@ -298,6 +299,7 @@ export const registerUser = asyncHandler(async (req, res) => {
       phoneNumber: user.phoneNumber,
       email: user.email,
       isAdmin: user.isAdmin,
+        isWorker: Boolean(user.isWorker),
       approvalStatus: user.approvalStatus,
     },
   });
@@ -439,6 +441,7 @@ export const getUserProfile = asyncHandler(async (req, res) => {
       deliveryContactName: user.deliveryContactName,
       deliveryPhoneNumber: user.deliveryPhoneNumber,
       isAdmin: user.isAdmin,
+        isWorker: Boolean(user.isWorker),
       approvalStatus: user.approvalStatus,
     },
   });
@@ -484,6 +487,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
       deliveryContactName: updatedUser.deliveryContactName,
       deliveryPhoneNumber: updatedUser.deliveryPhoneNumber,
       isAdmin: updatedUser.isAdmin,
+        isWorker: Boolean(updatedUser.isWorker),
       approvalStatus: updatedUser.approvalStatus,
     },
   });
@@ -549,7 +553,7 @@ export const getUsers = asyncHandler(async (req, res) => {
     User.countDocuments(filter),
     User.find(filter)
       .select(
-        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin approvalStatus adminNote registrationAudit.ip registrationAudit.ipSource registrationAudit.ipCountry registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration registrationAudit.sameBrowserContextSignupCountAtRegistration registrationAudit.signupDurationMs createdAt"
+        "name email phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes isAdmin isWorker approvalStatus adminNote registrationAudit.ip registrationAudit.ipSource registrationAudit.ipCountry registrationAudit.sameIpSignupCountAtRegistration registrationAudit.emailDomain registrationAudit.sameEmailDomainCountAtRegistration registrationAudit.sameBrowserContextSignupCountAtRegistration registrationAudit.signupDurationMs createdAt"
       )
       .sort(sort)
       .skip(skip)
@@ -596,7 +600,7 @@ export const getUsers = asyncHandler(async (req, res) => {
           invoices: invoicesCount,
           requests: requestsCount,
         },
-        canDelete: !u.isAdmin && approval === "Rejected" && !hasLinked,
+        canDelete: !u.isAdmin && !u.isWorker && approval === "Rejected" && !hasLinked,
       };
     });
   }
@@ -654,9 +658,9 @@ export const deleteUser = asyncHandler(async (req, res) => {
     throw new Error("User not found.");
   }
 
-  if (user.isAdmin) {
+  if (user.isAdmin || user.isWorker) {
     res.status(400);
-    throw new Error("Cannot delete admin user.");
+    throw new Error("Disable staff access before deleting this account.");
   }
 
   const approval = user.approvalStatus || "Approved";
@@ -698,6 +702,7 @@ export const updateUser = asyncHandler(async (req, res) => {
   }
 
   const wasAdmin = user.isAdmin;
+  const wasWorker = Boolean(user.isWorker);
   assignDeliveryOverrides(user, req.body, res);
   if (req.body.name != null) user.name = req.body.name;
   if (req.body.email != null) user.email = req.body.email.trim().toLowerCase();
@@ -711,6 +716,10 @@ export const updateUser = asyncHandler(async (req, res) => {
   }
   if (req.body.deliveryNotes != null) user.deliveryNotes = req.body.deliveryNotes;
   if (req.body.isAdmin != null) user.isAdmin = Boolean(req.body.isAdmin);
+  if (Object.hasOwn(req.body, "isWorker")) {
+    if (typeof req.body.isWorker !== "boolean") { res.status(400); throw new Error("Worker access must be a boolean."); }
+    user.isWorker = req.body.isWorker;
+  }
   if (Object.prototype.hasOwnProperty.call(req.body, "adminNote")) {
     assignAdminNote(user, req.body.adminNote);
   }
@@ -732,7 +741,7 @@ export const updateUser = asyncHandler(async (req, res) => {
 
   try {
     const updatedUser = await user.save();
-  if (wasAdmin !== updatedUser.isAdmin) await AdminSession.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
+  if (wasAdmin !== updatedUser.isAdmin || wasWorker !== Boolean(updatedUser.isWorker)) await AdminSession.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
     return res.status(200).json({
       success: true,
       message: "User updated successfully.",
@@ -748,6 +757,7 @@ export const updateUser = asyncHandler(async (req, res) => {
         deliveryContactName: updatedUser.deliveryContactName,
         deliveryPhoneNumber: updatedUser.deliveryPhoneNumber,
         isAdmin: updatedUser.isAdmin,
+        isWorker: Boolean(updatedUser.isWorker),
         approvalStatus: updatedUser.approvalStatus,
         adminNote: updatedUser.adminNote,
       },

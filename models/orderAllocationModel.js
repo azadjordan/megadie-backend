@@ -24,6 +24,10 @@ const orderAllocationSchema = new mongoose.Schema(
       index: true,
     },
     deductedAt: { type: Date },
+    pickedQty: { type: Number, default: 0, min: 0, validate: Number.isInteger },
+    pickedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    pickedAt: { type: Date },
+    pickProblem: { type: Boolean, default: false },
     deductedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
 
     // Who applied the allocation (admin user)

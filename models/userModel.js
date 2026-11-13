@@ -62,6 +62,8 @@ const userSchema = new mongoose.Schema(
     },
     password: { type: String, required: true },
     isAdmin: { type: Boolean, required: true, default: false },
+    isWorker: { type: Boolean, default: false },
+    staffRevision: { type: Number, default: 0, select: false },
     phoneNumber: {
       type: String,
       trim: true,

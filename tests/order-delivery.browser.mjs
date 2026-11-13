@@ -10,6 +10,11 @@ const sessionAbsoluteExpiresAt = Date.now() + 28800000;
 const sessionMetadata = () => ({ sessionId: "fixture-admin-session", sessionAbsoluteExpiresAt, sessionExpiresAt: Date.now() + 1800000, sessionServerTime: Date.now() });
 const profile = { _id: "200000000000000000000001", name: "Admin", email: "admin@test.invalid", isAdmin: true, approvalStatus: "Approved" };
 
+async function openLegacyPreparation(page) {
+  await page.getByRole("button", { name: "Send to worker" }).click();
+  await page.getByRole("button", { name: "Copy packing message instead", exact: true }).click();
+}
+
 test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
@@ -54,6 +59,13 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       if (path === "/users/client" && method === "GET") return reply({ data: state.customer });
       if (path === "/users/client" && method === "PUT") { state.customer = { ...state.customer, ...request.postDataJSON() }; return reply({ data: state.customer }); }
       if (path === "/user-prices/client" || path === "/price-rules") return reply({ data: [] });
+      if (path === "/packing/workers") return reply({ data: [] });
+      if (path === `/packing/orders/${id}`) return reply({ data: {
+        orderId: id, orderNumber: state.order.orderNumber, status: state.order.status, customerName: state.customer.name,
+        label: "Alpha Beta Company — 023AD", worker: null, sentAt: null, version: 0, deliveryRevision: state.order.resolvedDelivery.revision,
+        deliveryDetails: state.order.resolvedDelivery.details || {}, customerLocation: { address: state.customer.address || "", googleMapsUrl: state.customer.deliveryGoogleMapsUrl || "" }, deliverySavedToOrder: state.order.resolvedDelivery.savedToOrder,
+        preparationMode: state.order.preparationMode, items: [{ productId: "p1", sku: "SKU1", qty: 4, reservedQty: 4 }], problems: [],
+      } });
       if (path === "/orders/work-summary") return reply({ data: {} });
       if (path === "/orders" && method === "GET") return reply({ data: [state.order], pagination: { page: 1, totalPages: 1, total: 1, limit: 20 } });
       if (path === `/orders/${id}` && method === "GET") return reply({ data: state.order });
@@ -92,14 +104,14 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     page.on("pageerror", (error) => state.errors.push(error.message));
     t.after(() => { assert.deepEqual(state.errors, []); assert.deepEqual(state.unexpected, []); });
     await page.goto(origin + "/admin/orders");
-    await page.getByRole("button", { name: "Prepare order" }).waitFor();
+    await page.getByRole("button", { name: "Send to worker" }).waitFor();
     return { page, state };
   }
 
   await t.test("every opening reviews fresh details with one fetch and no automatic copying", async (t) => {
     const { page, state } = await fixture(t);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.evaluate(() => window.__copies.length), 0);
     const preview = await page.getByLabel("Message preview").inputValue();
@@ -115,7 +127,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     state.order.resolvedDelivery.details.address = "NEW-ADDRESS";
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.evaluate(() => window.__copies.length), 1);
     assert.match(await page.getByLabel("Message preview").inputValue(), /NEW-ADDRESS/);
@@ -127,7 +139,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   });
   await t.test("legacy destination is reviewed and saved to the order, then the updated sheet copies", async (t) => {
     const { page, state } = await fixture(t, { legacy: true });
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.evaluate(() => window.__copies.length), 0);
     const close = page.getByRole("button", { name: "Close prepare order" });
@@ -149,7 +161,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("staff copying accepts location-only details for current and legacy orders", async (t) => {
     for (const legacy of [false, true]) {
       const { page, state } = await fixture(t, { locationOnly: true, legacy });
-      await page.getByRole("button", { name: "Prepare order" }).click();
+      await openLegacyPreparation(page);
       await page.getByRole("dialog").waitFor();
       const copy = page.getByRole("dialog").getByRole("button", { name: legacy ? "Save & Copy" : "Copy", exact: true });
       assert.equal(await copy.isEnabled(), true);
@@ -165,7 +177,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("assignment is mandatory, saves on request, reopens and cannot be cleared", async (t) => {
     const { page, state } = await fixture(t, { assignedTo: "" });
     const open = async () => {
-      await page.getByRole("button", { name: "Prepare order" }).click();
+      await openLegacyPreparation(page);
       await page.getByRole("dialog").waitFor();
     };
     await open();
@@ -215,7 +227,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("draft copying requires and saves an assignee before copying", async (t) => {
     const { page, state } = await fixture(t, { assignedTo: "" });
     state.preparationProblems = ["Reservations need review before picking."];
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.getByRole("button", { name: "Copy preparation draft", exact: true }).isDisabled(), true);
     await page.getByLabel("Assigned To").fill("Ahmed");
@@ -230,7 +242,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   });
   await t.test("a conflicting assignment preserves entered text and reloads the winning assignee", async (t) => {
     const { page, state } = await fixture(t, { assignedTo: "Existing worker" });
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     await page.getByLabel("Assigned To").fill("My edited worker");
     state.conflict = true;
@@ -294,7 +306,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("clipboard retry keeps the saved assignee without another write or refresh", async (t) => {
     const { page, state } = await fixture(t, { mobile: true, assignedTo: "Samir" });
     await page.evaluate(() => { window.__copyFailure = true; });
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     await page.screenshot({ path: "/tmp/megadie-prepare-deliver-mobile-top.png", fullPage: true });
     assert.match(await page.getByLabel("Message preview").inputValue(), /^\*PREPARE & DELIVER\*\n_Client:_ \*Alpha Beta Company\*\n_Order:_ ORD-261102-023AD\n_Carton Tag:_ \*Alpha Beta Company — 023AD\*\n/);
@@ -322,13 +334,13 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("closed orders cannot initiate staff copying", async (t) => {
     for (const status of ["Delivered", "Cancelled"]) {
       const { page, state } = await fixture(t, { status });
-      assert.equal(await page.getByRole("button", { name: "Prepare order" }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "Send to worker" }).isDisabled(), true);
       assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
     }
   });
   await t.test("task must be chosen, preparation-only needs no location, and switching preserves the destination", async (t) => {
     const { page, state } = await fixture(t, { preparationMode: "" });
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.getByLabel("Address", { exact: true }).count(), 0);
     assert.equal(await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).isDisabled(), true);
@@ -353,7 +365,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     assert.equal(state.order.preparationMode, "prepare_only");
     assert.equal(state.order.resolvedDelivery.details.address, "");
     assert.doesNotMatch(await page.evaluate(() => window.__copies[0]), /DELIVER|Address|Map|maps.app/);
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await page.getByRole("radio", { name: "Prepare Only", exact: true }).isChecked(), true);
     assert.equal(await page.getByLabel("Address", { exact: true }).count(), 0);
@@ -362,7 +374,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("customer default can fill an older order and is updated only with explicit opt-in", async (t) => {
     const { page, state } = await fixture(t);
     state.customer.deliveryGoogleMapsUrl = "https://maps.app.goo.gl/default";
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     const checkbox = page.getByRole("checkbox", { name: /Save as customer's default location/ });
     assert.equal(await checkbox.isChecked(), false);
@@ -379,7 +391,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     assert.deepEqual(write.body.expectedCustomerLocation, { address: "LIVE-PROFILE-ADDRESS", googleMapsUrl: "https://maps.app.goo.gl/default" });
     assert.equal(state.customer.address, "New usual address");
     assert.equal(write.body.deliveryDetails.contactName, "Order Recipient");
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     assert.equal(await checkbox.isChecked(), false);
     await page.getByLabel("Address", { exact: true }).fill("One-off delivery");
@@ -390,7 +402,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   });
   await t.test("changed customer defaults preserve the form on conflict and reload fresh values", async (t) => {
     const { page, state } = await fixture(t);
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     await page.getByLabel("Address", { exact: true }).fill("My new default");
     await page.getByRole("checkbox", { name: /Save as customer's default location/ }).check();
@@ -408,7 +420,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
 
   await t.test("default opt-in alone enables saving and clipboard retry does not repeat the customer update", async (t) => {
     const { page, state } = await fixture(t);
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     const checkbox = page.getByRole("checkbox", { name: /Save as customer's default location/ });
     await checkbox.check();
@@ -425,7 +437,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   });
   await t.test("failed refresh after saving a default requires review without repeating the customer save", async (t) => {
     const { page, state } = await fixture(t);
-    await page.getByRole("button", { name: "Prepare order" }).click();
+    await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     await page.getByRole("checkbox", { name: /Save as customer's default location/ }).check();
     state.failSheetAfterSave = true;

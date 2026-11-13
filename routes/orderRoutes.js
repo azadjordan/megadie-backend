@@ -21,6 +21,8 @@ import {
 } from "../controllers/orderAllocationController.js";
 import { protect, admin, requireApproved } from "../middleware/authMiddleware.js";
 import { getOrderFulfillmentSheet, updateOrderDelivery } from "../controllers/orderDeliveryController.js";
+import { readOrderItemsEditor, previewOrderItemChanges, applyOrderItemChanges, findOrderItemProducts } from "../controllers/orderItemController.js";
+import { requireTrustedOrigin } from "../config/trustedOrigins.js";
 
 const router = express.Router();
 
@@ -39,6 +41,10 @@ router.put("/:id/deliver", protect, admin, markOrderDelivered);
 router.post("/:id/cancel", protect, admin, cancelOrderAndCleanup);
 // Preview order delete cleanup (admin)
 router.get("/:id/delete-preview", protect, admin, getOrderDeletePreview);
+router.get("/:id/items-editor", protect, admin, readOrderItemsEditor);
+router.get("/:id/item-products", protect, admin, findOrderItemProducts);
+router.post("/:id/items-preview", protect, admin, requireTrustedOrigin, previewOrderItemChanges);
+router.put("/:id/items", protect, admin, requireTrustedOrigin, applyOrderItemChanges);
 router.get("/:id/fulfillment-sheet", protect, admin, getOrderFulfillmentSheet);
 router.put("/:id/delivery-details", protect, admin, updateOrderDelivery);
 

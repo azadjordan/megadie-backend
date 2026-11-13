@@ -50,6 +50,10 @@ const requireApproved = (req, res, next) => {
     }
 
     if (req.user.isAdmin) return next();
+    if (req.user.isWorker) {
+        res.status(403);
+        throw new Error("Worker accounts can access assigned packing tasks only.");
+    }
 
     const status = req.user.approvalStatus;
     if (!status || status === "Approved") return next();
@@ -61,4 +65,10 @@ const requireApproved = (req, res, next) => {
     throw new Error("Account pending approval.");
 };
 
-export { protect, admin, requireApproved };
+const staff = (req, res, next) => {
+    if (req.user?.isAdmin || req.user?.isWorker) return next();
+    res.status(403);
+    throw new Error("Packing access is required.");
+};
+
+export { protect, admin, staff, requireApproved };

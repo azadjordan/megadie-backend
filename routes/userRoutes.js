@@ -18,7 +18,7 @@ import {
   resetPassword,
 } from "../controllers/userController.js";
 
-import { protect, admin } from "../middleware/authMiddleware.js";
+import { protect, admin, staff } from "../middleware/authMiddleware.js";
 import {
   blockHoneypotSubmission,
   rateLimit,
@@ -35,7 +35,7 @@ router.route("/").post(
 router.post("/logout", logoutUser);
 router.post("/session/activity", requireTrustedOrigin,
   rateLimit({ windowMs: 60 * 1000, max: 120, keyPrefix: "admin-activity" }),
-  protect, admin, reportAdminActivity);
+  protect, staff, reportAdminActivity);
 router.post(
   "/auth",
   rateLimit({ windowMs: 15 * 60 * 1000, max: 20, keyPrefix: "login" }),

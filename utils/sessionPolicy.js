@@ -1,6 +1,7 @@
 export const ADMIN_SESSION_SECONDS = 8 * 60 * 60;
 export const ADMIN_IDLE_SECONDS = 30 * 60;
 export const CUSTOMER_SESSION_SECONDS = 30 * 24 * 60 * 60;
+export const isStaff = (user) => Boolean(user?.isAdmin || user?.isWorker);
 
 export const sessionCookieOptions = () => ({
   httpOnly: true,
@@ -12,9 +13,9 @@ export const sessionCookieOptions = () => ({
 export class SessionExpiredError extends Error {}
 
 export function getSessionExpiry(payload, user, nowSeconds = Math.floor(Date.now() / 1000), session = null) {
-  if (!user.isAdmin && !payload.sessionId) return Number.isFinite(payload.exp) ? payload.exp : null;
-  if (!user.isAdmin || !session || session.revokedAt || typeof payload.sessionId !== "string" || payload.sessionId !== session._id || String(session.user) !== String(user._id)) {
-    throw new SessionExpiredError("Admin session is missing or revoked. Please sign in again.");
+  if (!isStaff(user) && !payload.sessionId) return Number.isFinite(payload.exp) ? payload.exp : null;
+  if (!isStaff(user) || !session || session.revokedAt || typeof payload.sessionId !== "string" || payload.sessionId !== session._id || String(session.user) !== String(user._id)) {
+    throw new SessionExpiredError("Staff session is missing or revoked. Please sign in again.");
   }
   if (!Number.isInteger(payload.iat) || payload.iat <= 0 || payload.iat > nowSeconds) {
     throw new SessionExpiredError("Invalid admin session login time.");

@@ -2,6 +2,7 @@
 import asyncHandler from "../middleware/asyncHandler.js";
 import Slot from "../models/slotModel.js";
 import SlotItem from "../models/slotItemModel.js";
+import OrderAllocation from "../models/orderAllocationModel.js";
 import { SLOT_UNITS } from "../constants.js";
 import { computeFillPercent } from "../utils/slotOccupancy.js";
 
@@ -254,6 +255,10 @@ export const deleteSlot = asyncHandler(async (req, res) => {
   if (!slot) {
     res.status(404);
     throw new Error("Slot not found.");
+  }
+  if (await OrderAllocation.exists({ slot: slot._id, $or: [{ status: "Reserved" }, { status: { $exists: false } }] })) {
+    res.status(409);
+    throw new Error("This slot is reserved for orders. Resolve its reservations and collected stock before deleting it.");
   }
   await slot.deleteOne();
   res.status(200).json({ success: true, message: `Slot '${slot.label}' deleted successfully.`, slotId: slot._id });
