@@ -34,7 +34,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       const task = state.task, p = task.items[0];
       p.reservedQty = p.allocations.reduce((sum, row) => sum + row.qty, 0);
       p.pickedQty = p.allocations.reduce((sum, row) => sum + row.pickedQty, 0);
-      task.summary = { totalItems: 1, collectedItems: p.pickedQty === p.qty ? 1 : 0, inProgressItems: p.pickedQty > 0 && p.pickedQty < p.qty ? 1 : 0, needsHelp: p.allocations.some(row => row.problemQty > 0) || p.reservedQty !== p.qty };
+      task.summary = { totalUnits: p.qty, pickedUnits: p.pickedQty, remainingUnits: Math.max(0, p.qty - p.pickedQty), totalItems: 1, collectedItems: p.pickedQty === p.qty ? 1 : 0, inProgressItems: p.pickedQty > 0 && p.pickedQty < p.qty ? 1 : 0, needsHelp: p.allocations.some(row => row.problemQty > 0) || p.reservedQty !== p.qty };
       if (!task.summary.needsHelp || !task.sentAt) p.helpRequestedAt = null;
       task.helpRequestedItems = p.helpRequestedAt ? 1 : 0;
       task.stockChecksPending = task.reports.filter(report => !report.checkedAt).length;
@@ -106,6 +106,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         state.writes.push({ action, body });
         if (body.expectedRevision !== state.task.version) return reply({ message: "Order changed. Refresh packing progress." }, 409);
         const task = state.task, p = task.items[0], row = p.allocations.find(row => row.allocationId === body.allocationId);
+        if (action === 'replace' && state.replaceConflict) { state.replaceConflict = false; p.alternatives[0].availableQty = 0; return reply({ message: 'This location is no longer available. Your picked count is saved.' }, 409); }
+        if (action === 'packed' && state.packingConflict) { state.packingConflict = false; p.allocations[0].pickedQty = 9; task.version++; return reply({ message: 'Order changed. Check latest progress.' }, 409); }
         if (action === 'pick' && row?.problemQty > 0) return reply({ message: 'This slot was reported short. Review the shortage and enter the actual picked total.' }, 409);
         if (action === "send") { task.sentAt = "2026-11-11T08:00:00.000Z"; task.worker = { id: body.workerId, name: "Worker Ahmed", enabled: true }; task.preparationMode = body.preparationMode; task.deliveryDetails = structuredClone(body.deliveryDetails); task.delivery = body.preparationMode === 'prepare_deliver' ? structuredClone(body.deliveryDetails) : null; task.deliveryRevision++; }
         else if (action === "pick" || action === "problem" || action === "correct") {
@@ -121,7 +123,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         else if (action === "reopen") { task.packedAt = null; task.packedBy = ""; }
         if (['problem', 'replace'].includes(action) && p.allocations.some(row => row.problemQty > 0) && !p.alternatives.some(candidate => candidate.availableQty > 0)) p.helpRequestedAt ||= '2026-11-11T08:00:00.000Z';
         task.version++;
-        if (state.loseResponse) { state.loseResponse = false; return route.abort("failed"); }
+        if (state.loseResponse || (action === "help" && state.loseHelpResponse)) { state.loseResponse = false; state.loseHelpResponse = false; return route.abort("failed"); }
         await new Promise(resolve => setTimeout(resolve, state.delay || 40));
         return reply({ data: rebuild(), message: action === "packed" ? "Order marked Packed." : action === "send" ? "Order sent to worker." : "Saved." });
       }
@@ -157,6 +159,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         state.invoice = { _id: '500000000000000000000001', invoiceNumber: 'INV-TEST-1', status: 'Issued', paymentStatus: 'Unpaid', amountMinor: 1000, paidTotalMinor: 0, balanceDueMinor: 1000, currency: 'AED', minorUnitFactor: 100 };
         return reply({ data: state.invoice, message: 'Invoice created.' }, 201);
       }
+      if (path === `/orders/${orderId}/movement` && method === 'GET') return reply({ data: { orderId, orderNumber: state.task.orderNumber, status: state.task.status, version: state.task.version, manualPreparation: !state.task.sentAt, readyReason: '', isOut: false, holdsGoods: false, movement: null, history: [] } });
       if (path === "/orders/work-summary") return reply({ data: { all: state.deleted ? 0 : 1, needsAdmin: rebuild().helpRequestedItems > 0 ? 1 : 0, preparation: !state.task.packedAt ? 1 : 0, toInvoice: state.task.packedAt && !state.invoice ? 1 : 0, toDeliver: state.task.packedAt && state.invoice ? 1 : 0, toFinalize: 0, needsStockCheck: rebuild().stockChecksPending > 0 ? 1 : 0, ...state.summaryOverrides } });
       if (path === "/orders") {
         state.orderQueries.push(Object.fromEntries(url.searchParams));
@@ -262,15 +265,16 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { mobile: true });
     await page.goto(`${origin}/`);
     await page.getByRole("heading", { name: "My packing orders" }).waitFor();
-    await page.getByRole("link", { name: /^Open order for/ }).click();
+    await page.getByRole("link", { name: /^Start packing for/ }).click();
+    await page.getByRole("button", { name: "Not enough here", exact: true }).waitFor();
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-checklist.png", fullPage: true });
     await page.getByRole("button", { name: "Not enough here", exact: true }).click();
-    await page.getByLabel(/^How many have you picked from/).fill("6");
+    await page.getByLabel("How many did you take this time?", { exact: true }).fill("6");
+    await page.waitForFunction(() => [...document.querySelectorAll("button")].some(button => button.textContent.startsWith("Continue at B2-AE1") && !button.disabled));
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-problem-entry.png", fullPage: true });
-    await page.getByRole("button", { name: "Save shortage", exact: true }).click();
-    await page.getByRole("button", { name: "Use B2-AE1 for 4 × 100yd Roll", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Continue at B2-AE1 — 4 × 100yd Roll", exact: true }).waitFor();
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-replacement.png", fullPage: true });
-    await page.getByRole("button", { name: "Use B2-AE1 for 4 × 100yd Roll", exact: true }).click();
+    await page.getByRole("button", { name: "Continue at B2-AE1 — 4 × 100yd Roll", exact: true }).click();
     await page.getByText("Picked 6 of 6", { exact: true }).waitFor();
     await page.getByRole("button", { name: /^Picked (all|remaining) /, exact: true }).click();
     await page.getByRole("button", { name: "Mark packed", exact: true }).click();
@@ -285,7 +289,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { alternatives: false });
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole("button", { name: "Not enough here", exact: true }).click();
-    await page.getByRole("button", { name: "Save shortage", exact: true }).click();
+    await page.getByLabel("How many did you take this time?", { exact: true }).fill("0");
+    await page.getByRole("button", { name: "Ask admin for help", exact: true }).click();
     await page.getByText("No available replacement.", { exact: true }).waitFor();
     await page.getByRole("dialog").getByRole("button", { name: "Update picked total", exact: true }).click();
     await page.getByLabel(/^How many have you picked from/).fill("6");
@@ -299,9 +304,10 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole('button', { name: 'Picked all 10', exact: true }).waitFor();
     await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
-    await page.getByLabel(/^How many have you picked from/).fill('3');
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('3');
     assert.equal(await page.getByRole('checkbox').count(), 0);
-    await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+    if (await page.getByLabel('How many did you take this time?', { exact: true }).inputValue() === '') await page.getByLabel('How many did you take this time?', { exact: true }).fill('0');
+    await page.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
     await page.getByRole('button', { name: 'Continue picking', exact: true }).click();
     await page.getByText('No other slots are ready to pick. Admin help has been requested.', { exact: false }).waitFor();
     assert.equal(await page.getByRole('button', { name: /^Picked (all|remaining) / }).count(), 0);
@@ -328,7 +334,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.goto(`${origin}/packing/orders/${orderId}`);
     const original = page.getByRole('group', { name: 'Location A1-AE1 for RIB-RED-25MM', exact: true });
     await original.getByRole('button', { name: 'Not enough here', exact: true }).click();
-    await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+    if (await page.getByLabel('How many did you take this time?', { exact: true }).inputValue() === '') await page.getByLabel('How many did you take this time?', { exact: true }).fill('0');
+    await page.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
     await page.getByRole('button', { name: 'Continue picking', exact: true }).click();
     await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Location E1-AE1 for RIB-RED-25MM');
     await page.getByRole('group', { name: 'Location E1-AE1 for RIB-RED-25MM', exact: true }).getByRole('button', { name: 'Picked all 5', exact: true }).click();
@@ -342,14 +349,15 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { alternatives: false });
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
-    await page.getByLabel(/^How many have you picked from/).fill('3');
-    await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('3');
+    if (await page.getByLabel('How many did you take this time?', { exact: true }).inputValue() === '') await page.getByLabel('How many did you take this time?', { exact: true }).fill('0');
+    await page.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
     await page.getByRole('button', { name: 'Continue picking', exact: true }).click();
     await page.getByRole('link', { name: 'Choose another order', exact: true }).waitFor();
     state.task.version++; state.task.items[0].qty = 3;
     Object.assign(state.task.items[0].allocations[0], { qty: 3, pickedQty: 3, problemQty: 0 });
     await page.getByRole('button', { name: 'Refresh', exact: true }).click();
-    await page.getByText('All items picked', { exact: true }).waitFor();
+    await page.getByText('All units picked. Pack and label the carton, then finish.', { exact: true }).waitFor();
     assert.equal(await page.getByRole('link', { name: 'Choose another order', exact: true }).count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Mark packed', exact: true }).isDisabled(), false);
   });
@@ -368,8 +376,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { mobile: true });
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole('button', { name: "Not enough here", exact: true }).click();
-    await page.getByLabel(/^How many have you picked from/).fill('6');
-    await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('6');
     const dialog = page.getByRole('dialog');
     await dialog.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
     await dialog.getByText('Admin help requested.', { exact: true }).waitFor();
@@ -386,8 +393,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t);
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole('button', { name: "Not enough here", exact: true }).click();
-    await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
-    state.loseResponse = true;
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('0');
+    state.loseHelpResponse = true;
     await page.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
     await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
     await page.getByRole('dialog').getByText('Admin help requested.', { exact: true }).waitFor();
@@ -408,8 +415,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.clock.install();
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole('button', { name: "Not enough here", exact: true }).click();
-    await page.getByLabel(/^How many have you picked from/).fill('6');
-    await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('6');
     await page.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
     await page.getByRole('dialog').getByText('Admin help requested.', { exact: true }).waitFor();
     state.task.version++; state.task.items[0].qty = 6;
@@ -426,16 +432,19 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.getByRole("button", { name: /^Picked (all|remaining) /, exact: true }).click();
     await page.getByRole("button", { name: "Correct count", exact: true }).click();
     await page.getByLabel(/^How many have you picked from/).fill("6");
-    await page.getByRole('dialog').getByText('Left to pick', { exact: true }).waitFor();
+    await page.getByRole('dialog').getByText('Already recorded: 10. Enter the actual total, including earlier picks.', { exact: true }).waitFor();
     assert.equal(await page.getByRole('dialog').getByText('Missing', { exact: true }).count(), 0);
     await page.screenshot({ path: '/Users/azad/Developer/megadie/output/worker-correct-count-mobile.png', fullPage: true });
     await page.getByRole("button", { name: "Save picked total", exact: true }).click();
     await page.getByText("Confirm that you put the items back or corrected an earlier wrong count.", { exact: true }).waitFor();
     assert.equal(state.writes.length, 1);
     await page.getByLabel("I put 4 back in A1-AE1, or the earlier count was wrong.", { exact: true }).check();
+    await page.getByRole('dialog').getByText('Add a note', { exact: true }).click();
+    await page.getByRole('dialog').getByLabel('Note (optional)', { exact: true }).fill('Returned four units to their original slot.');
     await page.getByRole("button", { name: "Save picked total", exact: true }).click();
     await page.getByText("Picked 6 of 10", { exact: true }).waitFor();
     assert.equal(state.writes[1].body.confirmedReturn, true);
+    assert.equal(state.writes[1].body.note, 'Returned four units to their original slot.');
   });
   await t.test("losing assignment clears protected task details and actions", async t => {
     const { page, state } = await fixture(t);
@@ -495,24 +504,27 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       const saving = dialog.getByRole('button', { name: 'Creating...', exact: true });
       await saving.waitFor(); assert.equal(await saving.isDisabled(), true);
       assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 1);
-      assert.equal(await page.getByRole('button', { name: 'Mark delivered', exact: true }).count(), 0);
+      assert.equal(await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).count(), 0);
       state.finishInvoice();
       await dialog.waitFor({ state: 'hidden' });
-      await page.getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor();
       await page.getByRole('button', { name: 'To invoice 0', exact: true }).waitFor();
       assert.equal(await invoice.count(), 0);
-      assert.equal(await page.getByRole('button', { name: 'Record payment', exact: true }).isEnabled(), true);
+      assert.equal(await page.getByRole('button', { name: 'Record payment', exact: true }).count(), 0);
+      await page.getByRole('button', { name: /^More actions for / }).click();
+      assert.equal(await page.getByRole('menuitem', { name: 'Record payment', exact: true }).isEnabled(), true);
+      await page.keyboard.press('Escape');
       assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 1);
       assert.equal(state.task.status, 'Shipping');
-      await page.getByRole('button', { name: 'Mark delivered', exact: true }).click();
-      const delivery = page.getByRole('dialog', { name: 'Mark Delivered', exact: true });
+      await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).click();
+      const delivery = page.getByRole('dialog', { name: 'Mark out for delivery', exact: true });
       await delivery.waitFor();
-      await delivery.getByRole('button', { name: 'Cancel', exact: true }).click();
-      await page.getByRole('button', { name: 'Record payment', exact: true }).click();
+      await delivery.getByRole('button', { name: 'Close', exact: true }).click();
+      await openOrderTool(page, 'Record payment');
       await page.getByRole('dialog', { name: 'Add payment', exact: true }).waitFor();
       await page.getByRole('dialog', { name: 'Add payment', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
       state.invoice.paymentStatus = 'Paid'; state.invoice.balanceDueMinor = 0; state.invoice.paidTotalMinor = 1000;
-      await page.reload(); await page.getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+      await page.reload(); await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor();
       assert.equal(await invoice.count(), 0);
       assert.equal(await page.getByRole('button', { name: 'Record payment', exact: true }).count(), 0);
     });
@@ -528,7 +540,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await dialog.getByText(state.invoiceError, { exact: true }).waitFor();
     assert.equal(state.invoice, undefined);
     assert.equal(state.task.status, 'Shipping');
-    assert.equal(await page.getByRole('button', { name: 'Mark delivered', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).count(), 0);
     state.invoiceError = '';
     await dialog.getByRole('button', { name: 'Create invoice', exact: true }).click();
     await dialog.waitFor({ state: 'hidden' });
@@ -546,8 +558,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await dialog.waitFor(); await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     state.task.status = 'Shipping';
     await page.reload(); await page.getByRole('button', { name: 'Send to worker', exact: true }).waitFor();
-    await openOrderTool(page, 'Mark delivered');
-    await page.getByRole('dialog', { name: 'Mark Delivered', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
+    await openOrderTool(page, 'Mark out for delivery');
+    await page.getByRole('dialog', { name: 'Mark out for delivery', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
     state.task.sentAt = '2026-11-13T08:00:00.000Z';
     await page.reload(); await page.getByRole('link', { name: 'View packing', exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Create invoice', exact: true }).count(), 0);
@@ -631,7 +643,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       { ...base, _id: '2', orderNumber: 'ORD-PACKING', user: { name: 'Al Noor Textiles' }, listAction: 'view-packing' },
       { ...base, _id: '3', orderNumber: 'ORD-PACKED', user: { name: 'Sara Packaging' }, packedAt: '2026-11-14T10:00:00Z', listAction: 'create-invoice' },
       { ...packed, _id: '4', orderNumber: 'ORD-DELIVERED', user: { name: 'Oasis Trading' }, status: 'Delivered', stockChecksPending: 2, listAction: 'create-invoice' },
-      { ...packed, _id: '5', orderNumber: 'ORD-PAID-PACKED', invoice: paid, listAction: 'mark-delivered' },
+      { ...packed, _id: '5', orderNumber: 'ORD-PAID-PACKED', invoice: paid, listAction: 'mark-out-for-delivery' },
       { ...finalized, _id: '6', orderNumber: 'ORD-PAYMENT-PENDING', invoice: { ...paid, paymentStatus: 'PartiallyPaid', paidTotalMinor: 5000, balanceDueMinor: 5700 }, listAction: null },
       { ...delivered, _id: '7', orderNumber: 'ORD-STOCK-PENDING', listAction: 'finalize-stock' },
       { ...finalized, _id: '8', orderNumber: 'ORD-COMPLETE', listAction: null },
@@ -658,7 +670,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         assert.equal(await row(number).getByText('Complete', { exact: true }).count(), 0);
       }
       await row('ORD-PACKED').getByRole('button', { name: 'Create invoice', exact: true }).waitFor();
-      await row('ORD-PAID-PACKED').getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+      await row('ORD-PAID-PACKED').getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor();
       await row('ORD-PAYMENT-PENDING').getByRole('group', { name: 'Billing', exact: true }).getByText('Partly paid', { exact: true }).waitFor();
       await row('ORD-PAYMENT-PENDING').getByRole('button', { name: 'Record payment', exact: true }).waitFor();
       await row('ORD-STOCK-PENDING').getByRole('group', { name: 'Stock', exact: true }).getByText('Pending', { exact: true }).waitFor();
@@ -674,6 +686,10 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         await record.getByRole('group', { name: 'Stock', exact: true }).getByText('Deducted', { exact: true }).waitFor();
         await record.getByRole('group', { name: 'Billing', exact: true }).getByText(number === 'ORD-UNPAID' ? 'Unpaid' : 'Overdue', { exact: true }).waitFor();
         assert.equal(await record.getByRole('button', { name: 'Record payment', exact: true }).count(), 1);
+        assert.equal(await record.getByRole('group', { name: 'Billing', exact: true }).getByRole('button', { name: 'Record payment', exact: true }).count(), 0);
+        await record.getByRole('button', { name: /^More actions for / }).click();
+        assert.equal(await page.getByRole('menuitem', { name: 'Record payment', exact: true }).count(), 0);
+        await page.keyboard.press('Escape');
         assert.equal(await record.getByRole('group', { name: 'Billing', exact: true }).getByText(/^Total /).count(), 0);
       }
       assert.equal(await row('ORD-PAYMENT-PENDING').getByRole('group', { name: 'Billing', exact: true }).getByText(/^Total /).count(), 1);
@@ -815,11 +831,11 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
   });
   await t.test("order cards show partial work and independently paginate the work queues", async t => {
     const { page, state } = await fixture(t);
-    const base = { ...state.task, summary: { totalItems: 3, collectedItems: 1, inProgressItems: 1, needsHelp: true } };
-    state.boardRows = Array.from({ length: 16 }, (_, i) => ({ ...base, orderId: String(i), orderNumber: 'ORD-TEST-' + i, customerName: ['Ahmed Trading', 'Al Noor Textiles', 'Royal Gift Supplies'][i % 3] + ' ' + i, packedAt: i >= 13 ? '2026-11-11T08:30:00Z' : null, preparationMode: i === 13 ? 'prepare_deliver' : 'prepare_only', ...(i >= 13 ? { summary: { totalItems: 3, collectedItems: 3, inProgressItems: 0, needsHelp: false } } : {}) }));
+    const base = { ...state.task, summary: { totalUnits: 100, pickedUnits: 35, remainingUnits: 65, totalItems: 3, collectedItems: 1, inProgressItems: 1, needsHelp: true } };
+    state.boardRows = Array.from({ length: 16 }, (_, i) => ({ ...base, orderId: String(i), orderNumber: 'ORD-TEST-' + i, customerName: ['Ahmed Trading', 'Al Noor Textiles', 'Royal Gift Supplies'][i % 3] + ' ' + i, packedAt: i >= 13 ? '2026-11-11T08:30:00Z' : null, preparationMode: i === 13 ? 'prepare_deliver' : 'prepare_only', ...(i >= 13 ? { summary: { totalUnits: 100, pickedUnits: 100, remainingUnits: 0, totalItems: 3, collectedItems: 3, inProgressItems: 0, needsHelp: false } } : {}) }));
     await page.goto(`${origin}/packing`);
     await page.getByRole("link", { name: /^Continue packing for Ahmed Trading 0,/ }).waitFor();
-    assert.equal(await page.getByText("1 product partially picked", { exact: true }).count(), 12);
+    assert.equal(await page.getByText("35 / 100 units picked", { exact: true }).count(), 12);
     const queue = page.getByRole("region", { name: "To pack 13", exact: true });
     await queue.getByRole("button", { name: "Next", exact: true }).click();
     await queue.getByRole("link", { name: /^Continue packing for Ahmed Trading 12,/ }).waitFor();
@@ -961,7 +977,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.waitForFunction(() => JSON.parse(localStorage.getItem('megadie.admin-session.v2') || '{}').type === 'renewed');
     state.session.sessionServerTime += 29 * 60000;
     await page.clock.fastForward(29 * 60000);
-    const dialog = page.getByRole("dialog", { name: "Shortage", exact: true });
+    const dialog = page.getByRole("dialog", { name: "Not enough here", exact: true });
     const warning = dialog.getByRole("region", { name: "Work session warning", exact: true });
     await warning.waitFor();
     await warning.getByRole("button", { name: "Stay signed in", exact: true }).click();
@@ -1074,6 +1090,100 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await dialog.getByText("Order not found.", { exact: true }).waitFor();
     assert.equal(state.writes.length, 1);
     assert.equal(state.deleted, true);
+  });
+
+  await t.test('a shortage continues to another slot in one action and counts additional picks exactly once', async t => {
+    const { page, state } = await fixture(t, { mobile: true });
+    state.task.items[0].allocations[0].pickedQty = 3;
+    await page.goto(`${origin}/packing/orders/${orderId}`);
+    await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('2');
+    const next = page.getByRole('button', { name: 'Continue at B2-AE1 \u2014 5 \u00d7 100yd Roll', exact: true });
+    assert.equal(await page.getByRole('button', { name: 'Save shortage', exact: true }).count(), 0);
+    await next.evaluate(button => { button.click(); button.click(); });
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    assert.deepEqual(state.writes.map(write => write.action), ['problem', 'replace']);
+    assert.equal(state.writes[0].body.pickedQty, 5);
+    assert.equal(state.task.items[0].pickedQty, 5);
+    await page.getByText('5 / 10 units picked', { exact: true }).waitFor();
+    assert.equal(state.task.items[0].allocations.find(row => row.slot === 'B2-AE1').pickedQty, 0);
+  });
+  await t.test('an unavailable replacement preserves the saved count and retries only the remaining work', async t => {
+    const { page, state } = await fixture(t);
+    state.replaceConflict = true;
+    await page.goto(`${origin}/packing/orders/${orderId}`);
+    await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('6');
+    await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
+    await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
+    await page.getByRole('dialog').getByText('No available replacement.', { exact: true }).waitFor();
+    assert.equal(state.task.items[0].pickedQty, 6); assert.equal(state.task.reports.length, 1);
+    await page.getByRole('dialog').getByRole('button', { name: 'Ask admin for help', exact: true }).click();
+    await page.getByRole('dialog').getByText('Admin help requested.', { exact: true }).waitFor();
+    assert.deepEqual(state.writes.map(write => write.action), ['problem', 'replace', 'help']);
+  });
+  await t.test('a lost partial-count response recovers the count before replacing without adding it twice', async t => {
+    const { page, state } = await fixture(t);
+    state.loseResponse = true;
+    await page.goto(`${origin}/packing/orders/${orderId}`);
+    await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('6');
+    await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
+    await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
+    await page.getByRole('dialog').getByText('6 picked \u00b7 4 needed from another location', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'Update picked total', exact: true }).waitFor();
+    assert.equal(await page.getByLabel('How many did you take this time?', { exact: true }).count(), 0);
+    await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    assert.deepEqual(state.writes.map(write => write.action), ['problem', 'replace']);
+    assert.equal(state.task.items[0].pickedQty, 6);
+  });
+  await t.test('partial replacements leave the remainder visible and the destination unpicked', async t => {
+    const { page, state } = await fixture(t);
+    state.task.items[0].alternatives[0].availableQty = 2;
+    await page.goto(`${origin}/packing/orders/${orderId}`);
+    await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
+    await page.getByLabel('How many did you take this time?', { exact: true }).fill('4');
+    await page.getByText('Take 2 here \u00b7 4 still needed elsewhere', { exact: true }).waitFor();
+    await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    await page.getByRole('group', { name: 'Location B2-AE1 for RIB-RED-25MM', exact: true }).getByRole('button', { name: 'Picked all 2', exact: true }).click();
+    await page.getByText('6 / 10 units picked', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Mark packed', exact: true }).isDisabled(), true);
+    await page.getByRole('group', { name: 'Location A1-AE1 for RIB-RED-25MM', exact: true }).getByText('4 \u00d7 100yd Roll missing', { exact: true }).waitFor();
+  });
+  await t.test('a ready card marks packed once without opening the order and keeps completed picking blue until confirmation', async t => {
+    const { page, state } = await fixture(t, { mobile: true });
+    state.task.items[0].allocations[0].pickedQty = 10;
+    await page.goto(`${origin}/packing`);
+    await page.getByText('10 / 10 units picked', { exact: true }).waitFor();
+    await page.getByText('Ready to pack', { exact: true }).waitFor();
+    const card = page.getByRole('article').filter({ hasText: 'Ahmed Trading' });
+    assert.match(await card.getByRole('progressbar').locator('div').getAttribute('class'), /bg-blue-500/);
+    await card.getByRole('button', { name: 'Mark packed', exact: true }).evaluate(button => { button.click(); button.click(); });
+    await page.getByRole('link', { name: /^View packed order for/ }).waitFor();
+    assert.equal(new URL(page.url()).pathname, '/packing');
+    assert.equal(state.writes.filter(write => write.action === 'packed').length, 1);
+    await page.screenshot({ path: '/Users/azad/Developer/megadie/output/worker-card-packed-mobile.png', fullPage: true });
+  });
+  await t.test('a stale card refreshes into incomplete picking and cannot finish the order', async t => {
+    const { page, state } = await fixture(t);
+    state.task.items[0].allocations[0].pickedQty = 10; state.packingConflict = true;
+    await page.goto(`${origin}/packing`);
+    await page.getByRole('button', { name: 'Mark packed', exact: true }).click();
+    await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
+    await page.getByText('9 / 10 units picked', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Mark packed', exact: true }).count(), 0);
+    assert.equal(state.task.packedAt, null);
+  });
+  await t.test('a lost card completion response reads the saved Packed state without repeating completion', async t => {
+    const { page, state } = await fixture(t);
+    state.task.items[0].allocations[0].pickedQty = 10; state.loseResponse = true;
+    await page.goto(`${origin}/packing`);
+    await page.getByRole('button', { name: 'Mark packed', exact: true }).click();
+    await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
+    await page.getByRole('link', { name: /^View packed order for/ }).waitFor();
+    assert.equal(state.writes.filter(write => write.action === 'packed').length, 1);
   });
 
 });

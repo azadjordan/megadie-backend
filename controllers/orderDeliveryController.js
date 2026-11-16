@@ -17,6 +17,7 @@ export const updateOrderDelivery = asyncHandler(async (req, res) => {
     res.status(400); throw new Error("A valid expectedRevision is required.");
   }
   const changes = {};
+  const changesAssignment = Object.hasOwn(req.body || {}, "assignedTo") || Object.hasOwn(req.body || {}, "preparationMode");
   const saveDefault = req.body?.saveCustomerLocation === true;
   if (Object.hasOwn(req.body || {}, "saveCustomerLocation") && typeof req.body.saveCustomerLocation !== "boolean") {
     res.status(400); throw new Error("saveCustomerLocation must be a boolean.");
@@ -41,13 +42,22 @@ export const updateOrderDelivery = asyncHandler(async (req, res) => {
     const order = await Order.findOneAndUpdate({
       _id: req.params.id, status: { $in: ["Processing", "Shipping"] },
       ...deliveryRevisionFilter(revision),
-      ...(Object.hasOwn(req.body, "assignedTo") || Object.hasOwn(req.body, "preparationMode") ? { packingSentAt: null } : {}),
+      // Destination/contact edits do not change physical custody or stock.
+      // Manual assignment edits still require goods in their original slots.
+      ...(changesAssignment ? { packingSentAt: null,
+        $and: [{ $or: [{ "deliveryMovement.departedAt": null }, { "deliveryMovement.slotsReturnedAt": { $ne: null } }] }],
+      } : {}),
     }, {
       $set: changes, $inc: { deliveryRevision: 1, reservationRevision: 1 },
     }, { new: true, runValidators: true, session });
     if (!order) {
-      if (!await Order.exists({ _id: req.params.id }).session(session || null)) { res.status(404); throw new Error("Order not found."); }
-      res.status(409); throw new Error("Order changed, is closed, or has a worker assignment. Reload and use the packing controls for its assignment.");
+      const current = await Order.findById(req.params.id).select("status packingSentAt deliveryMovement").session(session || null).lean();
+      if (!current) { res.status(404); throw new Error("Order not found."); }
+      res.status(409);
+      if (!["Processing", "Shipping"].includes(current.status)) throw new Error(`This order is ${current.status.toLowerCase()}. Its recorded delivery details are read-only.`);
+      if (changesAssignment && current.packingSentAt) throw new Error("Use the worker assignment controls to change this order's assignment.");
+      if (changesAssignment && current.deliveryMovement?.departedAt && !current.deliveryMovement?.slotsReturnedAt) throw new Error("Confirm the goods are back in their original slots before changing the assignment.");
+      throw new Error("Delivery details changed. Reload details and review before saving.");
     }
     if (saveDefault) {
       const customer = await User.findById(order.user).select("address deliveryGoogleMapsUrl").session(session);
@@ -74,13 +84,14 @@ export const getOrderFulfillmentSheet = asyncHandler(async (req, res) => {
   res.set("Cache-Control", "no-store");
   requireId(req.params.id, res);
   const order = await Order.findById(req.params.id)
-    .select("user orderNumber orderItems.product orderItems.sku orderItems.qty status stockFinalizedAt deliveryDetails deliveryRevision assignedTo preparationMode packingSentAt")
+    .select("user orderNumber orderItems.product orderItems.sku orderItems.qty status stockFinalizedAt deliveryDetails deliveryRevision assignedTo preparationMode packingSentAt deliveryMovement")
     .populate("user", "name phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes deliveryContactName deliveryPhoneNumber")
     .lean();
   if (!order) { res.status(404); throw new Error("Order not found."); }
   if (["Cancelled", "Delivered"].includes(order.status)) {
     res.status(409); throw new Error("Closed orders cannot be prepared or dispatched.");
   }
+  if (order.deliveryMovement?.departedAt && !order.deliveryMovement?.slotsReturnedAt) { res.status(409); throw new Error("Goods have already been prepared for delivery. Confirm they are back in their original slots before preparing again."); }
   if (order.packingSentAt) { res.status(409); throw new Error("This order uses live packing. Share its worker link and review the saved picking progress instead of copying another packing list."); }
   const allocations = await OrderAllocation.find({ order: order._id })
     .select("product slot qty status").populate("slot", "label store").lean();

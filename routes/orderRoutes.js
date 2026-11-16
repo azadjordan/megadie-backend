@@ -1,3 +1,4 @@
+import { readOrderMovement, saveOrderMovement, deliverOrder } from "../controllers/orderMovementController.js";
 // routes/orderRoutes.js
 import express from "express";
 import {
@@ -9,7 +10,6 @@ import {
   getOrderDeletePreview,
   deleteOrder,
   updateOrder,
-  markOrderDelivered,
   cancelOrderAndCleanup,
 } from "../controllers/orderController.js";
 import {
@@ -36,7 +36,9 @@ router.get("/my", protect, requireApproved, getMyOrders);
 router.post("/from-quote/:quoteId", protect, admin, createOrderFromQuote);
 
 // Mark order as delivered (admin)
-router.put("/:id/deliver", protect, admin, markOrderDelivered);
+router.put("/:id/deliver", protect, admin, deliverOrder);
+router.get("/:id/movement", protect, admin, readOrderMovement);
+router.post("/:id/movement", protect, admin, requireTrustedOrigin, saveOrderMovement);
 // Cancel order and cleanup (admin)
 router.post("/:id/cancel", protect, admin, cancelOrderAndCleanup);
 // Preview order delete cleanup (admin)

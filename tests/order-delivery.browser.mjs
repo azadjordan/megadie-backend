@@ -19,7 +19,7 @@ async function openLegacyPreparation(page) {
 test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());
-  async function fixture(t, { legacy = false, mobile = false, status = "Shipping", locationOnly = false, assignedTo = "Ahmed", preparationMode = "prepare_deliver" } = {}) {
+  async function fixture(t, { legacy = false, mobile = false, status = "Shipping", locationOnly = false, assignedTo = "Ahmed", preparationMode = "prepare_deliver", packed = false, out = false, returned = false } = {}) {
     const context = await browser.newContext({ viewport: mobile ? { width: 390, height: 844 } : { width: 1400, height: 1000 } });
     t.after(() => context.close());
     await context.addInitScript(() => {
@@ -36,6 +36,8 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
         orderItems: [{ product: "p1", sku: "SKU1", productName: "Grosgrain ribbon", qty: 4, unitPrice: 10 }], totalPrice: 40, allocationStatus: "Allocated", invoice: null,
         resolvedDelivery: { details: locationOnly ? { address: details.address, googleMapsUrl: details.googleMapsUrl } : { ...details }, savedToOrder: !legacy, revision: legacy ? 0 : 1, missingFields: locationOnly ? ["contactName", "phoneNumber"] : [] } },
     };
+    if (packed) Object.assign(state.order, { packingSentAt: '2026-11-16T08:00:00Z', packedAt: '2026-11-16T09:00:00Z' });
+    if (out || returned) state.order.deliveryMovement = { departedAt: '2026-11-16T10:00:00Z', ...(returned ? { returnedAt: '2026-11-16T11:00:00Z' } : {}) };
     state.customer = { ...state.order.user, email: "client@test.invalid", deliveryContactName: "", deliveryPhoneNumber: "" };
     const sheet = () => ({ orderId: id, orderNumber: state.order.orderNumber, status: state.order.status,
       preparationMode: state.order.preparationMode, customerName: state.order.user.name,
@@ -452,6 +454,40 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await copy.click();
     await page.waitForFunction(() => window.__copies.length === 1);
     assert.equal(state.requests.filter((r) => r.method === "PUT").length, 1);
+  });
+
+  for (const stage of ['packed', 'out', 'returned']) await t.test(`order-only delivery details can be saved while ${stage}`, async t => {
+    const { page, state } = await fixture(t, { mobile: stage === 'out', packed: true, out: stage === 'out', returned: stage === 'returned' });
+    await openOrderTool(page, 'Delivery / courier details');
+    const dialog = page.getByRole('dialog');
+    assert.equal(await dialog.getByLabel('Address', { exact: true }).isEditable(), true);
+    const defaults = dialog.getByRole('link', { name: 'Edit client defaults', exact: true });
+    assert.equal(await defaults.getAttribute('href'), '/admin/users/client/edit'); assert.equal(await defaults.getAttribute('target'), '_blank');
+    assert.equal(await dialog.getByText('Pass the updated details to whoever is delivering.', { exact: true }).count(), stage === 'out' ? 1 : 0);
+    const savedPacking = state.order.packedAt;
+    await dialog.getByLabel('Recipient name', { exact: true }).fill('Updated receiver');
+    await dialog.getByLabel('Primary phone', { exact: true }).fill('+971509998888');
+    await dialog.getByLabel('Address', { exact: true }).fill('One-off address - ' + stage);
+    await dialog.getByLabel('Google Maps location', { exact: true }).fill('https://maps.app.goo.gl/new-destination');
+    await dialog.getByLabel('Delivery notes', { exact: true }).fill('Call on arrival');
+    await dialog.getByRole('button', { name: 'Save for this order', exact: true }).click();
+    await page.waitForFunction(address => document.querySelector('textarea[aria-label="Message preview"]')?.value.includes(address), 'One-off address - ' + stage);
+    await page.waitForFunction(() => ![...document.querySelectorAll('button')].some(button => button.textContent === 'Save for this order'));
+    assert.equal(state.order.resolvedDelivery.details.address, 'One-off address - ' + stage);
+    assert.equal(state.order.packedAt, savedPacking);
+    const write = state.requests.find(request => request.method === 'PUT' && request.path.endsWith('/delivery-details'));
+    assert.equal(write.body.assignedTo, undefined); assert.equal(write.body.preparationMode, undefined); assert.equal(write.body.saveCustomerLocation, undefined);
+    assert.equal(state.requests.filter(request => request.method === 'PUT' && request.path.startsWith('/users/')).length, 0);
+    if (stage === 'out') await page.screenshot({ path: '../output/delivery-details-active-mobile.png', fullPage: true });
+  });
+  for (const status of ['Delivered', 'Cancelled']) await t.test(`${status} delivery details explain their read-only state`, async t => {
+    const { page, state } = await fixture(t, { status });
+    await openOrderTool(page, 'Delivery / courier details');
+    const dialog = page.getByRole('dialog');
+    await dialog.getByText(`This order is ${status.toLowerCase()}. Its recorded delivery details are read-only.`, { exact: true }).waitFor();
+    for (const label of ['Recipient name', 'Primary phone', 'Address', 'Google Maps location', 'Delivery notes']) assert.equal(await dialog.getByLabel(label, { exact: true }).isDisabled(), true);
+    assert.equal(await dialog.getByRole('button', { name: 'Save for this order', exact: true }).count(), 0);
+    assert.equal(state.requests.filter(request => request.method === 'PUT').length, 0);
   });
 
 });

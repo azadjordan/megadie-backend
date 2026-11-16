@@ -1,3 +1,4 @@
+import { deliveryStockLockReason } from "./deliveryMovementState.js";
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
@@ -7,7 +8,7 @@ import OrderAllocation from "../models/orderAllocationModel.js";
 import Invoice from "../models/invoiceModel.js";
 import { transaction, lockOrder, lockStock, recomputeAllocationStatus, ReservationError } from "./orderReservations.js";
 import { reservationId as id, isReserved, buildOrderReservationPlan } from "./orderReservationPlan.js";
-import { packingSummary, canMarkPacked, packingUnassignLockReason } from "./packingState.js";
+import { packingSummary, packingUnitSummary, packingReadyToFinish, packingUnassignLockReason } from "./packingState.js";
 import { buildCartonLabel, resolveOrderDelivery, validatePreparationMode, validateDeliveryDetails, getCustomerLocation, normalizeDeliveryDetails, getCustomerDeliveryDefaults } from "./orderDelivery.js";
 import { logInventoryMovement } from "./inventoryMovement.js";
 import { orderItemsLockReason } from "./orderItemChanges.js";
@@ -87,7 +88,7 @@ export async function getPackingView(orderId, actor, session = null) {
     p.pickedQty += row.pickedQty || 0;
     p.reservedQty += row.qty;
     if (!row.slot?.label || row.slot?.store !== "AE1" || (row.slot?.isActive === false && row.qty > (row.pickedQty || 0))) problems.push(`${p.sku}: stock location needs admin review.`);
-    p.allocations.push({ allocationId: id(row), slotId: id(row.slot), slot: row.slot?.label || "Unknown slot", qty: row.qty, pickedQty: row.pickedQty || 0, problemQty: row.pickProblem ? Math.max(0, row.qty - (row.pickedQty || 0)) : 0, status: row.status || "Reserved", canPick: isReserved(row) && !row.pickProblem && !order.stockFinalizedAt && Boolean(row.slot?.label && row.slot.store === 'AE1' && row.slot.isActive !== false) });
+    p.allocations.push({ allocationId: id(row), slotId: id(row.slot), slot: row.slot?.label || "Unknown slot", qty: row.qty, pickedQty: row.pickedQty || 0, problemQty: row.pickProblem ? Math.max(0, row.qty - (row.pickedQty || 0)) : 0, status: row.status || "Reserved", canPick: !deliveryStockLockReason(order) && isReserved(row) && !row.pickProblem && !order.stockFinalizedAt && Boolean(row.slot?.label && row.slot.store === 'AE1' && row.slot.isActive !== false) });
   }
   for (const row of stock) {
     if (!row.slot?.label || row.slot.store !== "AE1" || row.slot.isActive === false) continue;
@@ -96,7 +97,7 @@ export async function getPackingView(orderId, actor, session = null) {
     const free = Math.max(0, row.qty - (reserved.get(`${p.productId}:${id(row.slot)}`) || 0));
     if (free && !reported) p.alternatives.push({ slotId: id(row.slot), slot: row.slot.label, availableQty: free });
   }
-  const summary = packingSummary(order, rows);
+  const summary = { ...packingSummary(order, rows), ...packingUnitSummary(order, rows) };
   for (const product of products.values()) {
     const request = help.find(request => id(request.product) === product.productId);
     product.helpRequestedAt = request?.requestedAt || null;
@@ -118,9 +119,10 @@ export async function getPackingView(orderId, actor, session = null) {
     helpRequestedItems: new Set(help.map(request => id(request.product))).size,
     preparationMode: order.preparationMode || "",
     delivery: order.preparationMode === "prepare_deliver" && delivery.details ? { contactName: delivery.details.contactName, phoneNumber: delivery.details.phoneNumber, secondaryPhoneNumber: delivery.details.secondaryPhoneNumber, address: delivery.details.address, googleMapsUrl: delivery.details.googleMapsUrl, notes: delivery.details.notes } : null,
+    deliveryState: deliveryStockLockReason(order) ? (order.deliveryMovement?.returnedAt ? "returned" : order.deliveryMovement?.method === "courier" ? "courier" : "company") : null,
     summary, items: [...products.values()], problems,
-    canPack: order.status === "Shipping" && Boolean(order.packingSentAt) && !order.packedAt && !order.stockFinalizedAt && !problems.length && canMarkPacked(order, rows),
-    ...(actor.isAdmin ? { reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: packingPublicationLockReason(order, hasInvoice), reopenLockReason: packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
+    canPack: !problems.length && packingReadyToFinish(order, rows),
+    ...(actor.isAdmin ? { reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: deliveryStockLockReason(order) || packingPublicationLockReason(order, hasInvoice), reopenLockReason: deliveryStockLockReason(order) || packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
   };
 }
 
@@ -221,7 +223,7 @@ export async function changePacking({ orderId, actor, expectedRevision, action, 
       activity(order, current, "REOPENED");
     } else if (action === "packed") {
       const rows = await allocationsFor(orderId, session);
-      if (!canMarkPacked(order, rows) || rows.some(row => !row.slot?.label || row.slot?.store !== "AE1")) throw new ReservationError("Collect every ordered quantity and resolve picking shortages before marking Packed.");
+      if (!packingReadyToFinish(order, rows)) throw new ReservationError("Collect every ordered quantity and resolve picking shortages before marking Packed.");
       order.packedAt = new Date(); order.packedBy = current._id;
       activity(order, current, "PACKED");
     } else {

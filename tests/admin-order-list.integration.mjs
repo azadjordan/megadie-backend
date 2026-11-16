@@ -24,9 +24,9 @@ test('admin order list facts, shortcuts and legacy filters agree across all page
   const owner = await user('Owner', { isAdmin: true }), worker = await user('Worker', { isWorker: true }), customer = await user('Client');
   const oid = () => new mongoose.Types.ObjectId(), product = oid(), slot = oid();
   const created = [], expected = new Map();
-  async function fixture(name, action, { status = 'Shipping', allocated = true, published = false, packed = false, billed = false, payment = 'Unpaid', balance = 1000, finalized = false, help = false, short = false, checked = false, report = false, invoiceMissing = false, cancelledInvoice = false, missingAllocationStatus = false } = {}) {
+  async function fixture(name, action, { status = 'Shipping', allocated = true, published = false, packed = false, billed = false, payment = 'Unpaid', balance = 1000, finalized = false, help = false, short = false, checked = false, report = false, invoiceMissing = false, cancelledInvoice = false, missingAllocationStatus = false, movement = undefined } = {}) {
     const id = oid(), invoice = billed || invoiceMissing ? oid() : null;
-    const order = { _id: id, user: customer._id, orderNumber: name, createdAt: new Date(2026, 10, 14, 10, created.length), status, allocationStatus: allocated ? 'Allocated' : 'Unallocated', orderItems: [{ product, sku: 'RIB-RED', qty: 37, unitPrice: 2.5 }], invoice,
+    const order = { _id: id, deliveryMovement: movement, user: customer._id, orderNumber: name, createdAt: new Date(2026, 10, 14, 10, created.length), status, allocationStatus: allocated ? 'Allocated' : 'Unallocated', orderItems: [{ product, sku: 'RIB-RED', qty: 37, unitPrice: 2.5 }], invoice,
       ...(published ? { packingSentAt: new Date(), packingWorker: worker._id, assignedTo: worker.name } : {}), ...(packed ? { packedAt: new Date() } : {}), ...(finalized ? { stockFinalizedAt: new Date() } : {}),
       ...(help ? { packingHelp: [{ _id: oid(), product, requestedAt: new Date(), notification: { lastError: 'PRIVATE' } }, { _id: oid(), product, requestedAt: new Date() }] } : {}),
       ...(report ? { packingReports: [{ _id: oid(), product, checkedAt: checked ? new Date() : null }] } : {}),
@@ -45,18 +45,23 @@ test('admin order list facts, shortcuts and legacy filters agree across all page
   await fixture('HELP-B', 'review-help', { published: true, short: true, help: true, missingAllocationStatus: true });
   await fixture('STALE-HELP', 'view-packing', { published: true, help: true });
   await fixture('PACKED', 'create-invoice', { published: true, packed: true });
-  await fixture('DELIVER', 'mark-delivered', { published: true, packed: true, billed: true });
+  await fixture('DELIVER', 'mark-out-for-delivery', { published: true, packed: true, billed: true });
   await fixture('DELIVERED-NO-INVOICE', 'create-invoice', { status: 'Delivered' });
   await fixture('FINALIZE', 'finalize-stock', { status: 'Delivered', billed: true, report: true });
   await fixture('COMPLETE', null, { status: 'Delivered', billed: true, finalized: true, report: true, checked: true });
   await fixture('CANCELLED', null, { status: 'Cancelled', report: true, help: true });
   await fixture('CANCELLED-INVOICE', 'open-order', { billed: true, cancelledInvoice: true });
   await fixture('BROKEN-INVOICE', 'open-order', { invoiceMissing: true });
-  await fixture('ZERO', 'mark-delivered', { published: true, packed: true, billed: true, balance: 0 });
-  await fixture('LEGACY-INVOICE', 'mark-delivered', { billed: true, payment: 'PartiallyPaid', balance: 500 });
+  await fixture('ZERO', 'mark-out-for-delivery', { published: true, packed: true, billed: true, balance: 0 });
+  await fixture('LEGACY-INVOICE', 'mark-out-for-delivery', { billed: true, payment: 'PartiallyPaid', balance: 500 });
   await fixture('FINALIZED-PROCESSING', 'open-order', { status: 'Processing', finalized: true });
   await fixture('PACKED-RESERVATIONS', 'open-order', { published: true, packed: true, allocated: false });
   await fixture('BAD-DELIVERED', 'open-order', { status: 'Delivered', published: true });
+  const departedAt = new Date();
+  await fixture('WITH-COURIER', 'mark-delivered', { movement: { method: 'courier', handler: 'Courier A', departedAt } });
+  await fixture('OUT-COMPANY', 'mark-delivered', { movement: { method: 'company', handler: 'Owner', departedAt } });
+  await fixture('RETURNED-PACKED', 'mark-out-for-delivery', { movement: { method: 'courier', handler: 'Courier A', departedAt, returnedAt: new Date() } });
+  await fixture('RESHELVED', 'send-worker', { movement: { method: 'courier', handler: 'Courier A', departedAt, returnedAt: new Date(), slotsReturnedAt: new Date() } });
   const app = express(); app.use(cookieParser()); app.use('/api/orders', orderRoutes); app.use(errorHandler);
   server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   const cookieFor = testSessionCookies(), base = 'http://127.0.0.1:' + server.address().port + '/api/orders';
@@ -86,7 +91,7 @@ test('admin order list facts, shortcuts and legacy filters agree across all page
     const gathered = [];
     for (let page = 1; page <= first.body.pagination.totalPages; page++) gathered.push(...(await get('?work=' + key + '&limit=1&page=' + page)).body.data);
     assert.equal(gathered.length, summary.body.data[key], key);
-    if (['toInvoice', 'toDeliver', 'toFinalize'].includes(key)) assert.ok(gathered.every(row => row.listAction === ({ toInvoice: 'create-invoice', toDeliver: 'mark-delivered', toFinalize: 'finalize-stock' })[key]));
+    if (['toInvoice', 'toDeliver', 'toFinalize'].includes(key)) assert.ok(gathered.every(row => key === 'toDeliver' ? ['mark-out-for-delivery', 'mark-delivered'].includes(row.listAction) : row.listAction === ({ toInvoice: 'create-invoice', toFinalize: 'finalize-stock' })[key]));
   }
   const due = await get('?paymentStatus=paymentDue&limit=100');
   assert.deepEqual(due.body.data.map(row => row.orderNumber).sort(), ['DELIVER', 'FINALIZE', 'LEGACY-INVOICE', 'COMPLETE'].sort());

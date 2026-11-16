@@ -1,3 +1,4 @@
+import { openOrderTool } from './helpers/orderTools.mjs';
 import paymentRoutes from '../routes/paymentRoutes.js';
 // Real login and API transactions; every browser API targets this guarded DB.
 import test from 'node:test';
@@ -57,17 +58,15 @@ test('worker shortage, partial replacement, admin help and resolution on mobile'
     return page;
   }
   const page = await pageFor(worker, 390);
-  await page.getByRole('link', { name: /^Open order for/ }).click();
+  await page.getByRole('link', { name: /^Start packing for/ }).click();
   const redCard = () => page.getByRole('article', { name: 'RIB-RED', exact: true });
   await redCard().getByRole('button', { name: "Not enough here", exact: true }).click();
-  await page.getByLabel('How many have you picked from A1-AE1 in total?', { exact: true }).fill('7');
-  await page.getByRole('dialog').getByText('30', { exact: true }).waitFor();
-  await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+  await page.getByLabel('How many did you take this time?', { exact: true }).fill('7');
+  await page.getByRole('dialog').getByText('7 picked · 30 needed from another location', { exact: true }).waitFor();
   assert.equal((await Order.findById(order._id).select('+packingHelp')).packingHelp.length, 0);
-  await page.getByRole('button', { name: 'Use B1-AE1 for 5 × 100yd Roll', exact: true }).click();
-  await page.getByRole('dialog').getByText('Admin help requested.', { exact: true }).waitFor();
+  await page.getByRole('button', { name: 'Continue at B1-AE1 — 5 × 100yd Roll', exact: true }).click();
+  await redCard().getByText('Admin help requested', { exact: true }).waitFor();
   await page.screenshot({ path: '/Users/azad/Developer/megadie/output/worker-shortage-help-mobile.png', fullPage: true });
-  await page.getByRole('button', { name: 'Continue picking', exact: true }).click();
   await page.waitForFunction(() => document.activeElement?.getAttribute('aria-label') === 'Location B1-AE1 for RIB-RED');
   assert.equal(await page.getByRole('group', { name: 'Location A1-AE1 for RIB-RED', exact: true }).getByRole('button', { name: /^Picked (all|remaining) / }).count(), 0);
   assert.equal((await OrderAllocation.findOne({ order: order._id, product: red, slot: alternative._id })).pickedQty, 0);
@@ -121,11 +120,11 @@ test('worker shortage, partial replacement, admin help and resolution on mobile'
   await invoiceAction.click();
   await invoiceDialog.getByRole('button', { name: 'Create invoice', exact: true }).click(); await invoiceDialog.waitFor({ state: 'hidden' });
   assert.equal(await Invoice.countDocuments({ order: order._id }), 1);
-  await owner.getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+  await owner.getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor();
   assert.equal(await invoiceAction.count(), 0);
-  assert.equal(await owner.getByRole('button', { name: 'Record payment', exact: true }).isEnabled(), true);
+  assert.equal(await owner.getByRole('button', { name: 'Record payment', exact: true }).count(), 0);
   assert.equal((await Order.findById(order._id)).status, 'Shipping');
-  await owner.getByRole('button', { name: 'Record payment', exact: true }).click();
+  await openOrderTool(owner, 'Record payment');
   const paymentDialog = owner.getByRole('dialog', { name: 'Add payment', exact: true });
   await paymentDialog.locator('input[type="number"]').fill('10');
   await paymentDialog.locator('select').nth(0).selectOption('Cash');
@@ -133,11 +132,17 @@ test('worker shortage, partial replacement, admin help and resolution on mobile'
   await paymentDialog.getByRole('button', { name: 'Save payment', exact: true }).click();
   await paymentDialog.waitFor({ state: 'hidden' });
   assert.equal((await Invoice.findOne({ order: order._id })).paymentStatus, 'PartiallyPaid');
-  await owner.getByRole('button', { name: 'Mark delivered', exact: true }).click();
-  const deliveryDialog = owner.getByRole('dialog', { name: 'Mark Delivered', exact: true });
-  await deliveryDialog.getByRole('combobox').selectOption('Azad');
-  await deliveryDialog.getByRole('button', { name: 'Confirm', exact: true }).click();
+  await owner.getByRole('button', { name: 'Mark out for delivery', exact: true }).click();
+  const deliveryDialog = owner.getByRole('dialog', { name: 'Mark out for delivery', exact: true });
+  await deliveryDialog.getByLabel('Handed to', { exact: false }).fill('Azad');
+  await deliveryDialog.getByRole('button', { name: 'Mark out for delivery', exact: true }).click();
   await deliveryDialog.waitFor({ state: 'hidden' });
+  assert.equal((await Order.findById(order._id)).status, 'Shipping');
+  await owner.getByRole('group', { name: 'Delivery', exact: true }).getByText('Out for delivery', { exact: true }).waitFor();
+  await owner.getByRole('button', { name: 'Mark delivered', exact: true }).click();
+  const receiptDialog = owner.getByRole('dialog', { name: 'Mark delivered', exact: true });
+  await receiptDialog.getByRole('button', { name: 'Mark delivered', exact: true }).click();
+  await receiptDialog.waitFor({ state: 'hidden' });
   await owner.getByRole('button', { name: 'Finalize stock', exact: true }).waitFor();
   owner.once('dialog', dialog => dialog.accept());
   await owner.getByRole('button', { name: 'Finalize stock', exact: true }).click();
@@ -169,9 +174,9 @@ test('worker shortage, partial replacement, admin help and resolution on mobile'
   await OrderAllocation.create({ order: recoveredOrder._id, product: red, slot: source._id, qty: 10, by: admin._id });
   await page.goto(frontend + '/packing/orders/' + recoveredOrder._id);
   await page.getByRole('button', { name: 'Not enough here', exact: true }).click();
-  await page.getByLabel('How many have you picked from A1-AE1 in total?', { exact: true }).fill('3');
+  await page.getByLabel('How many did you take this time?', { exact: true }).fill('3');
   assert.equal(await page.getByRole('checkbox').count(), 0);
-  await page.getByRole('button', { name: 'Save shortage', exact: true }).click();
+  await page.getByRole('button', { name: 'Ask admin for help', exact: true }).click();
   await page.getByRole('dialog').getByText('Admin help requested.', { exact: true }).waitFor();
   await page.getByRole('button', { name: 'Continue picking', exact: true }).click();
   await page.getByRole('link', { name: 'Choose another order', exact: true }).waitFor();

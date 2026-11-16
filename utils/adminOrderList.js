@@ -8,22 +8,26 @@ const published = exists('$packingSentAt');
 const packed = exists('$packedAt');
 const finalized = exists('$stockFinalizedAt');
 const allocated = { $eq: ['$allocationStatus', 'Allocated'] };
+const departed = exists('$deliveryMovement.departedAt');
 const invoice = exists('$invoice');
 const and = (...conditions) => ({ $and: conditions });
 const not = condition => ({ $not: [condition] });
+const held = and(departed, not(exists('$deliveryMovement.slotsReturnedAt')));
+const out = and(held, not(exists('$deliveryMovement.returnedAt')));
 
 export const adminListWorkExpression = work => {
   if (work === 'needsAdmin') return { $gt: ['$helpRequestedItems', 0] };
   if (work === 'preparation') return and(not(finalized), { $or: [
-    { $eq: ['$status', 'Processing'] }, and(shipping, not(packed)),
+    { $eq: ['$status', 'Processing'] }, and(shipping, not(packed), not(held)),
   ] });
+  if (work === 'toDeliver') return { $in: ['$listAction', ['mark-out-for-delivery', 'mark-delivered']] };
   return { $eq: ['$listAction', { toInvoice: 'create-invoice', toDeliver: 'mark-delivered', toFinalize: 'finalize-stock' }[work]] };
 };
 
 export function adminOrderListPipeline(filter = {}) {
   return [
     { $match: filter },
-    { $project: { _id: 1, createdAt: 1, status: 1, allocationStatus: 1, invoice: 1, packingSentAt: 1, packedAt: 1, stockFinalizedAt: 1, 'orderItems.product': 1, 'orderItems.qty': 1, 'packingHelp.product': 1, 'packingHelp.resolvedAt': 1 } },
+    { $project: { _id: 1, createdAt: 1, status: 1, allocationStatus: 1, invoice: 1, deliveryMovement: 1, packingSentAt: 1, packedAt: 1, stockFinalizedAt: 1, 'orderItems.product': 1, 'orderItems.qty': 1, 'packingHelp.product': 1, 'packingHelp.resolvedAt': 1 } },
     { $set: { _listHelpProducts: { $cond: [and(shipping, published, not(finalized)), { $setUnion: [
       { $map: { input: { $filter: { input: value('$packingHelp', []), as: 'request', cond: { $eq: [value('$$request.resolvedAt'), null] } } }, as: 'request', in: '$$request.product' } }, [],
     ] }, []] } } },
@@ -63,11 +67,13 @@ export function adminOrderListPipeline(filter = {}) {
       { case: { $ne: ['$listReviewReason', ''] }, then: 'open-order' },
       { case: { $eq: ['$status', 'Processing'] }, then: 'mark-shipping' },
       { case: and(shipping, { $gt: ['$helpRequestedItems', 0] }), then: 'review-help' },
+      { case: and(shipping, out), then: 'mark-delivered' },
+      { case: and(shipping, held), then: 'mark-out-for-delivery' },
       { case: and(shipping, not(allocated)), then: 'reserve-stock' },
       { case: and(shipping, not(published), not(invoice)), then: 'send-worker' },
       { case: and(shipping, published, not(packed)), then: 'view-packing' },
       { case: and(shipping, not(invoice)), then: 'create-invoice' },
-      { case: shipping, then: 'mark-delivered' },
+      { case: shipping, then: 'mark-out-for-delivery' },
       { case: and(delivered, not(invoice)), then: 'create-invoice' },
       { case: and(delivered, allocated), then: 'finalize-stock' },
     ], default: 'open-order' } } } },

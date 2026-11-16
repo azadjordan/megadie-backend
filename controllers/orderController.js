@@ -1,3 +1,4 @@
+import { deliveryHoldsGoods, deliveryIsOut, deliveryStockLockReason } from "../utils/deliveryMovementState.js";
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Order from "../models/orderModel.js";
@@ -174,7 +175,7 @@ const sanitizeOrderForClient = (order) => {
   delete o.extraFee;
   delete o.assignedTo;
   delete o.preparationMode;
-  for (const key of ["packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "helpRequestedItems", "listAction", "listReviewReason", "invoiceLinkMissing", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
+  for (const key of ["deliveryMovement", "deliveryHistory", "packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "helpRequestedItems", "listAction", "listReviewReason", "invoiceLinkMissing", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
 
   // Strip item pricing
   if (Array.isArray(o.orderItems)) {
@@ -243,7 +244,7 @@ const formatProductLabel = (product) => {
 
 const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) => {
   const orderQuery = Order.findById(orderId).select(
-    "_id orderNumber status invoice quote stockFinalizedAt packingSentAt orderItems.product orderItems.qty +reservationRevision"
+    "_id orderNumber status invoice quote stockFinalizedAt packingSentAt deliveryMovement orderItems.product orderItems.qty +reservationRevision"
   );
   if (session) orderQuery.session(session);
   const order = await orderQuery.lean();
@@ -354,6 +355,7 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
   }
 
   const blockers = [];
+  if (deliveryIsOut(order)) blockers.push("Goods are out for delivery. Record their physical return before deleting this order.");
   if (reservedRows.some(row => !Number.isSafeInteger(row.pickedQty ?? 0) || (row.pickedQty || 0) < 0 || (row.pickedQty || 0) > qtyOf(row))) {
     blockers.push("A reserved allocation has an invalid picked quantity. Review packing progress before deleting.");
   }
@@ -474,7 +476,8 @@ const buildOrderDeletePreviewPayload = async (orderId, { session = null } = {}) 
     stock: {
       mode: deductedQty > 0 ? "restore" : "release",
       stockFinalized,
-      requiresPhysicalReturn: Boolean(order.packingSentAt) || pickedQty > 0,
+      workerAssigned: Boolean(order.packingSentAt),
+      requiresPhysicalReturn: Boolean(order.packingSentAt) || deliveryHoldsGoods(order) || pickedQty > 0,
       pickedQty,
       returnRows,
       reservedQty,
@@ -1141,162 +1144,6 @@ export const createOrderFromQuote = asyncHandler(async (req, res) => {
 });
 
 /* =========================
-   PUT /api/orders/:id/deliver
-   Private/Admin
-   Mark order as Delivered and delete linked quote if present
-   ========================= */
-export const markOrderDelivered = asyncHandler(async (req, res) => {
-  const { id } = req.params;
-  const body = req.body || {};
-
-  const session = await mongoose.startSession();
-  let quoteDeleted = false;
-  let updated = null;
-
-  try {
-    await session.withTransaction(async () => {
-      const order = await Order.findById(id).session(session);
-      if (!order) {
-        res.status(404);
-        throw new Error("Order not found.");
-      }
-
-      if (order.status !== "Shipping") {
-        res.status(400);
-        throw new Error("Order must be Shipping before delivery.");
-      }
-      if (order.packingSentAt && !order.packedAt) { res.status(409); throw new Error("The worker must finish and mark this order Packed before delivery."); }
-
-      const triesDeliveryCharge = Object.prototype.hasOwnProperty.call(
-        body,
-        "deliveryCharge"
-      );
-      const triesExtraFee = Object.prototype.hasOwnProperty.call(body, "extraFee");
-
-      if (order.invoice && (triesDeliveryCharge || triesExtraFee)) {
-        res.status(400);
-        throw new Error(
-          "Cannot modify deliveryCharge or extraFee because an invoice already exists for this order."
-        );
-      }
-
-      if (triesDeliveryCharge) {
-        const val = Number(body.deliveryCharge);
-        if (!Number.isFinite(val) || val < 0) {
-          res.status(400);
-          throw new Error("deliveryCharge must be a non-negative number.");
-        }
-        order.deliveryCharge = val;
-      }
-
-      if (triesExtraFee) {
-        const val = Number(body.extraFee);
-        if (!Number.isFinite(val) || val < 0) {
-          res.status(400);
-          throw new Error("extraFee must be a non-negative number.");
-        }
-        order.extraFee = val;
-      }
-
-      if (Object.prototype.hasOwnProperty.call(body, "adminToAdminNote")) {
-        order.adminToAdminNote = String(body.adminToAdminNote ?? "");
-      }
-
-      if (Object.prototype.hasOwnProperty.call(body, "adminToClientNote")) {
-        order.adminToClientNote = String(body.adminToClientNote ?? "");
-      }
-
-      const deliveredBy = String(
-        body.deliveredBy || order.deliveredBy || ""
-      ).trim();
-      if (!deliveredBy) {
-        res.status(400);
-        throw new Error("Delivered by is required.");
-      }
-      order.deliveredBy = deliveredBy;
-
-      const allocations = await OrderAllocation.find({ order: order._id })
-        .select("product qty status")
-        .lean()
-        .session(session);
-
-      const activeAllocations = allocations.filter(
-        (row) => !row.status || row.status === "Reserved" || row.status === "Deducted"
-      );
-
-      if (!activeAllocations.length) {
-        res.status(409);
-        throw new Error(
-          "Order has no reservations. Reserve all items before delivery."
-        );
-      }
-
-      const reservedAllocations = activeAllocations.filter(
-        (row) => !row.status || row.status === "Reserved"
-      );
-      const deductedAllocations = activeAllocations.filter(
-        (row) => row.status === "Deducted"
-      );
-
-      if (reservedAllocations.length && deductedAllocations.length) {
-        res.status(409);
-        throw new Error(
-          "Order allocations are partially deducted. Resolve before delivery."
-        );
-      }
-
-      const allocatedTotals = new Map();
-      for (const row of activeAllocations) {
-        const key = String(row.product);
-        allocatedTotals.set(
-          key,
-          (allocatedTotals.get(key) || 0) + (Number(row.qty) || 0)
-        );
-      }
-
-      for (const item of order.orderItems || []) {
-        const productId = String(item.product);
-        const orderedQty = Number(item.qty) || 0;
-        const allocatedQty = allocatedTotals.get(productId) || 0;
-        if (allocatedQty !== orderedQty) {
-          res.status(409);
-          throw new Error(
-            "All items must be fully reserved before delivery."
-          );
-        }
-      }
-
-      if (order.quote) {
-        const quote = await Quote.findById(order.quote).session(session);
-        if (quote) {
-          await quote.deleteOne({ session });
-          quoteDeleted = true;
-        }
-        order.quote = null;
-      }
-
-      order.status = "Delivered";
-      if (!order.deliveredAt) {
-        order.deliveredAt = new Date();
-      }
-
-      updated = await order.save({ session });
-    });
-  } finally {
-    session.endSession();
-  }
-
-  res.status(200).json({
-    success: true,
-    message: quoteDeleted
-      ? "Order delivered and quote deleted."
-      : "Order delivered.",
-    quoteDeleted,
-    data: updated,
-  });
-});
-
-/* =========================
    POST /api/orders/:id/cancel
    Private/Admin
    Cancel an order and cleanup:
@@ -1322,12 +1169,13 @@ export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
 
   try {
     await session.withTransaction(async () => {
-      const order = await Order.findById(orderId).session(session);
+      const order = await Order.findOneAndUpdate({ _id: orderId }, { $inc: { reservationRevision: 1 } }, { new: true, session });
       if (!order) {
         res.status(404);
         throw new Error("Order not found.");
       }
 
+      if (deliveryStockLockReason(order)) { res.status(409); throw new Error(deliveryStockLockReason(order)); }
       if (order.stockFinalizedAt) {
         res.status(409);
         throw new Error("Stock finalized orders cannot be cancelled.");
@@ -1424,7 +1272,7 @@ export const cancelOrderAndCleanup = asyncHandler(async (req, res) => {
    Update allowed top-level fields; orderItems are immutable
    ========================= */
 export const updateOrder = asyncHandler(async (req, res) => {
-  const order = await Order.findById(req.params.id);
+  const order = await Order.findById(req.params.id).select("+reservationRevision");
   if (!order) {
     res.status(404);
     throw new Error("Order not found.");
@@ -1434,6 +1282,7 @@ export const updateOrder = asyncHandler(async (req, res) => {
     res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination or assignment.");
   }
 
+  if (deliveryStockLockReason(order) && Object.keys(req.body || {}).some(key => ["user", "status", "deliveredBy", "deliveryCharge", "extraFee"].includes(key))) { res.status(409); throw new Error(deliveryStockLockReason(order)); }
   if (order.packingSentAt && Object.hasOwn(req.body, "user")) { res.status(409); throw new Error("The customer cannot be changed after sending an order to a worker."); }
 
   // ❌ Order items are never editable after creation
@@ -1593,12 +1442,18 @@ export const updateOrder = asyncHandler(async (req, res) => {
     order.deliveryRevision = revision + 1;
     changes.deliveryDetails = { resetToCustomerDefault: true };
   }
+  // Fence all generic edits against concurrent dispatch, packing and reservation writes.
+  const revisionFilter = (order.reservationRevision || 0) === 0
+    ? { $or: [{ reservationRevision: 0 }, { reservationRevision: { $exists: false } }] }
+    : { reservationRevision: order.reservationRevision };
+  order.$where = { ...order.$where, ...revisionFilter };
+  order.reservationRevision = (order.reservationRevision || 0) + 1;
   const didTouchDeliveredAt = order.isModified("deliveredAt");
   let updated;
   try { updated = await order.save(); }
   catch (error) {
     if (error.name === "DocumentNotFoundError") {
-      res.status(409); throw new Error("Order changed. Reload and review before changing its customer.");
+      res.status(409); throw new Error("Order changed. Reload and review before saving.");
     }
     throw error;
   }

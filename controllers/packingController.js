@@ -5,7 +5,7 @@ import User from "../models/userModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import { ReservationError } from "../utils/orderReservations.js";
 import { getPackingView, sendToWorker, changePacking, reviewPackingReport, unassignPacking } from "../utils/orderPacking.js";
-import { packingSummary } from "../utils/packingState.js";
+import { packingSummary, packingUnitSummary, packingReadyToFinish } from "../utils/packingState.js";
 import { buildCartonLabel } from "../utils/orderDelivery.js";
 import { activePackingHelp } from "../utils/packingHelpState.js";
 import { queuePackingHelpNotifications } from "../utils/packingHelpNotifications.js";
@@ -35,17 +35,22 @@ export const listPackingOrders = handle(async (req, res) => {
   if (req.query.view === "board") {
     // Each queue has its own pagination. Counts cover every assignment, so an
     // empty section never means merely "none on this page of a flat list".
+    const inDelivery = { 'deliveryMovement.departedAt': { $ne: null }, 'deliveryMovement.returnedAt': null, 'deliveryMovement.slotsReturnedAt': null };
+    const inStore = { $or: [{ 'deliveryMovement.departedAt': null }, { 'deliveryMovement.returnedAt': { $ne: null } }, { 'deliveryMovement.slotsReturnedAt': { $ne: null } }] };
     const definitions = {
-      to_pack: { packedAt: null },
-      ready_delivery: { packedAt: { $ne: null }, preparationMode: "prepare_deliver" },
-      ready_handoff: { packedAt: { $ne: null }, preparationMode: { $ne: "prepare_deliver" } },
+      to_pack: { packedAt: null, ...inStore },
+      ready_delivery: { ...inStore, packedAt: { $ne: null }, preparationMode: "prepare_deliver" },
+      ready_handoff: { ...inStore, packedAt: { $ne: null }, preparationMode: { $ne: "prepare_deliver" } },
+      in_delivery: inDelivery,
     };
     const counts = await Order.aggregate([
       { $match: filter },
       { $group: { _id: { $cond: [
+        { $and: [ { $ne: [{ $ifNull: ['$deliveryMovement.departedAt', null] }, null] }, { $eq: [{ $ifNull: ['$deliveryMovement.returnedAt', null] }, null] }, { $eq: [{ $ifNull: ['$deliveryMovement.slotsReturnedAt', null] }, null] } ] }, 'in_delivery',
+        { $cond: [
         { $eq: [{ $ifNull: ["$packedAt", null] }, null] }, "to_pack",
         { $cond: [{ $eq: ["$preparationMode", "prepare_deliver"] }, "ready_delivery", "ready_handoff"] },
-      ] }, total: { $sum: 1 } } },
+      ] } ] }, total: { $sum: 1 } } },
     ]);
     const queues = await Promise.all(Object.entries(definitions).map(async ([key, match]) => {
       const total = counts.find(row => row._id === key)?.total || 0;
@@ -53,14 +58,14 @@ export const listPackingOrders = handle(async (req, res) => {
       const requested = Math.max(1, Math.min(10000, parseInt(req.query[`${key}Page`], 10) || 1));
       const queuePage = Math.min(requested, Math.max(1, Math.ceil(total / queueLimit)));
       const rows = total ? await Order.find({ ...filter, ...match })
-        .select("orderNumber user assignedTo preparationMode packingSentAt packedAt orderItems status stockFinalizedAt +packingHelp")
+        .select("orderNumber user assignedTo preparationMode packingSentAt packedAt deliveryMovement orderItems status stockFinalizedAt +packingHelp +reservationRevision")
         .populate("user", "name").sort({ packingSentAt: 1, _id: 1 })
         .skip((queuePage - 1) * queueLimit).limit(queueLimit).lean() : [];
       return { key, rows, pagination: { page: queuePage, total, hasNext: queuePage * queueLimit < total } };
     }));
     const ids = queues.flatMap(queue => queue.rows.map(order => order._id));
     const allocations = ids.length ? await OrderAllocation.find({ order: { $in: ids }, status: { $ne: "Cancelled" } })
-      .select("order product qty pickedQty pickProblem status").lean() : [];
+      .select("order product slot qty pickedQty pickProblem status").populate("slot", "label store isActive").lean() : [];
     const byOrder = new Map();
     for (const row of allocations) {
       const key = String(row.order);
@@ -73,8 +78,10 @@ export const listPackingOrders = handle(async (req, res) => {
         customerName: order.user?.name || "Unknown client",
         label: buildCartonLabel(order.user?.name, order.orderNumber, String(order._id)),
         preparationMode: order.preparationMode, sentAt: order.packingSentAt,
-        packedAt: order.packedAt || null,
-        summary: packingSummary(order, byOrder.get(String(order._id)) || []),
+        packedAt: order.packedAt || null, version: order.reservationRevision || 0,
+        canPack: packingReadyToFinish(order, byOrder.get(String(order._id)) || []),
+        deliveryState: order.deliveryMovement?.departedAt && !order.deliveryMovement?.slotsReturnedAt ? (order.deliveryMovement.returnedAt ? 'returned' : order.deliveryMovement.method === 'courier' ? 'courier' : 'company') : null,
+        summary: { ...packingSummary(order, byOrder.get(String(order._id)) || []), ...packingUnitSummary(order, byOrder.get(String(order._id)) || []) },
         helpRequestedItems: new Set(activePackingHelp(order, byOrder.get(String(order._id)) || []).map(request => String(request.product))).size,
       })), pagination: queue.pagination,
     }])) });

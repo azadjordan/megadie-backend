@@ -130,6 +130,22 @@ const orderSchema = new mongoose.Schema(
     deliveryCharge: { type: Number, required: true, default: 0, min: 0 },
     extraFee:       { type: Number, required: true, default: 0, min: 0 },
 
+    deliveryMovement: { type: new mongoose.Schema({
+      method: { type: String, enum: ["courier", "company", "collection"] },
+      handler: { type: String, trim: true, maxlength: 120 },
+      departedAt: Date,
+      returnedAt: Date,
+      slotsReturnedAt: Date,
+    }, { _id: false }), default: undefined },
+    deliveryHistory: { type: [{
+      action: { type: String, enum: ["departed", "delivered", "collected", "returned", "reshelved"] },
+      method: { type: String, enum: ["courier", "company", "collection"] },
+      handler: String,
+      actor: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      actorName: String,
+      note: { type: String, maxlength: 500 },
+      at: { type: Date, default: Date.now },
+    }], default: [], select: false },
     deliveredBy: { type: String },
     deliveredAt: { type: Date },
 

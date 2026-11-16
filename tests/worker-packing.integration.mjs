@@ -69,6 +69,26 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
   }
   const expectOK = result => assert.equal(result.status, 200, JSON.stringify(result.body));
 
+  await t.test('worker card exposes actual unit progress and a revision-fenced packing action', async () => {
+    const f = await fixture(); expectOK(await send(f));
+    expectOK(await action(f, 'pick', { allocationId: f.allocationId, pickedQty: 6 }));
+    const board = async () => {
+      const response = await api('/packing/orders?view=board', { actor: worker }); expectOK(response);
+      return response.body.groups.to_pack.data.find(row => row.orderId === String(f.order._id));
+    };
+    let card = await board();
+    assert.equal(card.summary.pickedUnits, 6); assert.equal(card.summary.remainingUnits, 4); assert.equal(card.canPack, false);
+    expectOK(await action(f, 'pick', { allocationId: f.allocationId, pickedQty: 10 }));
+    card = await board(); assert.equal(card.canPack, true);
+    assert.equal(card.version, (await view(f, worker)).version);
+    expectOK(await action(f, 'correct', { allocationId: f.allocationId, pickedQty: 9, confirmedReturn: true }));
+    assert.equal((await api(`/packing/orders/${f.order._id}/packed`, { actor: worker, method: 'POST', body: { expectedRevision: card.version } })).status, 409);
+    assert.equal((await board()).canPack, false); assert.equal((await Order.findById(f.order._id)).packedAt, undefined);
+    expectOK(await action(f, 'pick', { allocationId: f.allocationId, pickedQty: 10 })); card = await board();
+    expectOK(await api(`/packing/orders/${f.order._id}/packed`, { actor: worker, method: 'POST', body: { expectedRevision: card.version } }));
+    assert.ok((await Order.findById(f.order._id)).packedAt);
+  });
+
   const recipient = { contactName: 'Order recipient', phoneNumber: '+971 50 123 4567', secondaryPhoneNumber: '04 123 4567', address: 'Order destination', googleMapsUrl: '', notes: 'Ring at reception' };
   async function assign(f, overrides = {}) {
     const v = await view(f);
@@ -270,7 +290,7 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
     assert.equal(groups.to_pack.pagination.hasNext, true);
     assert.equal(groups.ready_delivery.pagination.total, 2);
     assert.equal(groups.ready_handoff.pagination.total, 1);
-    assert.deepEqual(groups.to_pack.data[0].summary, { totalItems: 1, collectedItems: 0, inProgressItems: 1, needsHelp: true });
+    assert.deepEqual(groups.to_pack.data[0].summary, { totalItems: 1, collectedItems: 0, inProgressItems: 1, needsHelp: true, totalUnits: 10, pickedUnits: 6, remainingUnits: 4 });
     assert.equal(groups.to_pack.data[0].label, "Client — 0");
     assert.doesNotMatch(JSON.stringify(groups), /unitPrice|email|password/);
     const second = await api("/packing/orders?view=board&to_packPage=2&ready_deliveryPage=99", { actor: queueWorker });

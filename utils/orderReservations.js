@@ -1,3 +1,4 @@
+import { deliveryStockLockReason } from "./deliveryMovementState.js";
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
@@ -57,6 +58,8 @@ export async function lockOrder(orderId, session, { expectedRevision, allowPacke
     if (!await Order.exists({ _id: orderId }).session(session)) throw new ReservationError("Order not found.", 404);
     throw new ReservationError("Order changed. Refresh packing progress and review before saving.");
   }
+  const movementLock = deliveryStockLockReason(order);
+  if (movementLock) throw new ReservationError(movementLock);
   if (order.stockFinalizedAt) throw new ReservationError("Stock finalized. Allocations are locked.");
   if (order.status !== "Shipping") throw new ReservationError("Reservations are allowed only when the order is Shipping.");
   if (order.packedAt && !allowPacked) throw new ReservationError("Order is Packed. An admin must reopen packing before changing collected stock or reservations.");

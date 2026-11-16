@@ -75,12 +75,11 @@ test("real worker picking, packing and admin confirmed-return deletion against a
   await page.getByLabel("Password", { exact: true }).fill("test-password");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
   await page.getByRole("heading", { name: "My packing orders", exact: true }).waitFor();
-  await page.getByRole("link", { name: /^Open order for/ }).click();
+  await page.getByRole("link", { name: /^Start packing for/ }).click();
   assert.equal(await page.locator('a[href^="tel:"]').count(), 0);
   await page.getByRole("button", { name: "Not enough here", exact: true }).click();
-  await page.getByLabel(/^How many have you picked from/).fill("6");
-  await page.getByRole("button", { name: "Save shortage", exact: true }).click();
-  await page.getByRole("button", { name: "Use B2-AE1 for 4 × 100yd Roll", exact: true }).click();
+  await page.getByLabel("How many did you take this time?", { exact: true }).fill("6");
+  await page.getByRole("button", { name: "Continue at B2-AE1 — 4 × 100yd Roll", exact: true }).click();
   await page.getByRole("button", { name: /^Picked (all|remaining) /, exact: true }).click();
   await page.getByRole("button", { name: "Mark packed", exact: true }).click();
   await page.getByText(/^Packed by Worker Ahmed/).waitFor();

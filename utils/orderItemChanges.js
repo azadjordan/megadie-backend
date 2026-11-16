@@ -1,3 +1,4 @@
+import { deliveryStockLockReason } from "./deliveryMovementState.js";
 import crypto from "node:crypto";
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
@@ -22,6 +23,7 @@ async function load(orderId, session) {
   return order;
 }
 export async function orderItemsLockReason(order, session = null) {
+  if (deliveryStockLockReason(order)) return deliveryStockLockReason(order);
   if (order.stockFinalizedAt || await OrderAllocation.exists({ order: order._id, status: "Deducted" }).session(session)) return "Stock finalized. Order items are locked.";
   if (order.status !== "Shipping") return "Items can only be changed while the order is Shipping.";
   if (order.invoice || await Invoice.exists({ order: order._id }).session(session)) return "Invoice exists. Order items are locked.";
