@@ -4,7 +4,7 @@ import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import { ReservationError } from "../utils/orderReservations.js";
-import { getPackingView, sendToWorker, changePacking, reviewPackingReport } from "../utils/orderPacking.js";
+import { getPackingView, sendToWorker, changePacking, reviewPackingReport, unassignPacking } from "../utils/orderPacking.js";
 import { packingSummary } from "../utils/packingState.js";
 import { buildCartonLabel } from "../utils/orderDelivery.js";
 import { activePackingHelp } from "../utils/packingHelpState.js";
@@ -101,6 +101,11 @@ export const updatePackingOrder = handle(async (req, res) => {
   const data = await changePacking({ ...req.body, orderId: orderId(req), action: req.params.action, actor: req.user });
   queuePackingHelpNotifications();
   res.json({ message: messages[req.params.action], data });
+});
+
+export const removePackingAssignment = handle(async (req, res) => {
+  const data = await unassignPacking({ orderId: orderId(req), actor: req.user, expectedRevision: req.body?.expectedRevision, expectedDeliveryRevision: req.body?.expectedDeliveryRevision, confirmedPhysicalReturn: req.body?.confirmedPhysicalReturn });
+  res.json({ message: 'Worker assignment removed. Reservations kept.', data });
 });
 
 export const checkPackingStockReport = handle(async (req, res) => {

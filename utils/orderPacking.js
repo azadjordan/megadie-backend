@@ -7,7 +7,7 @@ import OrderAllocation from "../models/orderAllocationModel.js";
 import Invoice from "../models/invoiceModel.js";
 import { transaction, lockOrder, lockStock, recomputeAllocationStatus, ReservationError } from "./orderReservations.js";
 import { reservationId as id, isReserved, buildOrderReservationPlan } from "./orderReservationPlan.js";
-import { packingSummary, canMarkPacked } from "./packingState.js";
+import { packingSummary, canMarkPacked, packingUnassignLockReason } from "./packingState.js";
 import { buildCartonLabel, resolveOrderDelivery, validatePreparationMode, validateDeliveryDetails, getCustomerLocation, normalizeDeliveryDetails, getCustomerDeliveryDefaults } from "./orderDelivery.js";
 import { logInventoryMovement } from "./inventoryMovement.js";
 import { orderItemsLockReason } from "./orderItemChanges.js";
@@ -120,7 +120,7 @@ export async function getPackingView(orderId, actor, session = null) {
     delivery: order.preparationMode === "prepare_deliver" && delivery.details ? { contactName: delivery.details.contactName, phoneNumber: delivery.details.phoneNumber, secondaryPhoneNumber: delivery.details.secondaryPhoneNumber, address: delivery.details.address, googleMapsUrl: delivery.details.googleMapsUrl, notes: delivery.details.notes } : null,
     summary, items: [...products.values()], problems,
     canPack: order.status === "Shipping" && Boolean(order.packingSentAt) && !order.packedAt && !order.stockFinalizedAt && !problems.length && canMarkPacked(order, rows),
-    ...(actor.isAdmin ? { reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: packingPublicationLockReason(order, hasInvoice), reopenLockReason: packingReopenLockReason(hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
+    ...(actor.isAdmin ? { reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: packingPublicationLockReason(order, hasInvoice), reopenLockReason: packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
   };
 }
 
@@ -172,6 +172,33 @@ export async function sendToWorker({ orderId, actor, expectedRevision, workerId,
     order.packingSentAt ||= new Date(); order.preparationMode = mode;
     order.deliveryDetails = details; order.deliveryRevision = (order.deliveryRevision || 0) + 1;
     order.packingSummary = packingSummary(order, rows);
+    await order.save({ session });
+    return getPackingView(orderId, current, session);
+  });
+}
+
+export async function unassignPacking({ orderId, actor, expectedRevision, expectedDeliveryRevision, confirmedPhysicalReturn }) {
+  if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0 || !Number.isSafeInteger(expectedDeliveryRevision) || expectedDeliveryRevision < 0) throw new ReservationError('Reload the worker assignment before removing it.', 400);
+  if (confirmedPhysicalReturn !== true) throw new ReservationError('Confirm the worker has stopped and all goods are in their original slots.', 400);
+  return transaction(async session => {
+    const current = await lockActor(actor, session);
+    if (!current.isAdmin) throw new ReservationError('Only admins can remove worker assignments.', 403);
+    // Use the same revision lock as picking and reassignment so a competing
+    // saved pick must be reviewed before withdrawing the task.
+    const order = await lockOrder(orderId, session, { expectedRevision });
+    if ((order.deliveryRevision || 0) !== expectedDeliveryRevision) throw new ReservationError('Order instructions changed. Reload before removing the assignment.');
+    const rows = await allocationsFor(orderId, session);
+    const hasInvoice = Boolean(order.invoice || await Invoice.exists({ order: order._id }).session(session));
+    const reason = packingUnassignLockReason(order, rows, hasInvoice);
+    if (reason) throw new ReservationError(reason);
+    activity(order, current, 'ASSIGNMENT_REMOVED', { note: `${order.assignedTo || 'Worker'} — manual preparation; worker stopped and goods in original slots confirmed.` });
+    order.packingWorker = undefined;
+    order.packingSentAt = undefined;
+    order.packingHandoverAt = undefined;
+    order.assignedTo = '';
+    order.deliveryRevision = (order.deliveryRevision || 0) + 1;
+    order.packingSummary = packingSummary(order, rows);
+    resolvePackingHelp(order, rows);
     await order.save({ session });
     return getPackingView(orderId, current, session);
   });

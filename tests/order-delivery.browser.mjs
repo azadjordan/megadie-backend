@@ -1,3 +1,4 @@
+import { openOrderTool } from './helpers/orderTools.mjs';
 // Browser API interception prevents any production/database access or OS clipboard writes.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -104,7 +105,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     page.on("pageerror", (error) => state.errors.push(error.message));
     t.after(() => { assert.deepEqual(state.errors, []); assert.deepEqual(state.unexpected, []); });
     await page.goto(origin + "/admin/orders");
-    await page.getByRole("button", { name: "Send to worker" }).waitFor();
+    await page.getByText(state.order.orderNumber, { exact: true }).waitFor();
     return { page, state };
   }
 
@@ -261,7 +262,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   });
   await t.test("Courier edits are order-only and conflicting saves keep entered text", async (t) => {
     const { page, state } = await fixture(t);
-    await page.getByRole("button", { name: /Courier/ }).first().click();
+    await openOrderTool(page, 'Delivery / courier details');
     await page.getByRole("dialog").waitFor();
     await page.getByLabel("Recipient name").fill("My unsaved contact");
     state.conflict = true;
@@ -281,7 +282,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   });
   await t.test("incomplete order destination can be saved without filling blanks from the profile", async (t) => {
     const { page, state } = await fixture(t);
-    await page.getByRole("button", { name: /Courier/ }).first().click();
+    await openOrderTool(page, 'Delivery / courier details');
     await page.getByRole("dialog").waitFor();
     await page.getByLabel("Google Maps location").fill("");
     await page.getByLabel("Address", { exact: true }).fill("");
@@ -334,7 +335,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
   await t.test("closed orders cannot initiate staff copying", async (t) => {
     for (const status of ["Delivered", "Cancelled"]) {
       const { page, state } = await fixture(t, { status });
-      assert.equal(await page.getByRole("button", { name: "Send to worker" }).isDisabled(), true);
+      assert.equal(await page.getByRole("button", { name: "Send to worker" }).count(), 0);
       assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
     }
   });

@@ -14,6 +14,7 @@ import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
 import { deliveryRevisionFilter, getCustomerDeliveryDefaults, resolveOrderDelivery } from "../utils/orderDelivery.js";
 import { lockStock } from "../utils/orderReservations.js";
 import { packingStockCheckCounts, stockChecksNeededFilter } from '../utils/packingStockReports.js';
+import { ADMIN_LIST_WORK, adminOrderListPipeline, adminListWorkExpression, strictPaymentDueInvoiceFilter } from '../utils/adminOrderList.js';
 
 /* =========================
    Helpers (pagination)
@@ -66,6 +67,7 @@ const ORDER_USER_DELIVERY_SELECT = [
 ].join(" ");
 
 const ORDER_PAYMENT_FILTER_VALUES = new Set([
+  "paymentDue",
   "noInvoice",
   "notFullyPaid",
   "Unpaid",
@@ -77,6 +79,7 @@ const ORDER_INVOICE_PAYMENT_STATUSES = ["Unpaid", "PartiallyPaid", "Paid"];
 const ORDER_ACTIVE_STATUSES = ["Processing", "Shipping", "Delivered"];
 const ORDER_UNPAID_PAYMENT_STATUSES = ["Unpaid", "PartiallyPaid"];
 const ORDER_WORK_FILTER_VALUES = new Set([
+  ...ADMIN_LIST_WORK,
   "noInvoice",
   "paymentDue",
   "needsReservation",
@@ -171,7 +174,7 @@ const sanitizeOrderForClient = (order) => {
   delete o.extraFee;
   delete o.assignedTo;
   delete o.preparationMode;
-  for (const key of ["packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
+  for (const key of ["packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "helpRequestedItems", "listAction", "listReviewReason", "invoiceLinkMissing", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
 
   // Strip item pricing
   if (Array.isArray(o.orderItems)) {
@@ -882,10 +885,15 @@ export const getOrdersWorkSummary = asyncHandler(async (_req, res) => {
     })
   );
 
+  const [summary] = await Order.aggregate([
+    ...adminOrderListPipeline(),
+    { $group: { _id: null, all: { $sum: 1 }, ...Object.fromEntries(ADMIN_LIST_WORK.map(key => [key, { $sum: { $cond: [adminListWorkExpression(key), 1, 0] } }])) } },
+  ]);
+  const { _id, ...counts } = summary || { all: 0, ...Object.fromEntries(ADMIN_LIST_WORK.map(key => [key, 0])) };
   res.status(200).json({
     success: true,
     message: "Order work summary retrieved successfully.",
-    data: Object.fromEntries(entries),
+    data: { ...Object.fromEntries(entries), ...counts },
   });
 });
 
@@ -935,7 +943,8 @@ export const getOrders = asyncHandler(async (req, res) => {
       res.status(400);
       throw new Error("Invalid user id.");
     }
-    filter.user = req.query.user;
+    // Aggregation does not apply Mongoose's query casting.
+    filter.user = new mongoose.Types.ObjectId(req.query.user);
   }
 
   const paymentStatus = req.query.paymentStatus
@@ -953,6 +962,9 @@ export const getOrders = asyncHandler(async (req, res) => {
 
     if (paymentStatus === "noInvoice") {
       addFilterCondition(filter, { invoice: null });
+    } else if (paymentStatus === "paymentDue") {
+      const invoiceIds = await Invoice.distinct('_id', strictPaymentDueInvoiceFilter);
+      addFilterCondition(filter, { invoice: { $in: invoiceIds } });
     } else if (paymentStatus === "notFullyPaid") {
       const invoiceIds = await Invoice.distinct("_id", {
         paymentStatus: { $in: ["Unpaid", "PartiallyPaid"] },
@@ -977,21 +989,23 @@ export const getOrders = asyncHandler(async (req, res) => {
       );
     }
 
-    addFilterCondition(filter, await buildOrderWorkFilter(work));
+    if (!ADMIN_LIST_WORK.includes(work)) addFilterCondition(filter, await buildOrderWorkFilter(work));
   }
 
   const sort = { createdAt: -1, _id: -1 };
 
-  const [total, orders] = await Promise.all([
-    Order.countDocuments(filter),
-    Order.find(filter)
-      .populate("user", ORDER_USER_DELIVERY_SELECT)
-      .populate(ADMIN_ORDER_INVOICE_POPULATE)
-      .sort(sort)
-      .skip(skip)
-      .limit(limit)
-      .lean(),
+  const [result] = await Order.aggregate([
+    ...adminOrderListPipeline(filter),
+    ...(ADMIN_LIST_WORK.includes(work) ? [{ $match: { $expr: adminListWorkExpression(work) } }] : []),
+    { $facet: {
+      count: [{ $count: 'total' }],
+      page: [{ $sort: sort }, { $skip: skip }, { $limit: limit }, { $project: { _id: 1, helpRequestedItems: 1, listAction: 1, listReviewReason: 1, invoiceLinkMissing: 1 } }],
+    } },
   ]);
+  const total = result.count[0]?.total || 0;
+  const facts = new Map(result.page.map(row => [String(row._id), row]));
+  const orders = await Order.find({ _id: { $in: result.page.map(row => row._id) } })
+    .populate('user', ORDER_USER_DELIVERY_SELECT).populate(ADMIN_ORDER_INVOICE_POPULATE).sort(sort).lean();
 
   const totalPages = Math.max(Math.ceil(total / limit), 1);
 
@@ -1000,7 +1014,7 @@ export const getOrders = asyncHandler(async (req, res) => {
   res.status(200).json({
     success: true,
     message: "Orders retrieved successfully.",
-    data: orders.map(order => ({ ...order, stockChecksPending: stockCheckCounts.get(String(order._id)) || 0 })),
+    data: orders.map(order => ({ ...order, ...facts.get(String(order._id)), stockChecksPending: stockCheckCounts.get(String(order._id)) || 0 })),
     pagination: {
       page,
       limit,

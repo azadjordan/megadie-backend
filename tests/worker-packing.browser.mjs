@@ -1,3 +1,5 @@
+import { packingUnassignLockReason } from "../utils/packingState.js";
+import { openOrderTool } from './helpers/orderTools.mjs';
 // Every API is intercepted. No database writes or real clipboard operations.
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +20,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     t.after(() => context.close());
     await context.addInitScript(() => { window.__copies = []; Object.defineProperty(navigator, "clipboard", { value: { writeText: async text => { window.__copies.push(text); } }, configurable: true }); });
     const profile = { _id: admin ? "200000000000000000000002" : workerId, name: admin ? "Owner" : "Worker Ahmed", email: "staff@test.invalid", isAdmin: admin, isWorker: !admin, approvalStatus: "Approved" };
-    const state = { writes: [], unexpected: [], denied: false, loseResponse: false, account: { _id: workerId, name: "Worker Ahmed", email: "worker@test.invalid", phoneNumber: "TEST-PHONE", isAdmin: false, isWorker: false, approvalStatus: "Approved", updatedAt: "2026-11-11T08:00:00.000Z" }, task: {
+    const state = { orderQueries: [], writes: [], unexpected: [], denied: false, loseResponse: false, account: { _id: workerId, name: "Worker Ahmed", email: "worker@test.invalid", phoneNumber: "TEST-PHONE", isAdmin: false, isWorker: false, approvalStatus: "Approved", updatedAt: "2026-11-11T08:00:00.000Z" }, task: {
       orderId, orderNumber: "ORD-TEST-9E7D51", customerName: "Ahmed Trading", label: "Ahmed Trading — 9E7D51", status: "Shipping", version: 0, deliveryRevision: 0,
       worker: published ? { id: workerId, name: "Worker Ahmed", enabled: true } : null, sentAt: published ? "2026-11-11T08:00:00.000Z" : null,
       packedAt: null, packedBy: "", preparationMode: "prepare_only", delivery: null, deliveryDetails: { address: "Warehouse road", googleMapsUrl: "", notes: "" }, customerLocation: { address: "Warehouse road", googleMapsUrl: "" }, deliverySavedToOrder: true,
@@ -33,13 +35,14 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       p.reservedQty = p.allocations.reduce((sum, row) => sum + row.qty, 0);
       p.pickedQty = p.allocations.reduce((sum, row) => sum + row.pickedQty, 0);
       task.summary = { totalItems: 1, collectedItems: p.pickedQty === p.qty ? 1 : 0, inProgressItems: p.pickedQty > 0 && p.pickedQty < p.qty ? 1 : 0, needsHelp: p.allocations.some(row => row.problemQty > 0) || p.reservedQty !== p.qty };
-      if (!task.summary.needsHelp) p.helpRequestedAt = null;
+      if (!task.summary.needsHelp || !task.sentAt) p.helpRequestedAt = null;
       task.helpRequestedItems = p.helpRequestedAt ? 1 : 0;
       task.stockChecksPending = task.reports.filter(report => !report.checkedAt).length;
       task.canPack = Boolean(task.sentAt) && !task.packedAt && task.summary.collectedItems === 1 && !task.summary.needsHelp;
+      if (admin) task.unassignLockReason = packingUnassignLockReason({ status: task.status, packingSentAt: task.sentAt, packedAt: task.packedAt, ...state.orderOverrides }, p.allocations, Boolean(state.invoice));
       return task;
     }
-    const rawOrder = () => ({ _id: orderId, orderNumber: state.task.orderNumber, status: "Shipping", createdAt: "2026-11-11T08:00:00.000Z", user: { _id: "customer-1", name: "Ahmed Trading", email: "client@test.invalid" }, invoice: null, quote: null, orderItems: [{ product: { _id: "product-1", name: "Red satin ribbon 25 mm", sku: "RIB-RED-25MM" }, sku: "RIB-RED-25MM", qty: 10, unitPrice: 1 }], totalPrice: 10, deliveryCharge: 0, extraFee: 0, allocationStatus: "Allocated", preparationMode: "prepare_only", assignedTo: state.task.worker?.name || "", packingSentAt: state.task.sentAt, packedAt: state.task.packedAt, packingSummary: rebuild().summary });
+    const rawOrder = () => ({ _id: orderId, orderNumber: state.task.orderNumber, status: state.task.status, createdAt: "2026-11-11T08:00:00.000Z", user: { _id: "customer-1", name: "Ahmed Trading", email: "client@test.invalid" }, invoice: state.invoice || null, quote: null, orderItems: [{ product: { _id: "product-1", name: "Red satin ribbon 25 mm", sku: "RIB-RED-25MM" }, sku: "RIB-RED-25MM", qty: 10, unitPrice: 1 }], totalPrice: 10, deliveryCharge: 0, extraFee: 0, allocationStatus: "Allocated", preparationMode: "prepare_only", assignedTo: state.task.worker?.name || "", packingSentAt: state.task.sentAt, packedAt: state.task.packedAt, packingSummary: rebuild().summary, stockChecksPending: rebuild().stockChecksPending, helpRequestedItems: rebuild().helpRequestedItems, ...state.orderOverrides });
     await context.route("**/*", async route => {
       const request = route.request(), url = new URL(request.url());
       if (!url.pathname.startsWith("/api/")) return url.origin === origin ? route.continue() : route.abort();
@@ -82,6 +85,21 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         state.task.reportsVersion++;
         if (state.loseReportResponse) { state.loseReportResponse = false; return route.abort('failed'); }
         return reply({ data: rebuild(), message: 'Stock report saved.' });
+      }
+      if (path === `/packing/orders/${orderId}/unassign` && method === 'POST') {
+        const body = request.postDataJSON(); state.writes.push({ action: 'unassign', body });
+        if (state.unassignConflict) {
+          state.unassignConflict = false; state.task.items[0].allocations[0].pickedQty = 4; state.task.version++;
+        }
+        if (body.expectedRevision !== state.task.version || body.expectedDeliveryRevision !== state.task.deliveryRevision) return reply({ message: 'Order changed. Refresh packing progress and review before saving.' }, 409);
+        if (body.confirmedPhysicalReturn !== true) return reply({ message: 'Confirm the worker has stopped and all goods are in their original slots.' }, 400);
+        const task = rebuild();
+        if (task.unassignLockReason) return reply({ message: task.unassignLockReason }, 409);
+        task.sentAt = null; task.worker = null; task.handoverAt = null; task.version++; task.deliveryRevision++;
+        task.activity.push({ action: 'ASSIGNMENT_REMOVED', actorName: 'Owner', at: new Date().toISOString() });
+        if (state.loseUnassignResponse) { state.loseUnassignResponse = false; return route.abort('failed'); }
+        await new Promise(resolve => setTimeout(resolve, state.delay || 40));
+        return reply({ data: rebuild(), message: 'Worker assignment removed. Reservations kept.' });
       }
       if (path.startsWith(`/packing/orders/${orderId}/`) && method === "POST") {
         const action = path.split("/").at(-1), body = request.postDataJSON();
@@ -129,10 +147,23 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         await new Promise(resolve => setTimeout(resolve, state.delay || 40));
         return reply({ data: { stockRestored: false, releasedQty: 10, returnedPickedQty: state.task.items[0].pickedQty }, message: "Order deleted." });
       }
+      if (path === '/slot-items/by-product/product-1') return reply({ data: [{ _id: 'stock-1', product: 'product-1', slot: { _id: '400000000000000000000001', label: 'A1-AE1', store: 'AE1', isActive: true }, qty: 20, reservedQty: 10, availableQty: 10 }] });
       if (path === `/orders/${orderId}`) return reply({ data: rawOrder() });
       if (path === `/orders/${orderId}/allocations`) return reply({ data: state.task.items[0].allocations.map(row => ({ _id: row.allocationId, product: { _id: "product-1", name: "Ribbon", sku: "RIB-RED-25MM" }, slot: { _id: row.slotId, label: row.slot }, qty: row.qty, status: "Reserved" })) });
-      if (path === "/orders/work-summary") return reply({ data: {} });
-      if (path === "/orders") return reply({ data: state.deleted ? [] : [rawOrder()], pagination: { page: 1, totalPages: 1, total: 1, limit: 10 } });
+      if (path === `/invoices/from-order/${orderId}` && method === 'POST') {
+        state.writes.push({ action: 'create-invoice', body: request.postDataJSON() });
+        if (state.holdInvoice) await new Promise(resolve => { state.finishInvoice = resolve; });
+        if (state.invoiceError) return reply({ message: state.invoiceError }, 409);
+        state.invoice = { _id: '500000000000000000000001', invoiceNumber: 'INV-TEST-1', status: 'Issued', paymentStatus: 'Unpaid', amountMinor: 1000, paidTotalMinor: 0, balanceDueMinor: 1000, currency: 'AED', minorUnitFactor: 100 };
+        return reply({ data: state.invoice, message: 'Invoice created.' }, 201);
+      }
+      if (path === "/orders/work-summary") return reply({ data: { all: state.deleted ? 0 : 1, needsAdmin: rebuild().helpRequestedItems > 0 ? 1 : 0, preparation: !state.task.packedAt ? 1 : 0, toInvoice: state.task.packedAt && !state.invoice ? 1 : 0, toDeliver: state.task.packedAt && state.invoice ? 1 : 0, toFinalize: 0, needsStockCheck: rebuild().stockChecksPending > 0 ? 1 : 0, ...state.summaryOverrides } });
+      if (path === "/orders") {
+        state.orderQueries.push(Object.fromEntries(url.searchParams));
+        if (state.ordersFailed) return reply({ message: 'Orders temporarily unavailable' }, 503);
+        if (state.emptyLastPage && url.searchParams.get('page') === '2') return reply({ data: [], pagination: { page: 2, totalPages: 1, total: 1, limit: 10 } });
+        return reply({ data: state.deleted || (url.searchParams.get('work') === 'noInvoice' && state.invoice) ? [] : state.listRows || [rawOrder()], pagination: state.orderPagination || { page: 1, totalPages: 1, total: 1, limit: 10 } });
+      }
       state.unexpected.push({ path, method }); return reply({ message: `Unexpected API ${method} ${path}` }, 500);
     });
     const page = await context.newPage(); page.setDefaultTimeout(8000);
@@ -140,6 +171,92 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     t.after(() => { assert.deepEqual(state.unexpected, []); assert.deepEqual(errors, []); });
     return { page, state, context };
   }
+
+  for (const mobile of [false, true]) await t.test(`assignment removal returns to manual preparation with reservations and reports on ${mobile ? 'mobile' : 'desktop'}`, async t => {
+    const { page, state } = await fixture(t, { admin: true, mobile });
+    state.task.reports = [{ _id: 'report-1', sku: 'RIB-RED-25MM', slotLabel: 'A1-AE1', pickedQty: 0, shortQty: 10 }];
+    await page.goto(`${origin}/admin/orders?limit=20&work=preparation`);
+    await openOrderTool(page, 'Worker assignment');
+    await page.getByRole('button', { name: 'Remove worker assignment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Remove worker assignment', exact: true });
+    const remove = dialog.getByRole('button', { name: 'Remove assignment', exact: true });
+    assert.equal(await remove.isDisabled(), true);
+    assert.equal(state.writes.length, 0);
+    await dialog.getByRole('checkbox', { name: 'The worker has stopped, and all goods are in their original slots.', exact: true }).check();
+    await page.waitForFunction(() => [...document.querySelectorAll('button')].some(button => button.textContent.trim() === 'Remove assignment' && !button.disabled));
+    await page.screenshot({ path: `/Users/azad/Developer/megadie/output/remove-worker-${mobile ? 'mobile' : 'desktop'}.png`, fullPage: true });
+    await remove.evaluate(button => { button.click(); button.click(); });
+    await page.waitForURL(url => url.pathname === `/admin/orders/${orderId}` && url.searchParams.get('tab') === 'stock');
+    assert.equal(new URL(page.url()).searchParams.get('work'), 'preparation');
+    assert.equal(new URL(page.url()).searchParams.get('limit'), '20');
+    assert.equal(state.writes.filter(write => write.action === 'unassign').length, 1);
+    assert.equal(state.writes[0].body.confirmedPhysicalReturn, true);
+    assert.equal(state.task.sentAt, null); assert.equal(state.task.worker, null);
+    assert.equal(state.task.items[0].reservedQty, 10); assert.equal(state.task.reports.length, 1);
+    const summary = page.getByRole('region', { name: 'Packing summary', exact: true });
+    await summary.getByRole('link', { name: /Packing history/ }).waitFor();
+    await summary.getByRole('link', { name: 'Stock check needed (1)', exact: true }).waitFor();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.goto(`${origin}/admin/orders`);
+    await page.getByRole('button', { name: /^More actions for / }).first().click();
+    await page.getByRole('menuitem', { name: 'Manual packing message', exact: true }).waitFor();
+  });
+
+  await t.test('picked goods and completed packing keep assignment removal disabled with a reason', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    state.task.items[0].allocations[0].pickedQty = 4;
+    await page.goto(`${origin}/admin/orders`); await openOrderTool(page, 'Worker assignment');
+    assert.equal(await page.getByRole('button', { name: 'Remove worker assignment', exact: true }).isDisabled(), true);
+    await page.getByText('Return the picked goods to their original slots and correct the picked quantities to zero first.', { exact: true }).waitFor();
+    assert.equal(state.writes.length, 0);
+    await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
+    state.task.items[0].allocations[0].pickedQty = 10; state.task.packedAt = new Date().toISOString();
+    await page.reload(); await openOrderTool(page, 'Worker assignment');
+    assert.equal(await page.getByRole('button', { name: 'Remove worker assignment', exact: true }).isDisabled(), true);
+    await page.getByText('Packing is complete. Reopen packing before removing the assignment.', { exact: true }).waitFor();
+  });
+
+  await t.test('a new pick invalidates removal confirmation and requires a fresh review', async t => {
+    const { page, state } = await fixture(t, { admin: true, mobile: true });
+    await page.goto(`${origin}/admin/orders`); await openOrderTool(page, 'Worker assignment');
+    await page.getByRole('button', { name: 'Remove worker assignment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Remove worker assignment', exact: true });
+    const checkbox = dialog.getByRole('checkbox'); await checkbox.check();
+    state.unassignConflict = true;
+    await dialog.getByRole('button', { name: 'Remove assignment', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Check latest progress', exact: true }).waitFor();
+    assert.equal(await checkbox.isChecked(), false);
+    assert.equal(await dialog.getByRole('button', { name: 'Remove assignment', exact: true }).isDisabled(), true);
+    await dialog.getByRole('button', { name: 'Check latest progress', exact: true }).click();
+    await dialog.getByText('Return the picked goods to their original slots and correct the picked quantities to zero first.', { exact: true }).waitFor();
+    assert.equal(await checkbox.isChecked(), false);
+    assert.equal(await checkbox.isDisabled(), true);
+    assert.equal(state.writes.filter(write => write.action === 'unassign').length, 1);
+    assert.ok(state.task.worker); assert.equal(state.task.items[0].pickedQty, 4);
+  });
+
+  await t.test('a lost removal response checks saved state without submitting removal again', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    await page.goto(`${origin}/admin/orders`); await openOrderTool(page, 'Worker assignment');
+    await page.getByRole('button', { name: 'Remove worker assignment', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Remove worker assignment', exact: true });
+    await dialog.getByRole('checkbox').check(); state.loseUnassignResponse = true;
+    await dialog.getByRole('button', { name: 'Remove assignment', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Check latest progress', exact: true }).click();
+    await page.waitForURL(url => url.pathname === `/admin/orders/${orderId}` && url.searchParams.get('tab') === 'stock');
+    assert.equal(state.writes.filter(write => write.action === 'unassign').length, 1);
+    assert.equal(state.task.sentAt, null);
+  });
+
+  await t.test('order details opens the same assignment removal flow and Back keeps it assigned', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    await page.goto(`${origin}/admin/orders/${orderId}`);
+    await page.getByRole('region', { name: 'Packing summary', exact: true }).getByRole('button', { name: 'Worker assignment', exact: true }).click();
+    await page.getByRole('button', { name: 'Remove worker assignment', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Back', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Worker assignment', exact: true }).waitFor();
+    assert.ok(state.task.sentAt); assert.equal(state.writes.length, 0);
+  });
 
   await t.test("worker landing, partial collection, replacement and packing survive a page reload", async t => {
     const { page, state } = await fixture(t, { mobile: true });
@@ -359,6 +476,231 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await dialog.getByText(state.task.sendLockReason, { exact: true }).waitFor();
     assert.equal(await dialog.getByRole('button', { name: 'Send to worker', exact: true }).isDisabled(), true);
     assert.equal(state.writes.length, 0);
+  });
+  for (const mobile of [false, true]) {
+    await t.test(`a packed order has one working Invoice action and refreshes to Deliver on ${mobile ? 'mobile' : 'desktop'}`, async t => {
+      const { page, state } = await fixture(t, { admin: true, mobile });
+      state.task.packedAt = '2026-11-13T08:00:00.000Z';
+      state.task.items[0].allocations[0].pickedQty = 10;
+      await page.goto(`${origin}/admin/orders`);
+      const invoice = page.getByRole('button', { name: 'Create invoice', exact: true });
+      await invoice.waitFor(); assert.equal(await invoice.count(), 1);
+      await page.getByRole('button', { name: 'To invoice 1', exact: true }).waitFor();
+      await page.screenshot({ path: `/Users/azad/Developer/megadie/output/admin-single-invoice-${mobile ? 'mobile' : 'desktop'}.png`, fullPage: true });
+      await invoice.click();
+      const dialog = page.getByRole('dialog', { name: 'Create invoice', exact: true });
+      await dialog.waitFor();
+      state.holdInvoice = true;
+      await dialog.getByRole('button', { name: 'Create invoice', exact: true }).dblclick();
+      const saving = dialog.getByRole('button', { name: 'Creating...', exact: true });
+      await saving.waitFor(); assert.equal(await saving.isDisabled(), true);
+      assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 1);
+      assert.equal(await page.getByRole('button', { name: 'Mark delivered', exact: true }).count(), 0);
+      state.finishInvoice();
+      await dialog.waitFor({ state: 'hidden' });
+      await page.getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+      await page.getByRole('button', { name: 'To invoice 0', exact: true }).waitFor();
+      assert.equal(await invoice.count(), 0);
+      assert.equal(await page.getByRole('button', { name: 'Record payment', exact: true }).isEnabled(), true);
+      assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 1);
+      assert.equal(state.task.status, 'Shipping');
+      await page.getByRole('button', { name: 'Mark delivered', exact: true }).click();
+      const delivery = page.getByRole('dialog', { name: 'Mark Delivered', exact: true });
+      await delivery.waitFor();
+      await delivery.getByRole('button', { name: 'Cancel', exact: true }).click();
+      await page.getByRole('button', { name: 'Record payment', exact: true }).click();
+      await page.getByRole('dialog', { name: 'Add payment', exact: true }).waitFor();
+      await page.getByRole('dialog', { name: 'Add payment', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
+      state.invoice.paymentStatus = 'Paid'; state.invoice.balanceDueMinor = 0; state.invoice.paidTotalMinor = 1000;
+      await page.reload(); await page.getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+      assert.equal(await invoice.count(), 0);
+      assert.equal(await page.getByRole('button', { name: 'Record payment', exact: true }).count(), 0);
+    });
+  }
+  await t.test('a failed invoice stays editable without advancing the order and success refreshes its active queue', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    state.task.packedAt = '2026-11-13T08:00:00.000Z'; state.task.items[0].allocations[0].pickedQty = 10;
+    await page.goto(`${origin}/admin/orders?work=noInvoice`);
+    await page.getByRole('button', { name: 'Create invoice', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Create invoice', exact: true });
+    state.invoiceError = 'Packing changed. Review the latest order before invoicing.';
+    await dialog.getByRole('button', { name: 'Create invoice', exact: true }).click();
+    await dialog.getByText(state.invoiceError, { exact: true }).waitFor();
+    assert.equal(state.invoice, undefined);
+    assert.equal(state.task.status, 'Shipping');
+    assert.equal(await page.getByRole('button', { name: 'Mark delivered', exact: true }).count(), 0);
+    state.invoiceError = '';
+    await dialog.getByRole('button', { name: 'Create invoice', exact: true }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    await page.getByText('No orders found', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'To invoice 0', exact: true }).waitFor();
+    assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 2);
+  });
+  await t.test('manual actions remain accessible and unfinished or cancelled tasks cannot invoice', async t => {
+    const { page, state } = await fixture(t, { admin: true, published: false });
+    state.task.status = 'Processing';
+    await page.goto(`${origin}/admin/orders`);
+    await page.getByRole('button', { name: 'Start preparation', exact: true }).waitFor();
+    await openOrderTool(page, 'Create invoice');
+    const dialog = page.getByRole('dialog', { name: 'Create invoice', exact: true });
+    await dialog.waitFor(); await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
+    state.task.status = 'Shipping';
+    await page.reload(); await page.getByRole('button', { name: 'Send to worker', exact: true }).waitFor();
+    await openOrderTool(page, 'Mark delivered');
+    await page.getByRole('dialog', { name: 'Mark Delivered', exact: true }).getByRole('button', { name: 'Cancel', exact: true }).click();
+    state.task.sentAt = '2026-11-13T08:00:00.000Z';
+    await page.reload(); await page.getByRole('link', { name: 'View packing', exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Create invoice', exact: true }).count(), 0);
+    await page.getByRole('button', { name: /^More actions for/ }).click();
+    assert.equal(await page.getByRole('menuitem', { name: 'Create invoice', exact: true }).count(), 0);
+    await page.keyboard.press('Escape');
+    state.task.status = 'Cancelled';
+    await page.reload(); await page.getByText(state.task.orderNumber, { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Create invoice', exact: true }).count(), 0);
+    assert.equal(state.writes.length, 0);
+  });
+  await t.test('order tools work by keyboard and touch without overflowing; filters and back navigation retain context', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    await page.goto(`${origin}/admin/orders?work=needsAdmin&paymentStatus=paymentDue&search=Ahmed&limit=20`);
+    await page.getByText(state.task.orderNumber, { exact: true }).waitFor();
+    const trigger = page.getByRole('button', { name: /^More actions for/ });
+    await trigger.focus(); await page.keyboard.press('ArrowDown');
+    await page.getByRole('menu').waitFor();
+    await page.keyboard.press('End');
+    assert.equal(await page.getByRole('menuitem', { name: 'Delete order', exact: true }).evaluate(node => node === document.activeElement), true);
+    await page.keyboard.press('Escape'); assert.equal(await trigger.evaluate(node => node === document.activeElement), true);
+    await openOrderTool(page, 'Copy order summary');
+    assert.match((await page.evaluate(() => window.__copies))[0], /Client: Ahmed Trading/);
+    assert.equal(state.writes.length, 0);
+    await page.getByText(state.task.orderNumber, { exact: true }).locator('..').getByRole('link').click();
+    await page.getByRole('link', { name: 'View packing', exact: true }).click();
+    assert.equal(new URL(page.url()).searchParams.get('work'), 'needsAdmin');
+    await page.getByRole('link', { name: 'Back to order', exact: true }).click();
+    await page.getByRole('button', { name: 'Back to orders', exact: true }).click();
+    const restored = new URL(page.url()).searchParams;
+    assert.equal(restored.get('work'), 'needsAdmin'); assert.equal(restored.get('paymentStatus'), 'paymentDue'); assert.equal(restored.get('limit'), '20');
+    for (const width of [1024, 390, 320]) {
+      await page.setViewportSize({ width, height: 850 });
+      await trigger.click();
+      const rect = await page.getByRole('menu').boundingBox();
+      assert.ok(rect && rect.x >= 0 && rect.x + rect.width <= width && rect.y >= 0 && rect.y + rect.height <= 850);
+      await page.keyboard.press('Escape');
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    }
+    const changed = page.waitForResponse(response => new URL(response.url()).pathname === '/api/orders' && new URL(response.url()).searchParams.get('work') === 'preparation');
+    await page.getByRole('button', { name: /Preparation 1/ }).click();
+    await changed;
+    await page.getByText(state.task.orderNumber, { exact: true }).waitFor();
+    assert.equal(state.orderQueries.at(-1).work, 'preparation');
+    assert.equal(state.orderQueries.at(-1).paymentStatus, 'paymentDue');
+    assert.equal(state.orderQueries.at(-1).search, 'Ahmed');
+  });
+  await t.test('a removed last-page result returns to a valid page without losing filters', async t => {
+    const { page, state } = await fixture(t, { admin: true }); state.emptyLastPage = true;
+    await page.goto(`${origin}/admin/orders?work=needsAdmin&page=2&limit=10`);
+    await page.getByText(state.task.orderNumber, { exact: true }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('page'), null);
+    assert.equal(new URL(page.url()).searchParams.get('work'), 'needsAdmin');
+    assert.equal(state.orderQueries[0].page, '2'); assert.equal(state.orderQueries.at(-1).page, '1');
+  });
+  await t.test('failed list requests never become empty queues and zero balances never become Paid', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    state.task.packedAt = '2026-11-13T08:00:00.000Z';
+    state.invoice = { _id: '500000000000000000000001', invoiceNumber: 'ZERO', status: 'Issued', paymentStatus: 'Unpaid', amountMinor: 0, paidTotalMinor: 0, balanceDueMinor: 0 };
+    await page.goto(`${origin}/admin/orders`);
+    await page.getByText('No balance due', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('table').getByText('Paid', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Record payment', exact: true }).count(), 0);
+    state.ordersFailed = true;
+    await page.getByRole('button', { name: /^Worker help / }).click();
+    await page.getByRole('button', { name: 'Retry orders', exact: true }).waitFor();
+    assert.equal(await page.getByText('No orders found', { exact: true }).count(), 0);
+    state.ordersFailed = false;
+    await page.getByRole('button', { name: 'Retry orders', exact: true }).click();
+    await page.getByText('No balance due', { exact: true }).waitFor();
+  });
+  await t.test('desktop rows and mobile cards keep distinct client, progress, billing and stock follow-up', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    const base = { _id: orderId, orderNumber: 'ORD-TEST-ONE', user: { name: 'Ahmed Trading with a long registered company name', email: 'hidden@test.invalid' }, createdAt: '2026-11-14T09:00:00Z', status: 'Shipping', allocationStatus: 'Allocated', orderItems: [{ product: 'p1', qty: 3, unitPrice: 10 }, { product: 'p1', qty: 7, unitPrice: 11 }], assignedTo: 'Ahmed', packingSentAt: '2026-11-14T09:00:00Z', packingSummary: { totalItems: 1, collectedItems: 0 }, stockChecksPending: 0, invoice: null };
+    const packed = { ...base, packedAt: '2026-11-14T10:00:00Z' };
+    const paid = { _id: 'invoice-1', invoiceNumber: 'INV-PAID', status: 'Issued', paymentStatus: 'Paid', amountMinor: 10700, paidTotalMinor: 10700, balanceDueMinor: 0 };
+    const delivered = { ...packed, status: 'Delivered', invoice: paid };
+    const finalized = { ...delivered, stockFinalizedAt: '2026-11-14T11:00:00Z' };
+    state.listRows = [
+      { ...base, helpRequestedItems: 1, stockChecksPending: 1, listAction: 'review-help' },
+      { ...base, _id: '2', orderNumber: 'ORD-PACKING', user: { name: 'Al Noor Textiles' }, listAction: 'view-packing' },
+      { ...base, _id: '3', orderNumber: 'ORD-PACKED', user: { name: 'Sara Packaging' }, packedAt: '2026-11-14T10:00:00Z', listAction: 'create-invoice' },
+      { ...packed, _id: '4', orderNumber: 'ORD-DELIVERED', user: { name: 'Oasis Trading' }, status: 'Delivered', stockChecksPending: 2, listAction: 'create-invoice' },
+      { ...packed, _id: '5', orderNumber: 'ORD-PAID-PACKED', invoice: paid, listAction: 'mark-delivered' },
+      { ...finalized, _id: '6', orderNumber: 'ORD-PAYMENT-PENDING', invoice: { ...paid, paymentStatus: 'PartiallyPaid', paidTotalMinor: 5000, balanceDueMinor: 5700 }, listAction: null },
+      { ...delivered, _id: '7', orderNumber: 'ORD-STOCK-PENDING', listAction: 'finalize-stock' },
+      { ...finalized, _id: '8', orderNumber: 'ORD-COMPLETE', listAction: null },
+      { ...finalized, _id: '9', orderNumber: 'ORD-REPORT-PENDING', stockChecksPending: 1, listAction: null },
+      { ...finalized, _id: '10', orderNumber: 'ORD-BALANCE-UNKNOWN', invoice: { _id: 'invoice-2', invoiceNumber: 'INV-UNKNOWN', status: 'Issued' }, listAction: null },
+      { ...finalized, _id: '11', orderNumber: 'ORD-UNPAID', invoice: { ...paid, paymentStatus: 'Unpaid', paidTotalMinor: 0, balanceDueMinor: 10700, dueDate: '2099-01-01T00:00:00Z' }, listAction: null },
+      { ...finalized, _id: '12', orderNumber: 'ORD-OVERDUE', invoice: { ...paid, paymentStatus: 'Unpaid', paidTotalMinor: 0, balanceDueMinor: 10700, dueDate: '2020-01-01T00:00:00Z' }, listAction: null },
+    ];
+    state.orderPagination = { page: 1, totalPages: 1, total: 12, limit: 20 };
+    state.summaryOverrides = { all: 12, needsAdmin: 1, preparation: 2, toInvoice: 2, toDeliver: 1, toFinalize: 1, needsStockCheck: 3 };
+    await page.goto(`${origin}/admin/orders?limit=20`);
+    await page.getByRole('table', { name: 'Admin orders', exact: true }).waitFor();
+    assert.equal(await page.getByRole('columnheader').count(), 5);
+    assert.equal(await page.getByRole('table').getByText('Not invoiced', { exact: true }).count(), 4);
+    assert.equal(await page.getByText('hidden@test.invalid', { exact: true }).count(), 0);
+    assert.equal(await page.getByRole('table').getByText('1 item · 10 units', { exact: true }).count(), 12);
+    assert.equal(await page.getByRole('link', { name: 'Review issue', exact: true }).count(), 1);
+    await page.getByRole('link', { name: '2 reports need checking', exact: true }).waitFor();
+    async function checkProgress(mobile) {
+      const row = number => mobile ? page.getByRole('article', { name: 'Order ' + number, exact: true }) : page.getByRole('row').filter({ has: page.getByText(number, { exact: true }) });
+      for (const number of ['ORD-PACKED', 'ORD-PAID-PACKED']) {
+        await row(number).getByText('Awaiting delivery', { exact: true }).waitFor();
+        await row(number).getByRole('group', { name: 'Preparation', exact: true }).getByText('Packed', { exact: true }).waitFor();
+        assert.equal(await row(number).getByText('Complete', { exact: true }).count(), 0);
+      }
+      await row('ORD-PACKED').getByRole('button', { name: 'Create invoice', exact: true }).waitFor();
+      await row('ORD-PAID-PACKED').getByRole('button', { name: 'Mark delivered', exact: true }).waitFor();
+      await row('ORD-PAYMENT-PENDING').getByRole('group', { name: 'Billing', exact: true }).getByText('Partly paid', { exact: true }).waitFor();
+      await row('ORD-PAYMENT-PENDING').getByRole('button', { name: 'Record payment', exact: true }).waitFor();
+      await row('ORD-STOCK-PENDING').getByRole('group', { name: 'Stock', exact: true }).getByText('Pending', { exact: true }).waitFor();
+      await row('ORD-STOCK-PENDING').getByRole('button', { name: 'Finalize stock', exact: true }).waitFor();
+      await row('ORD-REPORT-PENDING').getByRole('link', { name: '1 report needs checking', exact: true }).waitFor();
+      await row('ORD-BALANCE-UNKNOWN').getByText('Balance unavailable', { exact: true }).waitFor();
+      await row('ORD-COMPLETE').getByRole('group', { name: 'Stock', exact: true }).getByText('Deducted', { exact: true }).waitFor();
+      await row('ORD-COMPLETE').getByText('Delivered', { exact: true }).waitFor();
+      assert.equal(await page.getByText('Complete', { exact: true }).count(), 0);
+      for (const number of ['ORD-UNPAID', 'ORD-OVERDUE']) {
+        const record = row(number);
+        await record.getByRole('group', { name: 'Delivery', exact: true }).getByText('Delivered', { exact: true }).waitFor();
+        await record.getByRole('group', { name: 'Stock', exact: true }).getByText('Deducted', { exact: true }).waitFor();
+        await record.getByRole('group', { name: 'Billing', exact: true }).getByText(number === 'ORD-UNPAID' ? 'Unpaid' : 'Overdue', { exact: true }).waitFor();
+        assert.equal(await record.getByRole('button', { name: 'Record payment', exact: true }).count(), 1);
+        assert.equal(await record.getByRole('group', { name: 'Billing', exact: true }).getByText(/^Total /).count(), 0);
+      }
+      assert.equal(await row('ORD-PAYMENT-PENDING').getByRole('group', { name: 'Billing', exact: true }).getByText(/^Total /).count(), 1);
+      assert.equal(await page.getByText('No checks pending', { exact: true }).count(), 0);
+      assert.equal(await page.getByText('Ready to deduct', { exact: true }).count(), 0);
+    }
+    await checkProgress(false);
+    const paymentRow = page.getByRole('row').filter({ has: page.getByText('ORD-UNPAID', { exact: true }) });
+    await paymentRow.getByRole('button', { name: 'Record payment', exact: true }).click();
+    const paymentDialog = page.getByRole('dialog', { name: 'Add payment', exact: true });
+    await paymentDialog.waitFor();
+    assert.equal(Number(await paymentDialog.getByPlaceholder('0.00', { exact: true }).inputValue()), 107);
+    assert.equal(state.writes.length, 0);
+    await paymentDialog.getByRole('button', { name: 'Close', exact: true }).click();
+    const moreLabel = page.getByRole('button', { name: /^More actions for / }).first().getByText('More', { exact: true });
+    assert.ok((await moreLabel.boundingBox()).width > 20);
+    assert.equal(await page.getByRole('navigation', { name: 'Pagination', exact: true }).count(), 2);
+    await page.screenshot({ path: '/Users/azad/Developer/megadie/output/admin-orders-refreshed-desktop.png', fullPage: true });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.getByRole('article', { name: 'Order ORD-DELIVERED', exact: true }).waitFor();
+    assert.equal(await page.getByRole('table').count(), 0);
+    await checkProgress(true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: '/Users/azad/Developer/megadie/output/admin-orders-refreshed-mobile.png', fullPage: true });
+    await page.setViewportSize({ width: 320, height: 844 });
+    await checkProgress(true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   });
   function stockReportFixture(state) {
     state.task.reports = [{ _id: 'report-1', sku: 'RIB-RED-25MM', slotLabel: 'A1-AE1', slot: '400000000000000000000001', pickedQty: 6, requestedQty: 10, shortQty: 4, byName: 'Worker Ahmed', at: '2026-11-13T07:00:00.000Z' }];
@@ -614,6 +956,9 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.clock.install({ time: new Date(start) });
     await page.goto(`${origin}/packing/orders/${orderId}`);
     await page.getByRole("button", { name: "Not enough here", exact: true }).click();
+    // The click renews activity. Let the client apply that response before
+    // advancing its clock, otherwise a late response starts a new fake deadline.
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem('megadie.admin-session.v2') || '{}').type === 'renewed');
     state.session.sessionServerTime += 29 * 60000;
     await page.clock.fastForward(29 * 60000);
     const dialog = page.getByRole("dialog", { name: "Shortage", exact: true });
@@ -660,7 +1005,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { admin: true, mobile: true });
     state.task.items[0].allocations[0].pickedQty = 6;
     await page.goto(`${origin}/admin/orders`);
-    await page.getByRole("button", { name: "Delete", exact: true }).click();
+    await openOrderTool(page, 'Delete order');
     const dialog = page.getByRole("dialog", { name: "Delete Order", exact: true });
     const submit = dialog.getByRole("button", { name: "Delete Order", exact: true });
     await dialog.getByText("Picked goods to return", { exact: true }).waitFor();
@@ -683,7 +1028,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { admin: true });
     state.task.items[0].allocations[0].pickedQty = 4;
     await page.goto(`${origin}/admin/orders`);
-    await page.getByRole("button", { name: "Delete order", exact: true }).click();
+    await openOrderTool(page, 'Delete order');
     const dialog = page.getByRole("dialog", { name: "Delete Order", exact: true });
     const checkbox = dialog.getByRole("checkbox");
     await checkbox.check();
@@ -706,7 +1051,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { admin: true });
     state.deleteBlockers = ["Stock was finalized, but deducted allocation records are missing."];
     await page.goto(`${origin}/admin/orders`);
-    await page.getByRole("button", { name: "Delete order", exact: true }).click();
+    await openOrderTool(page, 'Delete order');
     const dialog = page.getByRole("dialog", { name: "Delete Order", exact: true });
     await dialog.getByText(state.deleteBlockers[0], { exact: false }).waitFor();
     assert.equal(await dialog.getByRole("button", { name: "Delete Order", exact: true }).isVisible(), true);
@@ -718,7 +1063,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { admin: true });
     state.loseDeleteResponse = true;
     await page.goto(`${origin}/admin/orders`);
-    await page.getByRole("button", { name: "Delete order", exact: true }).click();
+    await openOrderTool(page, 'Delete order');
     const dialog = page.getByRole("dialog", { name: "Delete Order", exact: true });
     await dialog.getByRole("checkbox").check();
     await dialog.getByLabel(/^Type ORD-TEST-9E7D51 to confirm/).fill(state.task.orderNumber);

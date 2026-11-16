@@ -75,6 +75,101 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
     return api(`/packing/orders/${f.order._id}/send`, { method: 'POST', body: { workerId: String(worker._id), preparationMode: 'prepare_deliver', deliveryDetails: {}, expectedRevision: v.version, expectedDeliveryRevision: v.deliveryRevision, ...overrides } });
   }
 
+  async function unassign(f, overrides = {}, actor = admin) {
+    const v = await view(f);
+    return api(`/packing/orders/${f.order._id}/unassign`, { actor, method: 'POST', body: { expectedRevision: v.version, expectedDeliveryRevision: v.deliveryRevision, confirmedPhysicalReturn: true, ...overrides } });
+  }
+
+  await t.test('withdrawal preserves reservations, delivery, reports and history while revoking worker access', async () => {
+    const f = await fixture();
+    expectOK(await assign(f, { deliveryDetails: recipient }));
+    expectOK(await action(f, 'problem', { allocationId: f.allocationId, pickedQty: 0, note: 'Physical stock needs checking.' }));
+    expectOK(await action(f, 'help', { allocationId: f.allocationId }));
+    const before = await view(f), allocation = (await OrderAllocation.findById(f.allocationId)).toObject();
+    const stock = await SlotItem.find({ product: f.productId }).sort({ _id: 1 }).lean();
+    const movements = await InventoryMovement.countDocuments({ order: f.order._id });
+    assert.equal(before.helpRequestedItems, 1);
+    assert.equal((await api(`/orders/${f.order._id}/fulfillment-sheet`)).status, 409);
+    assert.equal(before.unassignLockReason, '');
+    const result = await unassign(f); expectOK(result);
+    const after = result.body.data;
+    assert.equal(after.sentAt, null); assert.equal(after.worker, null);
+    assert.equal(after.version, before.version + 1);
+    assert.equal(after.deliveryRevision, before.deliveryRevision + 1);
+    assert.deepEqual(after.deliveryDetails, before.deliveryDetails);
+    assert.deepEqual(after.reports, before.reports);
+    assert.equal(after.stockChecksPending, 1);
+    assert.equal(after.helpRequestedItems, 0);
+    assert.equal(after.activity.at(-1).action, 'ASSIGNMENT_REMOVED');
+    assert.equal(after.activity.length, before.activity.length + 1);
+    const saved = await Order.findById(f.order._id).select('+packingHelp');
+    assert.equal(saved.status, 'Shipping'); assert.equal(saved.allocationStatus, 'Allocated');
+    assert.equal(saved.assignedTo, ''); assert.equal(saved.packingWorker, undefined);
+    assert.ok(saved.packingHelp.every(request => request.resolvedAt));
+    assert.deepEqual((await OrderAllocation.findById(f.allocationId)).toObject(), allocation);
+    assert.deepEqual(await SlotItem.find({ product: f.productId }).sort({ _id: 1 }).lean(), stock);
+    assert.equal(await InventoryMovement.countDocuments({ order: f.order._id }), movements);
+    assert.equal((await api(`/orders/${f.order._id}/fulfillment-sheet`)).status, 200);
+    assert.equal((await api(`/packing/orders/${f.order._id}`, { actor: worker })).status, 403);
+    assert.equal((await api(`/packing/orders/${f.order._id}/pick`, { actor: worker, method: 'POST', body: { expectedRevision: before.version, allocationId: f.allocationId, pickedQty: 1 } })).status, 403);
+    assert.ok(!(await api('/packing/orders?view=board', { actor: worker })).body.groups.to_pack.data.some(row => row.orderId === String(f.order._id)));
+    assert.equal((await unassign(f)).status, 409);
+    // Publishing again must retain the original stock reports and audit trail.
+    expectOK(await send(f));
+    assert.equal((await view(f)).stockChecksPending, 1);
+    assert.ok((await view(f)).activity.some(event => event.action === 'ASSIGNMENT_REMOVED'));
+  });
+
+  await t.test('withdrawal requires admin authority, a real confirmation and zero picked quantities', async () => {
+    const f = await fixture(); expectOK(await send(f));
+    assert.equal((await unassign(f, {}, worker)).status, 403);
+    assert.equal((await unassign(f, {}, customer)).status, 403);
+    assert.equal((await unassign(f, { confirmedPhysicalReturn: false })).status, 400);
+    assert.equal((await unassign(f, { expectedRevision: undefined })).status, 400);
+    const stale = await view(f);
+    expectOK(await action(f, 'pick', { allocationId: f.allocationId, pickedQty: 4 }));
+    assert.equal((await unassign(f, { expectedRevision: stale.version })).status, 409);
+    const picked = await view(f);
+    assert.match(picked.unassignLockReason, /correct.*zero/);
+    assert.equal((await unassign(f)).status, 409);
+    assert.equal((await view(f)).version, picked.version);
+    assert.equal((await OrderAllocation.findById(f.allocationId)).pickedQty, 4);
+    expectOK(await action(f, 'correct', { allocationId: f.allocationId, pickedQty: 0, confirmedReturn: true }, admin));
+    expectOK(await unassign(f));
+    assert.equal((await OrderAllocation.findById(f.allocationId)).qty, 10);
+  });
+
+  await t.test('withdrawal preserves completed-work and invoice safeguards', async () => {
+    for (const fields of [{ packedAt: new Date() }, { status: 'Delivered' }, { stockFinalizedAt: new Date() }, { invoice: new mongoose.Types.ObjectId() }]) {
+      const f = await fixture(); expectOK(await send(f));
+      await Order.updateOne({ _id: f.order._id }, { $set: fields });
+      const before = await view(f);
+      assert.ok(before.unassignLockReason);
+      assert.equal((await unassign(f)).status, 409);
+      assert.equal((await view(f)).version, before.version);
+      assert.ok((await view(f)).sentAt);
+    }
+    const f = await fixture(); expectOK(await send(f));
+    const { default: Invoice } = await import('../models/invoiceModel.js');
+    await Invoice.collection.insertOne({ order: f.order._id, status: 'Issued' });
+    assert.equal((await unassign(f)).status, 409, 'An invoice cannot be bypassed by clearing its order reference');
+    const g = await fixture(); expectOK(await send(g));
+    assert.equal((await unassign(g, { expectedDeliveryRevision: 0 })).status, 409);
+  });
+
+  await t.test('a concurrent pick and withdrawal cannot both commit', async () => {
+    const f = await fixture(); expectOK(await send(f));
+    const before = await view(f);
+    const [pick, removal] = await Promise.all([
+      api(`/packing/orders/${f.order._id}/pick`, { actor: worker, method: 'POST', body: { expectedRevision: before.version, allocationId: f.allocationId, pickedQty: 1 } }),
+      unassign(f, { expectedRevision: before.version, expectedDeliveryRevision: before.deliveryRevision }),
+    ]);
+    assert.equal([pick, removal].filter(result => result.status === 200).length, 1, JSON.stringify([pick, removal]));
+    const after = await view(f), allocation = await OrderAllocation.findById(f.allocationId);
+    if (removal.status === 200) { assert.equal(after.sentAt, null); assert.equal(allocation.pickedQty, 0); }
+    else { assert.ok(after.sentAt); assert.equal(allocation.pickedQty, 1); }
+  });
+
   await t.test('assignment preserves saved contacts when an older form sends location fields only', async () => {
     const f = await fixture();
     await Order.updateOne({ _id: f.order._id }, { $set: { deliveryDetails: recipient } });

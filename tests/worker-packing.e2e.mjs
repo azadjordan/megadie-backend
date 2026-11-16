@@ -1,3 +1,4 @@
+import { openOrderTool } from './helpers/orderTools.mjs';
 // Real cookies, APIs and MongoDB transactions; all traffic is redirected to this
 // disposable local server. Never imports server.js or loads the development .env.
 import test from "node:test";
@@ -115,7 +116,7 @@ test("real worker picking, packing and admin confirmed-return deletion against a
   await adminPage.getByLabel("Email", { exact: true }).fill(admin.email);
   await adminPage.getByLabel("Password", { exact: true }).fill("test-password");
   await adminPage.getByRole("button", { name: "Sign in", exact: true }).click();
-  await adminPage.getByRole("button", { name: "Delete order", exact: true }).click();
+  await openOrderTool(adminPage, 'Delete order');
   const dialog = adminPage.getByRole("dialog", { name: "Delete Order", exact: true });
   await dialog.getByText("Picked goods to return", { exact: true }).waitFor();
   await dialog.getByRole("checkbox").check();
