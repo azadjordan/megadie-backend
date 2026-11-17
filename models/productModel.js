@@ -11,6 +11,7 @@ import {
   SKU_TOKENS,
 } from "../constants.js";
 import { buildName, buildSku } from "../utils/productNaming.js";
+import { isAllowedProductVariant, tapeVariantMessage } from '../utils/productVariantPolicy.js';
 
 /** Build SKU + Name */
 async function buildSkuForDoc(doc) {
@@ -103,7 +104,10 @@ const productSchema = new mongoose.Schema(
       index: true,
     },
 
-    variant: { type: String, enum: VARIANTS },
+    variant: { type: String, enum: VARIANTS, validate: {
+      validator(value) { return this.productType !== 'Double Face Tape' || isAllowedProductVariant(this.productType, value); },
+      message: tapeVariantMessage,
+    } },
     cbm: { type: Number, min: 0, required: true },
 
     grade: { type: String, enum: GRADES },

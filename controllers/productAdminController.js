@@ -22,6 +22,7 @@ import {
   SKU_TOKENS,
 } from "../constants.js";
 import { buildName, buildSku } from "../utils/productNaming.js";
+import { isAllowedProductVariant, tapeVariantMessage, variantsByProductType } from '../utils/productVariantPolicy.js';
 
 const ensureValidPriceRule = async (res, rawRule) => {
   const rule = String(rawRule || "").trim();
@@ -53,6 +54,7 @@ export const getProductMeta = asyncHandler(async (_req, res) => {
       sizes: SIZES,
       grades: GRADES,
       variants: VARIANTS,
+      variantsByProductType,
       finishes: FINISHES,
       packingUnits: PACKING_UNITS,
       tags: TAGS,
@@ -84,6 +86,9 @@ export const previewProduct = asyncHandler(async (req, res) => {
   }
 
   const productType = category.productType;
+  if (productType === 'Double Face Tape' && !isAllowedProductVariant(productType, payload.variant)) {
+    res.status(400); throw new Error(tapeVariantMessage);
+  }
   const sku = buildSku(
     {
       productType,
