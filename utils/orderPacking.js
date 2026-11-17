@@ -1,4 +1,5 @@
 import { deliveryStockLockReason } from "./deliveryMovementState.js";
+import { deliveryWorkerId } from './deliveryAssignmentState.js';
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
@@ -50,10 +51,11 @@ export async function getPackingView(orderId, actor, session = null) {
   const order = await Order.findOne({ _id: orderId, ...(actor.isAdmin ? {} : { packingWorker: actor._id, packingSentAt: { $ne: null } }) }).select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp")
     .populate("user", actor.isAdmin ? "name phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes deliveryContactName deliveryPhoneNumber" : "name")
     .populate("packingWorker", "name isWorker isAdmin")
+    .populate('deliveryWorker', 'name isWorker')
     .populate("packedBy", "name").session(session).lean();
   if (!order) throw new ReservationError("Packing order is no longer available to this account.", actor.isAdmin ? 404 : 403);
   assertAccess(order, actor, { published: !actor.isAdmin });
-  if (!actor.isAdmin && order.preparationMode === 'prepare_deliver' && order.deliveryDetails == null) {
+  if (!actor.isAdmin && deliveryWorkerId(order) === id(actor) && order.deliveryDetails == null) {
     // Older tasks can still rely on profile defaults. Only assigned delivery
     // workers reach this branch; the returned DTO below stays narrowly scoped.
     order.user = await User.findById(id(order.user)).select('name phoneNumber secondaryPhoneNumber deliveryContactName deliveryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes').session(session).lean() || order.user;
@@ -117,12 +119,12 @@ export async function getPackingView(orderId, actor, session = null) {
     itemsChangedBy: itemEvents.at(-1)?.actorName || "",
     itemsChanges: (itemEvents.at(-1)?.changes || []).map(change => ({ productId: id(change.product), sku: change.sku, fromQty: change.fromQty, toQty: change.toQty, unit: change.unit || 'units' })),
     helpRequestedItems: new Set(help.map(request => id(request.product))).size,
-    preparationMode: order.preparationMode || "",
-    delivery: order.preparationMode === "prepare_deliver" && delivery.details ? { contactName: delivery.details.contactName, phoneNumber: delivery.details.phoneNumber, secondaryPhoneNumber: delivery.details.secondaryPhoneNumber, address: delivery.details.address, googleMapsUrl: delivery.details.googleMapsUrl, notes: delivery.details.notes } : null,
+    preparationMode: actor.isAdmin ? order.preparationMode || '' : deliveryWorkerId(order) === id(actor) ? 'prepare_deliver' : 'prepare_only',
+    delivery: (actor.isAdmin || deliveryWorkerId(order) === id(actor)) && delivery.details ? { contactName: delivery.details.contactName, phoneNumber: delivery.details.phoneNumber, secondaryPhoneNumber: delivery.details.secondaryPhoneNumber, address: delivery.details.address, googleMapsUrl: delivery.details.googleMapsUrl, notes: delivery.details.notes } : null,
     deliveryState: deliveryStockLockReason(order) ? (order.deliveryMovement?.returnedAt ? "returned" : order.deliveryMovement?.method === "courier" ? "courier" : "company") : null,
     summary, items: [...products.values()], problems,
     canPack: !problems.length && packingReadyToFinish(order, rows),
-    ...(actor.isAdmin ? { reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: deliveryStockLockReason(order) || packingPublicationLockReason(order, hasInvoice), reopenLockReason: deliveryStockLockReason(order) || packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
+    ...(actor.isAdmin ? { deliveryWorker: (order.deliveryWorker === undefined ? (order.preparationMode === 'prepare_deliver' ? order.packingWorker : null) : order.deliveryWorker) ? { id: deliveryWorkerId(order), name: (order.deliveryWorker || order.packingWorker)?.name, enabled: Boolean((order.deliveryWorker || order.packingWorker)?.isWorker) } : null, reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: deliveryStockLockReason(order) || packingPublicationLockReason(order, hasInvoice), reopenLockReason: deliveryStockLockReason(order) || packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
   };
 }
 
@@ -170,6 +172,12 @@ export async function sendToWorker({ orderId, actor, expectedRevision, workerId,
     const reassigned = order.packingSentAt && id(order.packingWorker) !== workerId;
     activity(order, current, !order.packingSentAt ? "SENT" : reassigned ? "REASSIGNED" : "INSTRUCTIONS_SAVED", { note: worker.name });
     if (reassigned) order.packingHandoverAt = new Date();
+    // Task choices are shortcuts; preserve a separately assigned driver.
+    const previousDriver = deliveryWorkerId(order);
+    const followsPacker = !previousDriver || previousDriver === id(order.packingWorker);
+    if ((!order.packingSentAt && !previousDriver) || (order.packingSentAt && order.preparationMode !== mode && followsPacker)) {
+      order.deliveryWorker = mode === 'prepare_deliver' ? worker._id : null;
+    } else if (order.deliveryWorker === undefined) order.deliveryWorker = previousDriver || null;
     order.packingWorker = worker._id; order.assignedTo = worker.name;
     order.packingSentAt ||= new Date(); order.preparationMode = mode;
     order.deliveryDetails = details; order.deliveryRevision = (order.deliveryRevision || 0) + 1;
@@ -194,6 +202,7 @@ export async function unassignPacking({ orderId, actor, expectedRevision, expect
     const reason = packingUnassignLockReason(order, rows, hasInvoice);
     if (reason) throw new ReservationError(reason);
     activity(order, current, 'ASSIGNMENT_REMOVED', { note: `${order.assignedTo || 'Worker'} — manual preparation; worker stopped and goods in original slots confirmed.` });
+    if (order.deliveryWorker === undefined) order.deliveryWorker = deliveryWorkerId(order) || null;
     order.packingWorker = undefined;
     order.packingSentAt = undefined;
     order.packingHandoverAt = undefined;

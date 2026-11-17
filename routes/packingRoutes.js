@@ -1,10 +1,16 @@
 import express from "express";
 import { protect, admin, staff } from "../middleware/authMiddleware.js";
 import { requireTrustedOrigin } from "../config/trustedOrigins.js";
+import * as delivery from '../controllers/workerDeliveryController.js';
 import { listPackingWorkers, listPackingOrders, readPackingOrder, publishPackingOrder, updatePackingOrder, checkPackingStockReport, removePackingAssignment } from "../controllers/packingController.js";
 
 const router = express.Router();
 router.use(protect, staff);
+router.get('/deliveries', delivery.list);
+router.get('/deliveries/:id', delivery.read);
+router.get('/deliveries/:id/workers', admin, delivery.choices);
+router.post('/deliveries/:id/assignment', requireTrustedOrigin, admin, delivery.assign);
+router.post('/deliveries/:id/movement', requireTrustedOrigin, delivery.move);
 router.get("/workers", admin, listPackingWorkers);
 router.get("/orders", listPackingOrders);
 router.get("/orders/:id", readPackingOrder);

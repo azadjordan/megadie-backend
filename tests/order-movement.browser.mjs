@@ -26,6 +26,7 @@ test('delivery movement browser flow', { timeout: 120000 }, async t => {
       if (path === '/users/account/profile') return reply({ data: { ...profile, ...metadata() } });
       if (path === '/users/session/activity') return reply({ data: metadata() });
       if (path === '/site-settings/maintenance-notice') return reply({ data: { enabled: false } });
+      if (path === `/packing/deliveries/${id}` && method === 'GET') return reply({ data: { orderId: id, customerName: 'Azad Store', orderNumber: 'ORD-MOVEMENT', version: state.view.version, worker: null, delivery: null, deliveryState: state.view.isOut ? 'out' : 'ready', canAssign: true, canDepart: false, canDeliver: false, canReturn: false, canCorrect: false, items: [], status: state.order.status } });
       if (path === '/orders/work-summary') return reply({ data: {} });
       if (path === '/orders' && method === 'GET') return reply({ data: [state.order], pagination: { page: 1, totalPages: 1, total: 1, limit: 20 } });
       if (path === `/orders/${id}` && method === 'GET') return reply({ data: state.order });

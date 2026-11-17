@@ -76,3 +76,7 @@ lost response, checking state continues to manual preparation without another PO
 - Existing packing, delivery, invoice, report-review and deletion regressions remain
   in the same suites. Test databases and intercepted browser APIs isolate this work
   from the configured production database.
+
+## Separate delivery assignments
+
+Worker delivery adds an independent assignment. Removing packing keeps that delivery assignment (including a legacy Prepare & deliver fallback), and the dialog explains this. Manage or remove delivery separately through Delivery worker. See [Worker delivery](worker-delivery.md).

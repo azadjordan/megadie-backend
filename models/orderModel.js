@@ -42,6 +42,8 @@ const orderSchema = new mongoose.Schema(
     preparationMode: { type: String, enum: ["", "prepare_only", "prepare_deliver"], default: "" },
     assignedTo: { type: String, trim: true, maxlength: 120, default: "" },
     packingWorker: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    // Missing on legacy orders; explicit null means delivery is unassigned.
+    deliveryWorker: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
     packingSentAt: { type: Date },
     packingHandoverAt: { type: Date },
     packedAt: { type: Date },
@@ -133,14 +135,17 @@ const orderSchema = new mongoose.Schema(
     deliveryMovement: { type: new mongoose.Schema({
       method: { type: String, enum: ["courier", "company", "collection"] },
       handler: { type: String, trim: true, maxlength: 120 },
+      worker: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       departedAt: Date,
       returnedAt: Date,
       slotsReturnedAt: Date,
     }, { _id: false }), default: undefined },
     deliveryHistory: { type: [{
-      action: { type: String, enum: ["departed", "delivered", "collected", "returned", "reshelved"] },
+      action: { type: String, enum: ["assigned", "departed", "delivered", "collected", "returned", "reshelved", "corrected"] },
       method: { type: String, enum: ["courier", "company", "collection"] },
       handler: String,
+      worker: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+      previousWorker: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       actor: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
       actorName: String,
       note: { type: String, maxlength: 500 },

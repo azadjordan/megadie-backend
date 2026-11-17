@@ -39,7 +39,7 @@ Admin-only GET/POST `/api/orders/:id/movement` reads current readiness/history a
 
 The existing PUT `/api/orders/:id/deliver` remains a receipt action, uses the same checks, and preserves its response shape. It cannot be used to record other movement events.
 
-The current delivery snapshot and admin-only history preserve each attempt's actual timestamp, handler and actor. Existing method details and notes remain readable in history. The history is excluded from list queries; internal movement data is stripped from customer responses. Worker pages receive only a simple delivery-state label, with an Out for delivery queue and read-only picking while goods are away.
+The current delivery snapshot and admin-only history preserve each attempt's actual timestamp, handler and actor. Existing method details and notes remain readable in history. The history is excluded from list queries; internal movement data is stripped from customer responses. The worker delivery extension provides scoped assignments and movement controls through separate staff endpoints; see [Worker delivery](worker-delivery.md). Picking stays read-only while goods are away.
 
 The confirmation guards repeated submission. Names are optional and a missing name is never invented. After any uncertain/conflicting save, the admin checks latest delivery details and confirms again. Reading a committed event recovers a lost response without repeating it. A departure confirmation never silently changes into a receipt action after refresh.
 

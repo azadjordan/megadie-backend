@@ -74,7 +74,7 @@ test("real worker picking, packing and admin confirmed-return deletion against a
   await page.getByLabel("Email", { exact: true }).fill(worker.email);
   await page.getByLabel("Password", { exact: true }).fill("test-password");
   await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByRole("heading", { name: "My packing orders", exact: true }).waitFor();
+  await page.getByRole("heading", { name: "My work", exact: true }).waitFor();
   await page.getByRole("link", { name: /^Start packing for/ }).click();
   assert.equal(await page.locator('a[href^="tel:"]').count(), 0);
   await page.getByRole("button", { name: "Not enough here", exact: true }).click();
@@ -95,11 +95,11 @@ test("real worker picking, packing and admin confirmed-return deletion against a
   // An older assignment form sends only location fields. Saved contacts must survive.
   const deliveryUpdate = await owner.post(`${api}/packing/orders/${order._id}/send`, { data: { workerId: String(worker._id), preparationMode: 'prepare_deliver', deliveryDetails: { address: 'Updated warehouse', googleMapsUrl: '', notes: 'Ask for recipient' }, expectedRevision: packingBeforeDelivery.version, expectedDeliveryRevision: packingBeforeDelivery.deliveryRevision } });
   assert.equal(deliveryUpdate.status(), 200, await deliveryUpdate.text());
-  await page.reload();
-  await page.getByRole('heading', { name: 'Ready to deliver', exact: true }).waitFor();
+  await page.goto(`${frontend}/packing/deliveries/${order._id}`);
+  await page.getByText('Ready to deliver', { exact: true }).waitFor();
   await page.getByText('Warehouse recipient', { exact: true }).waitFor();
-  assert.equal(await page.getByRole('link', { name: 'Call +971 50 123 4567', exact: true }).getAttribute('href'), 'tel:+971501234567');
-  assert.equal(await page.getByRole('link', { name: 'Call backup: 04 123 4567', exact: true }).getAttribute('href'), 'tel:041234567');
+  assert.equal(await page.getByRole('link', { name: 'Call recipient', exact: true }).getAttribute('href'), 'tel:+971501234567');
+  assert.equal(await page.getByRole('link', { name: 'Call backup', exact: true }).getAttribute('href'), 'tel:041234567');
   assert.equal(await page.getByText('Updated warehouse', { exact: true }).isVisible(), true);
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
   await page.screenshot({ path: '/Users/azad/Developer/megadie/output/worker-delivery-contact-e2e-mobile.png', fullPage: true });

@@ -175,7 +175,7 @@ const sanitizeOrderForClient = (order) => {
   delete o.extraFee;
   delete o.assignedTo;
   delete o.preparationMode;
-  for (const key of ["deliveryMovement", "deliveryHistory", "packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "helpRequestedItems", "listAction", "listReviewReason", "invoiceLinkMissing", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
+  for (const key of ["deliveryWorker", "deliveryMovement", "deliveryHistory", "packingWorker", "packingSentAt", "packingHandoverAt", "packedAt", "packedBy", "packingSummary", "packingReports", "packingReportsRevision", "stockChecksPending", "helpRequestedItems", "listAction", "listReviewReason", "invoiceLinkMissing", "packingHelp", "packingActivity", "itemChanges"]) delete o[key];
 
   // Strip item pricing
   if (Array.isArray(o.orderItems)) {
@@ -1278,7 +1278,7 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Order not found.");
   }
 
-  if (Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision") || Object.hasOwn(req.body, "assignedTo") || Object.hasOwn(req.body, "preparationMode")) {
+  if (Object.hasOwn(req.body, "deliveryWorker") || Object.hasOwn(req.body, "deliveryDetails") || Object.hasOwn(req.body, "deliveryRevision") || Object.hasOwn(req.body, "assignedTo") || Object.hasOwn(req.body, "preparationMode")) {
     res.status(400); throw new Error("Use the order delivery-details endpoint to edit its destination or assignment.");
   }
 

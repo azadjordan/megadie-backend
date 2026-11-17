@@ -2,6 +2,9 @@ import Order from '../models/orderModel.js';
 import OrderAllocation from '../models/orderAllocationModel.js';
 import SlotItem from '../models/slotItemModel.js';
 import Quote from '../models/quoteModel.js';
+import User from '../models/userModel.js';
+import { deliveryWorkerId } from './deliveryAssignmentState.js';
+import { resolveOrderDelivery } from './orderDelivery.js';
 import { transaction, lockStock, ReservationError } from './orderReservations.js';
 import { reservationId as id, isReserved, buildOrderReservationPlan } from './orderReservationPlan.js';
 import { canMarkPacked, packingSummary } from './packingState.js';
@@ -46,11 +49,14 @@ export async function getOrderMovement(orderId) {
 export async function updateOrderMovement({ orderId, actor, body, legacy = false }) {
   const action = legacy ? 'delivered' : body.action;
   const { expectedRevision } = body;
-  if (!['departed', 'delivered', 'collected', 'returned', 'reshelved'].includes(action)) reject('Choose a valid delivery update.', 400);
+  if (!['departed', 'delivered', 'collected', 'returned', 'reshelved', 'corrected'].includes(action)) reject('Choose a valid delivery update.', 400);
   if ((!legacy || expectedRevision !== undefined) && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) reject('Reload delivery details before saving.', 400);
   const note = body.note ?? '';
   if (typeof note !== 'string' || note.trim().length > 500) reject('Keep the note within 500 characters.', 400);
   return transaction(async session => {
+    const currentActor = await User.findOneAndUpdate({ _id: actor._id, $or: [{ isAdmin: true }, { isWorker: true }] }, { $inc: { staffRevision: 1 } }, { new: true, session });
+    if (!currentActor) reject('Your worker access changed. Sign in again.', 403);
+    actor = currentActor;
     const filter = { _id: orderId };
     if (expectedRevision === 0) filter.$or = [{ reservationRevision: 0 }, { reservationRevision: { $exists: false } }];
     else if (expectedRevision !== undefined) filter.reservationRevision = expectedRevision;
@@ -59,12 +65,30 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
       if (!await Order.exists({ _id: orderId }).session(session)) reject('Order not found.', 404);
       reject('Order changed. Reload delivery details and review before saving.');
     }
-    if (order.status !== 'Shipping' || order.stockFinalizedAt) reject('Only unfinished deliveries can be updated.');
+    if (!actor.isAdmin) {
+      if (!actor.isWorker || deliveryWorkerId(order) !== id(actor)) reject('This delivery is no longer assigned to you.', 403);
+      if (legacy || !['departed', 'delivered', 'returned'].includes(action)) reject('Only admins can make this delivery change.', 403);
+      if (['method', 'handler', 'deliveryCharge', 'extraFee', 'deliveredBy', 'adminToAdminNote', 'adminToClientNote'].some(key => Object.hasOwn(body, key))) reject('Workers can record delivery events only.', 400);
+      if (action === 'delivered' && !deliveryIsOut(order)) reject('Record Out for delivery before confirming customer receipt.');
+      if (action === 'departed' && order.deliveryDetails == null) {
+        const customer = await User.findById(order.user).session(session).lean();
+        order.deliveryDetails = resolveOrderDelivery({ ...order.toObject(), user: customer }).details;
+        order.deliveryRevision = (order.deliveryRevision || 0) + 1;
+      }
+      const destination = order.deliveryDetails;
+      if (action === 'departed' && destination != null && !destination.address && !destination.googleMapsUrl) reject('Delivery location is missing. Ask an admin to add the address or map.');
+    }
+    if ((order.status !== 'Shipping' && !(actor.isAdmin && action === 'corrected' && order.status === 'Delivered')) || order.stockFinalizedAt) reject('Only unfinished deliveries can be updated.');
     const now = new Date();
     let quoteDeleted = false;
     const current = order.deliveryMovement;
     const out = deliveryIsOut(order), held = deliveryHoldsGoods(order);
     let method = body.method, handler = body.handler ?? '';
+    if (!actor.isAdmin && action === 'departed') { method = 'company'; handler = actor.name; }
+    if (actor.isAdmin && action === 'departed' && deliveryWorkerId(order) && body.handler === undefined) {
+      const driver = await User.findById(deliveryWorkerId(order)).select('name').session(session);
+      handler = driver?.name || '';
+    }
     if (action === 'collected' && method === undefined) method = 'collection';
     if (action === 'returned' || action === 'reshelved' || (action === 'delivered' && out)) {
       method = current?.method; handler = current?.handler || '';
@@ -79,7 +103,17 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
     handler = handler.trim();
     const rows = await OrderAllocation.find({ order: orderId }).session(session).lean();
     await lockStock({ product: { $in: order.orderItems.map(i => i.product) } }, session);
-    if (action === 'returned') {
+    if (action === 'corrected') {
+      if (!actor.isAdmin || body.confirmedCorrection !== true || !note.trim()) reject('Confirm this was recorded by mistake and give a reason.', 400);
+      if (rows.some(row => row.status === 'Deducted')) reject('Stock has been finalized. This delivery cannot be corrected here.');
+      if (order.status === 'Delivered') {
+        order.status = 'Shipping'; order.deliveredAt = undefined; order.deliveredBy = undefined;
+      } else if (out) {
+        // The confirmation means departure never happened. Preserve the pick
+        // ledger (goods are still packed), and keep the mistaken event in history.
+        order.deliveryMovement = undefined;
+      } else reject('There is no delivery event to correct.');
+    } else if (action === 'returned') {
       if (!out) reject('This order has no active delivery departure to return.');
       if (body.confirmedReturn !== true) reject('Confirm all goods are physically back in the store.', 400);
       order.deliveryMovement.returnedAt = now;
@@ -101,7 +135,7 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
       // Manual preparation has no worker pick ledger. Record the confirmed sources
       // so shelf counts cannot treat dispatched cartons as stock still on shelves.
       if (!order.packingSentAt) await OrderAllocation.updateMany({ order: orderId, $or: [{ status: 'Reserved' }, { status: { $exists: false } }] }, [{ $set: { pickedQty: '$qty', pickedAt: now, pickedBy: actor._id, pickProblem: false } }], { session });
-      if (action === 'departed') order.deliveryMovement = { method, handler, departedAt: now };
+      if (action === 'departed') order.deliveryMovement = { method, handler, worker: deliveryWorkerId(order) || undefined, departedAt: now };
       else {
         if (!out) order.deliveryMovement = { method, handler };
         order.status = 'Delivered'; order.deliveredAt = now; order.deliveredBy = handler;
@@ -116,7 +150,7 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
       }
     }
     const eventAction = method === 'collection' && action === 'delivered' ? 'collected' : action;
-    order.deliveryHistory.push({ action: eventAction, method, handler, actor: actor._id, actorName: actor.name, note: note.trim(), at: now });
+    order.deliveryHistory.push({ action: eventAction, method, handler, worker: deliveryWorkerId(order) || undefined, actor: actor._id, actorName: actor.name, note: note.trim(), at: now });
     await order.save({ session });
     return legacy ? { order, quoteDeleted } : view(order, session);
   });
