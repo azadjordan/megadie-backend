@@ -22,7 +22,37 @@ Missing numbers explain that the worker can ask an admin for help.
 Saving the customer location still updates only the profile address and map.
 Order contact edits do not overwrite profile contacts. Previously erased order
 contacts are not guessed or replaced from a possibly different profile recipient;
-an admin can correct them in Worker assignment → Change assignment.
+an admin can correct them in Delivery / courier details, including after packing
+or departure without changing the assignment.
+
+## Shared client location rules (2026-11-18)
+
+Worker assignment, manual preparation and Delivery / courier details show the
+same location controls: **Use client's default** fills the draft, and **Also save
+this address and map for future orders** explicitly promotes the order location.
+The latter updates only `User.address` and `User.deliveryGoogleMapsUrl`. The order
+and optional default commit together; saving a default through the delivery
+editor does not require a packing assignment or a particular preparation mode.
+Pack-only saves preserve the saved destination instead of applying hidden edits.
+
+Both profile endpoints and both order-saving paths share location validation and
+stale-write protection. A profile request that supplies `address` or
+`deliveryGoogleMapsUrl` must include `expectedCustomerLocation` with the original
+trimmed `{ address, googleMapsUrl }` pair. Unrelated profile edits omit location
+fields. A conflicting location returns 409 without saving the rest of the edit.
+The document save also checks the original stored pair to catch a concurrent
+write after the initial read. Existing order delivery revisions remain required.
+
+An address change retaining the previous nonempty map requires
+`confirmedMapLocation: true`, or the map must be changed/cleared. This applies to
+both the order and any client default being replaced. Profiles use the same
+HTTPS-link and length validation as order locations. Blank saved order fields
+remain authoritative; future default changes do not rewrite existing orders.
+
+Successful default saves invalidate client and order/packing caches. Refreshing
+the client editor preserves unsaved fields; an explicit reload discards a draft
+only after confirmation. No existing client default or historical destination is
+automatically backfilled.
 
 No new model, migration, required contact field or dispatch/invoice rule is added.
 
@@ -32,3 +62,7 @@ privacy, defaults, reassignment, explicit clearing and failed-save rollback.
 `tests/worker-packing.e2e.mjs` uses real login and an explicitly named disposable
 localhost database to reproduce an older form save and verify the worker view
 after reload. Phone links are inspected without launching a dialer.
+`tests/order-delivery.integration.mjs` additionally covers profile conflicts,
+concurrent profile saves, transactional default updates, validation and history
+preservation. `tests/order-delivery.browser.mjs` covers both location dialogs,
+the profile forms, map review, cache refresh, drafts and mobile layout.

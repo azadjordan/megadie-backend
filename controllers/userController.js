@@ -4,6 +4,8 @@ import { trustedOrigins } from "../config/trustedOrigins.js";
 // controllers/userController.js
 import asyncHandler from "../middleware/asyncHandler.js";
 import User from "../models/userModel.js";
+import { saveCustomerProfile } from "../utils/customerLocation.js";
+import { validateDeliveryDetails } from "../utils/orderDelivery.js";
 import Order from "../models/orderModel.js";
 import Invoice from "../models/invoiceModel.js";
 import Quote from "../models/quoteModel.js";
@@ -25,12 +27,10 @@ import sendTransactionalEmail from "../utils/sendTransactionalEmail.js";
    Helpers
    ========================= */
 function assignDeliveryOverrides(user, body, res) {
-  for (const [key, max] of [["deliveryContactName", 200], ["deliveryPhoneNumber", 50]]) {
+  for (const [key, field] of [["deliveryContactName", "contactName"], ["deliveryPhoneNumber", "phoneNumber"], ["secondaryPhoneNumber", "secondaryPhoneNumber"], ["deliveryNotes", "notes"]]) {
     if (!Object.hasOwn(body, key)) continue;
-    if (typeof body[key] !== "string" || body[key].trim().length > max) {
-      res.status(400); throw new Error(`Invalid ${key} (maximum ${max} characters).`);
-    }
-    user[key] = body[key].trim();
+    try { user[key] = validateDeliveryDetails({ [field]: body[key] })[field]; }
+    catch (error) { res.status(400); throw error; }
   }
 }
 
@@ -462,14 +462,11 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
   assignDeliveryOverrides(user, req.body, res);
   user.name = req.body.name ?? user.name;
   user.phoneNumber = req.body.phoneNumber ?? user.phoneNumber;
-  user.address = req.body.address ?? user.address;
   user.secondaryPhoneNumber =
     req.body.secondaryPhoneNumber ?? user.secondaryPhoneNumber;
-  user.deliveryGoogleMapsUrl =
-    req.body.deliveryGoogleMapsUrl ?? user.deliveryGoogleMapsUrl;
   user.deliveryNotes = req.body.deliveryNotes ?? user.deliveryNotes;
 
-  const updatedUser = await user.save();
+  const updatedUser = await saveCustomerProfile(user, req.body);
 
   return res.status(200).json({
     success: true,
@@ -477,6 +474,7 @@ export const updateUserProfile = asyncHandler(async (req, res) => {
     data: {
       ...sessionMetadata(req.sessionExpiresAt, req.adminSession),
       _id: updatedUser._id,
+      updatedAt: updatedUser.updatedAt,
       name: updatedUser.name,
       email: updatedUser.email,
       phoneNumber: updatedUser.phoneNumber,
@@ -707,12 +705,8 @@ export const updateUser = asyncHandler(async (req, res) => {
   if (req.body.name != null) user.name = req.body.name;
   if (req.body.email != null) user.email = req.body.email.trim().toLowerCase();
   if (req.body.phoneNumber != null) user.phoneNumber = req.body.phoneNumber;
-  if (req.body.address != null) user.address = req.body.address;
   if (req.body.secondaryPhoneNumber != null) {
     user.secondaryPhoneNumber = req.body.secondaryPhoneNumber;
-  }
-  if (req.body.deliveryGoogleMapsUrl != null) {
-    user.deliveryGoogleMapsUrl = req.body.deliveryGoogleMapsUrl;
   }
   if (req.body.deliveryNotes != null) user.deliveryNotes = req.body.deliveryNotes;
   if (req.body.isAdmin != null) user.isAdmin = Boolean(req.body.isAdmin);
@@ -740,13 +734,14 @@ export const updateUser = asyncHandler(async (req, res) => {
   }
 
   try {
-    const updatedUser = await user.save();
+    const updatedUser = await saveCustomerProfile(user, req.body);
   if (wasAdmin !== updatedUser.isAdmin || wasWorker !== Boolean(updatedUser.isWorker)) await AdminSession.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
     return res.status(200).json({
       success: true,
       message: "User updated successfully.",
       data: {
         _id: updatedUser._id,
+        updatedAt: updatedUser.updatedAt,
         name: updatedUser.name,
         email: updatedUser.email,
         phoneNumber: updatedUser.phoneNumber,

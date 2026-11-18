@@ -11,6 +11,11 @@ const sessionAbsoluteExpiresAt = Date.now() + 28800000;
 const sessionMetadata = () => ({ sessionId: "fixture-admin-session", sessionAbsoluteExpiresAt, sessionExpiresAt: Date.now() + 1800000, sessionServerTime: Date.now() });
 const profile = { _id: "200000000000000000000001", name: "Admin", email: "admin@test.invalid", isAdmin: true, approvalStatus: "Approved" };
 
+async function reviewMapIfNeeded(page) {
+  const review = page.getByRole('checkbox', { name: 'The map pin is correct for this address.', exact: true });
+  if (await review.isVisible()) await review.check();
+}
+
 async function openLegacyPreparation(page) {
   await page.getByRole("button", { name: "Send to worker" }).click();
   await page.getByRole("button", { name: "Copy packing message instead", exact: true }).click();
@@ -48,6 +53,12 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       picks: [{ slot: "A10-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 1 }, { slot: "A2-AE1", sku: "SKU1", name: "Grosgrain ribbon", qty: 3 }],
       items: [{ productId: "p1", sku: "SKU1", name: "Grosgrain ribbon", orderedQty: 4, allocatedQty: 4 }],
     });
+    const packingSheet = () => ({
+        orderId: id, orderNumber: state.order.orderNumber, status: state.order.status, customerName: state.customer.name,
+        label: "Alpha Beta Company — 023AD", customerId: "client", worker: state.packingWorker || null, sentAt: state.packingWorker ? "2026-11-18T08:00:00Z" : null, version: 0, deliveryRevision: state.order.resolvedDelivery.revision,
+        deliveryDetails: state.order.resolvedDelivery.details || {}, customerLocation: { address: state.customer.address || "", googleMapsUrl: state.customer.deliveryGoogleMapsUrl || "" }, deliverySavedToOrder: state.order.resolvedDelivery.savedToOrder,
+        preparationMode: state.order.preparationMode, items: [{ productId: "p1", sku: "SKU1", qty: 4, reservedQty: 4 }], problems: [],
+    });
     await context.route("**/*", async (route) => {
       const request = route.request(), url = new URL(request.url());
       if (!url.pathname.startsWith("/api/")) return url.origin === origin ? route.continue() : route.abort();
@@ -55,23 +66,38 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
       const headers = { "access-control-allow-origin": origin, "access-control-allow-credentials": "true", "access-control-allow-headers": "content-type", "access-control-allow-methods": "GET,PUT,POST,OPTIONS" };
       const reply = (body, status = 200) => route.fulfill({ status, headers, contentType: "application/json", body: JSON.stringify(body) });
       if (method === "OPTIONS") return route.fulfill({ status: 204, headers });
-      state.requests.push({ path, method, body: method === "PUT" ? request.postDataJSON() : undefined });
-      if (path === "/users/account/profile" && method === "GET") return reply({ data: { ...profile, ...sessionMetadata() } });
+      state.requests.push({ path, method, body: ["PUT", "POST"].includes(method) ? request.postDataJSON() : undefined });
+      if (path === "/users/account/profile" && method === "GET") return reply({ data: { ...(state.ownProfile || profile), ...sessionMetadata() } });
+      if (path === '/users/account/profile' && method === 'PUT') {
+        const body = request.postDataJSON();
+        state.ownProfile = { ...state.ownProfile, ...body };
+        return reply({ data: { ...state.ownProfile, ...sessionMetadata() } });
+      }
       if (path === "/users/session/activity") return reply({ data: sessionMetadata() });
       if (path === "/site-settings/maintenance-notice") return reply({ data: { enabled: false } });
       if (path === "/users/client" && method === "GET") return reply({ data: state.customer });
-      if (path === "/users/client" && method === "PUT") { state.customer = { ...state.customer, ...request.postDataJSON() }; return reply({ data: state.customer }); }
+      if (path === "/users/client" && method === "PUT") {
+        const body = request.postDataJSON();
+        if (Object.hasOwn(body, 'address') || Object.hasOwn(body, 'deliveryGoogleMapsUrl')) {
+          const current = { address: state.customer.address || '', googleMapsUrl: state.customer.deliveryGoogleMapsUrl || '' };
+          if (JSON.stringify(current) !== JSON.stringify(body.expectedCustomerLocation)) return reply({ message: 'Client default location changed. Reload and review before saving.' }, 409);
+        }
+        state.customer = { ...state.customer, ...body }; return reply({ data: state.customer });
+      }
       if (path === "/user-prices/client" || path === "/price-rules") return reply({ data: [] });
-      if (path === "/packing/workers") return reply({ data: [] });
-      if (path === `/packing/orders/${id}`) return reply({ data: {
-        orderId: id, orderNumber: state.order.orderNumber, status: state.order.status, customerName: state.customer.name,
-        label: "Alpha Beta Company — 023AD", worker: null, sentAt: null, version: 0, deliveryRevision: state.order.resolvedDelivery.revision,
-        deliveryDetails: state.order.resolvedDelivery.details || {}, customerLocation: { address: state.customer.address || "", googleMapsUrl: state.customer.deliveryGoogleMapsUrl || "" }, deliverySavedToOrder: state.order.resolvedDelivery.savedToOrder,
-        preparationMode: state.order.preparationMode, items: [{ productId: "p1", sku: "SKU1", qty: 4, reservedQty: 4 }], problems: [],
-      } });
-      if (path === "/orders/work-summary") return reply({ data: {} });
-      if (path === "/orders" && method === "GET") return reply({ data: [state.order], pagination: { page: 1, totalPages: 1, total: 1, limit: 20 } });
-      if (path === `/orders/${id}` && method === "GET") return reply({ data: state.order });
+      if (path === "/packing/workers") return reply({ data: state.workers || [] });
+      if (path === '/orders/work-summary') return reply({ data: {} });
+      if (path === '/orders' && method === 'GET') return reply({ data: [state.order], pagination: { page: 1, totalPages: 1, total: 1, limit: 20 } });
+      if (path === `/packing/orders/${id}`) return reply({ data: packingSheet() });
+      if (path === `/packing/orders/${id}/send` && method === 'POST') {
+        const body = request.postDataJSON();
+        state.packingWorker = { id: body.workerId, name: 'Worker Ahmed', enabled: true };
+        state.order.preparationMode = body.preparationMode;
+        state.order.resolvedDelivery = { details: body.deliveryDetails, revision: body.expectedDeliveryRevision + 1, savedToOrder: true, missingFields: [] };
+        if (body.saveCustomerLocation) Object.assign(state.customer, { address: body.deliveryDetails.address, deliveryGoogleMapsUrl: body.deliveryDetails.googleMapsUrl });
+        return reply({ message: 'Order sent to worker.', data: packingSheet() });
+      }
+      if (path === `/orders/${id}` && method === "GET") return reply({ data: { ...state.order, customerLocation: { address: state.customer.address || "", googleMapsUrl: state.customer.deliveryGoogleMapsUrl || "" } } });
       if (path === `/orders/${id}/fulfillment-sheet` && method === "GET") {
         if (state.failNextSheet) { state.failNextSheet = false; return reply({ message: "Could not refresh preparation details." }, 500); }
         return reply({ data: sheet() });
@@ -98,7 +124,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
         assert.equal(body.expectedRevision, state.order.resolvedDelivery.revision);
         state.order.resolvedDelivery = { details: body.deliveryDetails, savedToOrder: true, revision: body.expectedRevision + 1, missingFields: [] };
         if (state.failSheetAfterSave) { state.failSheetAfterSave = false; state.failNextSheet = true; }
-        return reply({ data: { _id: id, customerId: "client", preparationMode: state.order.preparationMode, assignedTo: state.order.assignedTo, resolvedDelivery: state.order.resolvedDelivery } });
+        return reply({ data: { _id: id, customerId: "client", preparationMode: state.order.preparationMode, assignedTo: state.order.assignedTo, ...(body.saveCustomerLocation ? { customerLocation: { address: state.customer.address, googleMapsUrl: state.customer.deliveryGoogleMapsUrl } } : {}), resolvedDelivery: state.order.resolvedDelivery } });
       }
       state.unexpected.push(`${method} ${path}`);
       return reply({ message: "Unexpected test request" }, 500);
@@ -111,6 +137,129 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     return { page, state };
   }
 
+  await t.test('courier dialog offers explicit default saving without changing assignments', async t => {
+    const { page, state } = await fixture(t, { packed: true, mobile: true });
+    await openOrderTool(page, 'Delivery / courier details');
+    const dialog = page.getByRole('dialog');
+    const checkbox = dialog.getByRole('checkbox', { name: /Also save this address and map for future orders/ });
+    assert.equal(await checkbox.isChecked(), false);
+    await dialog.getByRole('button', { name: 'Use client’s default', exact: true }).click();
+    assert.equal(await dialog.getByLabel('Address', { exact: true }).inputValue(), 'LIVE-PROFILE-ADDRESS');
+    assert.equal(state.requests.filter(r => r.method === 'PUT').length, 0);
+    await dialog.getByLabel('Address', { exact: true }).fill('Usual warehouse');
+    await dialog.getByLabel('Google Maps location', { exact: true }).fill('https://maps.app.goo.gl/usual-warehouse');
+    await checkbox.check();
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+    await dialog.screenshot({ path: '/tmp/megadie-courier-location-mobile.png' });
+    await dialog.getByRole('button', { name: 'Save details', exact: true }).click();
+    await page.getByText('Order details and customer default location saved.', { exact: true }).waitFor();
+    const write = state.requests.find(r => r.method === 'PUT');
+    assert.equal(write.body.saveCustomerLocation, true);
+    assert.deepEqual(write.body.expectedCustomerLocation, { address: 'LIVE-PROFILE-ADDRESS', googleMapsUrl: '' });
+    assert.equal(Object.hasOwn(write.body, 'assignedTo'), false);
+    assert.equal(Object.hasOwn(write.body, 'preparationMode'), false);
+    assert.equal(state.customer.address, 'Usual warehouse');
+    assert.equal(state.customer.phoneNumber, 'ACCOUNT-PHONE');
+    assert.equal(await checkbox.isChecked(), false);
+  });
+  await t.test('changing an address requires reviewing, replacing, or clearing its existing map', async t => {
+    const { page, state } = await fixture(t);
+    await openOrderTool(page, 'Delivery / courier details');
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('Address', { exact: true }).fill('Different building');
+    const save = dialog.getByRole('button', { name: 'Save for this order', exact: true });
+    assert.equal(await save.isDisabled(), true);
+    assert.equal(await dialog.getByRole('link', { name: 'Check map pin' }).getAttribute('href'), details.googleMapsUrl);
+    await dialog.getByRole('checkbox', { name: 'The map pin is correct for this address.', exact: true }).check();
+    assert.equal(await save.isEnabled(), true);
+    await dialog.getByLabel('Address', { exact: true }).fill('Another building');
+    assert.equal(await save.isDisabled(), true);
+    await dialog.getByRole('button', { name: 'Clear map link', exact: true }).click();
+    assert.equal(await save.isEnabled(), true);
+    await save.click();
+    await page.getByText('Delivery details saved for this order.', { exact: true }).waitFor();
+    assert.equal(state.order.resolvedDelivery.details.googleMapsUrl, '');
+    assert.equal(state.customer.address, 'LIVE-PROFILE-ADDRESS');
+  });
+  await t.test('worker assignment shows the same visible location controls and sends the original default', async t => {
+    const { page, state } = await fixture(t);
+    state.workers = [{ _id: 'worker', name: 'Worker Ahmed' }];
+    await page.getByRole('button', { name: 'Send to worker', exact: true }).click();
+    const dialog = page.getByRole('dialog');
+    const checkbox = dialog.getByRole('checkbox', { name: /Also save this address and map for future orders/ });
+    await checkbox.waitFor();
+    assert.equal(await checkbox.isVisible(), true);
+    assert.equal(await checkbox.isChecked(), false);
+    await dialog.getByRole('button', { name: 'Use client’s default', exact: true }).click();
+    await dialog.getByLabel('Address', { exact: true }).fill('Usual packing destination');
+    await checkbox.check();
+    await dialog.screenshot({ path: '/tmp/megadie-worker-location.png' });
+    const refreshedWorkers = page.waitForResponse(response => new URL(response.url()).pathname === '/api/packing/workers');
+    await dialog.getByRole('button', { name: 'Send to worker', exact: true }).click();
+    await refreshedWorkers;
+    await dialog.getByText('Assigned to Worker Ahmed', { exact: true }).waitFor();
+    const write = state.requests.find(r => r.path.endsWith('/send'));
+    assert.equal(write.body.saveCustomerLocation, true);
+    assert.deepEqual(write.body.expectedCustomerLocation, { address: 'LIVE-PROFILE-ADDRESS', googleMapsUrl: '' });
+    assert.equal(state.customer.address, 'Usual packing destination');
+  });
+  await t.test('editing an unrelated client field omits the location and does not overwrite newer defaults', async t => {
+    const { page, state } = await fixture(t);
+    await page.goto(origin + '/admin/users/client/edit');
+    await page.getByRole('button', { name: 'Update Info', exact: true }).waitFor();
+    await page.locator('input[type="text"]').first().fill('Renamed company');
+    state.customer.address = 'Updated elsewhere';
+    await page.getByRole('button', { name: 'Update Info', exact: true }).click();
+    await page.getByText('User info updated.', { exact: true }).waitFor();
+    const write = state.requests.find(r => r.path === '/users/client' && r.method === 'PUT');
+    assert.deepEqual(write.body, { name: 'Renamed company' });
+    assert.equal(state.customer.address, 'Updated elsewhere');
+    assert.equal(await page.getByLabel('Address', { exact: true }).inputValue(), 'Updated elsewhere');
+  });
+  await t.test('client cache refresh preserves a draft and stale location saves require an explicit reload', async t => {
+    const { page, state } = await fixture(t);
+    await page.goto(origin + '/admin/users/client/edit');
+    await page.getByRole('button', { name: 'Update Info', exact: true }).waitFor();
+    await page.locator('input[type="text"]').first().fill('Draft company name');
+    await page.getByLabel('Address', { exact: true }).fill('My draft location');
+    state.customer = { ...state.customer, address: 'Newer saved location', updatedAt: '2026-11-18T12:00:00Z' };
+    await page.getByRole('button', { name: 'Approval', exact: true }).click();
+    await page.getByLabel('Internal note', { exact: true }).fill('Call before the next order');
+    await page.getByRole('button', { name: 'Save Note', exact: true }).click();
+    await page.getByText('Internal note updated.', { exact: true }).waitFor();
+    await page.getByRole('button', { name: 'User Info', exact: true }).click();
+    await page.getByText('Client details changed elsewhere. Your draft has been kept.', { exact: true }).waitFor();
+    assert.equal(await page.getByLabel('Address', { exact: true }).inputValue(), 'My draft location');
+    assert.equal(await page.locator('input[type="text"]').first().inputValue(), 'Draft company name');
+    await page.getByRole('button', { name: 'Update Info', exact: true }).click();
+    await page.getByText('Client default location changed. Reload and review before saving.', { exact: true }).first().waitFor();
+    assert.equal(await page.getByLabel('Address', { exact: true }).inputValue(), 'My draft location');
+    assert.equal(state.customer.address, 'Newer saved location');
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: 'Reload client details', exact: true }).click();
+    await page.waitForFunction(() => document.querySelector('#location-address')?.value === 'Newer saved location');
+    assert.equal(await page.locator('input[type="text"]').first().inputValue(), 'Alpha Beta Company');
+  });
+  await t.test('the profile form shows the saved map and requires review before keeping it with another address', async t => {
+    const { page, state } = await fixture(t);
+    state.ownProfile = { ...profile, address: 'Profile warehouse', deliveryGoogleMapsUrl: 'https://maps.app.goo.gl/profile' };
+    await page.goto(origin + '/account/profile');
+    await page.getByRole('button', { name: 'Edit Profile', exact: true }).click();
+    assert.equal(await page.getByLabel('Google Maps location', { exact: true }).inputValue(), state.ownProfile.deliveryGoogleMapsUrl);
+    await page.getByLabel('Address', { exact: true }).fill('Profile warehouse annex');
+    const save = page.getByRole('button', { name: 'Save changes', exact: true });
+    assert.equal(await save.isDisabled(), true);
+    await page.getByRole('checkbox', { name: 'The map pin is correct for this address.', exact: true }).check();
+    assert.equal(await save.isEnabled(), true);
+    await save.click();
+    await page.getByText('Saved', { exact: true }).waitFor();
+    const write = state.requests.find(r => r.path === '/users/account/profile' && r.method === 'PUT');
+    assert.deepEqual(write.body.expectedCustomerLocation, { address: 'Profile warehouse', googleMapsUrl: 'https://maps.app.goo.gl/profile' });
+    assert.equal(write.body.confirmedMapLocation, true);
+    assert.equal(write.body.address, 'Profile warehouse annex');
+    assert.equal(Object.hasOwn(write.body, 'name'), false);
+    assert.equal(state.order.resolvedDelivery.details.address, details.address);
+  });
   await t.test("every opening reviews fresh details with one fetch and no automatic copying", async (t) => {
     const { page, state } = await fixture(t);
     assert.equal(state.requests.filter((r) => r.path.endsWith("fulfillment-sheet")).length, 0);
@@ -152,6 +301,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.keyboard.press("Tab");
     assert.equal(await close.evaluate((node) => node === document.activeElement), true);
     await page.getByLabel("Address", { exact: true }).fill("New order destination");
+    await reviewMapIfNeeded(page);
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     assert.match(await page.evaluate(() => window.__copies[0]), /New order destination/);
@@ -288,6 +438,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("dialog").waitFor();
     await page.getByLabel("Google Maps location").fill("");
     await page.getByLabel("Address", { exact: true }).fill("");
+    await reviewMapIfNeeded(page);
     await page.getByRole("button", { name: "Save for this order", exact: true }).click();
     await page.getByText("Delivery details saved for this order.").first().waitFor();
     assert.equal(state.order.resolvedDelivery.details.address, "");
@@ -349,12 +500,14 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     assert.equal(await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).isDisabled(), true);
     await page.getByRole("radio", { name: "Prepare & Deliver", exact: true }).check();
     await page.getByLabel("Address", { exact: true }).fill("");
+    await reviewMapIfNeeded(page);
     await page.getByLabel("Google Maps location").fill("");
     assert.equal(await page.getByRole("button", { name: "Save & Copy", exact: true }).isDisabled(), true);
     await page.getByLabel("Address", { exact: true }).fill("Do not share this destination");
+    await reviewMapIfNeeded(page);
     await page.getByRole("radio", { name: "Prepare Only", exact: true }).check();
     assert.equal(await page.getByLabel("Address", { exact: true }).count(), 0);
-    assert.equal(await page.getByRole("checkbox", { name: /Save as customer/ }).count(), 0);
+    assert.equal(await page.getByRole("checkbox", { name: /Also save this address and map for future orders/ }).count(), 0);
     let preview = await page.getByLabel("Message preview").inputValue();
     assert.match(preview, /^\*PREPARE ONLY\*/);
     await page.screenshot({ path: "/tmp/megadie-prepare-only-desktop.png", fullPage: true });
@@ -362,11 +515,13 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("radio", { name: "Prepare & Deliver", exact: true }).check();
     assert.equal(await page.getByLabel("Address", { exact: true }).inputValue(), "Do not share this destination");
     await page.getByLabel("Address", { exact: true }).fill("");
+    await reviewMapIfNeeded(page);
     await page.getByRole("radio", { name: "Prepare Only", exact: true }).check();
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     assert.equal(state.order.preparationMode, "prepare_only");
-    assert.equal(state.order.resolvedDelivery.details.address, "");
+    // Packing-only saves leave hidden delivery edits out of the request.
+    assert.equal(state.order.resolvedDelivery.details.address, details.address);
     assert.doesNotMatch(await page.evaluate(() => window.__copies[0]), /DELIVER|Address|Map|maps.app/);
     await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
@@ -379,14 +534,16 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     state.customer.deliveryGoogleMapsUrl = "https://maps.app.goo.gl/default";
     await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
-    const checkbox = page.getByRole("checkbox", { name: /Save as customer's default location/ });
+    const checkbox = page.getByRole("checkbox", { name: /Also save this address and map for future orders/ });
     assert.equal(await checkbox.isChecked(), false);
-    await page.getByRole("button", { name: "Use customer's default", exact: true }).click();
+    await page.getByRole("button", { name: "Use client’s default", exact: true }).click();
     assert.equal(await page.getByLabel("Address", { exact: true }).inputValue(), "LIVE-PROFILE-ADDRESS");
     assert.equal(await page.getByLabel("Google Maps location").inputValue(), "https://maps.app.goo.gl/default");
     assert.equal(state.requests.filter((r) => r.method === "PUT").length, 0);
     await page.getByLabel("Address", { exact: true }).fill("New usual address");
+    await reviewMapIfNeeded(page);
     await checkbox.check();
+    await reviewMapIfNeeded(page);
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 1);
     const write = state.requests.find((r) => r.method === "PUT");
@@ -398,6 +555,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await page.getByRole("dialog").waitFor();
     assert.equal(await checkbox.isChecked(), false);
     await page.getByLabel("Address", { exact: true }).fill("One-off delivery");
+    await reviewMapIfNeeded(page);
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.waitForFunction(() => window.__copies.length === 2);
     assert.equal(state.customer.address, "New usual address");
@@ -408,7 +566,9 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
     await page.getByLabel("Address", { exact: true }).fill("My new default");
-    await page.getByRole("checkbox", { name: /Save as customer's default location/ }).check();
+    await reviewMapIfNeeded(page);
+    await page.getByRole("checkbox", { name: /Also save this address and map for future orders/ }).check();
+    await reviewMapIfNeeded(page);
     state.customer.address = "Other admin's default";
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.getByText("Customer default location changed. Reload details and review before saving.").first().waitFor();
@@ -417,7 +577,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     page.once("dialog", (dialog) => dialog.accept());
     await page.getByRole("button", { name: "Reload details" }).click();
     await page.waitForFunction(() => document.querySelector("#courier-address")?.value === "Order-only address");
-    await page.getByRole("button", { name: "Use customer's default", exact: true }).click();
+    await page.getByRole("button", { name: "Use client’s default", exact: true }).click();
     assert.equal(await page.getByLabel("Address", { exact: true }).inputValue(), "Other admin's default");
   });
 
@@ -425,8 +585,9 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     const { page, state } = await fixture(t);
     await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
-    const checkbox = page.getByRole("checkbox", { name: /Save as customer's default location/ });
+    const checkbox = page.getByRole("checkbox", { name: /Also save this address and map for future orders/ });
     await checkbox.check();
+    await reviewMapIfNeeded(page);
     await page.evaluate(() => { window.__copyFailure = true; });
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.getByRole("dialog").getByRole("button", { name: "Copy", exact: true }).waitFor();
@@ -442,7 +603,7 @@ test("order delivery browser flow", { timeout: 120000 }, async (t) => {
     const { page, state } = await fixture(t);
     await openLegacyPreparation(page);
     await page.getByRole("dialog").waitFor();
-    await page.getByRole("checkbox", { name: /Save as customer's default location/ }).check();
+    await page.getByRole("checkbox", { name: /Also save this address and map for future orders/ }).check();
     state.failSheetAfterSave = true;
     await page.getByRole("button", { name: "Save & Copy", exact: true }).click();
     await page.getByText("Could not refresh the sheet. Reload details before copying final instructions.").first().waitFor();

@@ -12,7 +12,7 @@ import OrderAllocation from "../models/orderAllocationModel.js";
 import { logInventoryMovement } from "../utils/inventoryMovement.js";
 import { applySlotOccupancyDelta } from "../utils/slotOccupancy.js";
 import { getAvailabilityTotalsByProduct } from "../utils/quoteAvailability.js";
-import { deliveryRevisionFilter, getCustomerDeliveryDefaults, resolveOrderDelivery } from "../utils/orderDelivery.js";
+import { deliveryRevisionFilter, getCustomerDeliveryDefaults, getCustomerLocation, resolveOrderDelivery } from "../utils/orderDelivery.js";
 import { lockStock } from "../utils/orderReservations.js";
 import { packingStockCheckCounts, stockChecksNeededFilter } from '../utils/packingStockReports.js';
 import { ADMIN_LIST_WORK, adminOrderListPipeline, adminListWorkExpression, strictPaymentDueInvoiceFilter } from '../utils/adminOrderList.js';
@@ -821,6 +821,7 @@ export const getOrderById = asyncHandler(async (req, res) => {
   const payload = isAdmin ? order.toObject() : sanitizeOrderForClient(order);
   if (isAdmin) payload.stockChecksPending = (await packingStockCheckCounts([order._id])).get(String(order._id)) || 0;
   payload.resolvedDelivery = resolveOrderDelivery(order);
+  if (isAdmin) payload.customerLocation = getCustomerLocation(order.user);
 
   res.status(200).json({
     success: true,

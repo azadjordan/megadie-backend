@@ -3,6 +3,7 @@ import { deliveryWorkerId } from './deliveryAssignmentState.js';
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
+import { saveCustomerLocation } from "./customerLocation.js";
 import Slot from "../models/slotModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
@@ -10,7 +11,7 @@ import Invoice from "../models/invoiceModel.js";
 import { transaction, lockOrder, lockStock, recomputeAllocationStatus, ReservationError } from "./orderReservations.js";
 import { reservationId as id, isReserved, buildOrderReservationPlan } from "./orderReservationPlan.js";
 import { packingSummary, packingUnitSummary, packingReadyToFinish, packingUnassignLockReason } from "./packingState.js";
-import { buildCartonLabel, resolveOrderDelivery, validatePreparationMode, validateDeliveryDetails, getCustomerLocation, normalizeDeliveryDetails, getCustomerDeliveryDefaults } from "./orderDelivery.js";
+import { buildCartonLabel, resolveOrderDelivery, validatePreparationMode, validateDeliveryDetails, getCustomerLocation, normalizeDeliveryDetails, getCustomerDeliveryDefaults, validateLocationChange } from "./orderDelivery.js";
 import { logInventoryMovement } from "./inventoryMovement.js";
 import { orderItemsLockReason } from "./orderItemChanges.js";
 import { activePackingHelp, resolvePackingHelp } from "./packingHelpState.js";
@@ -124,11 +125,12 @@ export async function getPackingView(orderId, actor, session = null) {
     deliveryState: deliveryStockLockReason(order) ? (order.deliveryMovement?.returnedAt ? "returned" : order.deliveryMovement?.method === "courier" ? "courier" : "company") : null,
     summary, items: [...products.values()], problems,
     canPack: !problems.length && packingReadyToFinish(order, rows),
-    ...(actor.isAdmin ? { deliveryWorker: (order.deliveryWorker === undefined ? (order.preparationMode === 'prepare_deliver' ? order.packingWorker : null) : order.deliveryWorker) ? { id: deliveryWorkerId(order), name: (order.deliveryWorker || order.packingWorker)?.name, enabled: Boolean((order.deliveryWorker || order.packingWorker)?.isWorker) } : null, reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: deliveryStockLockReason(order) || packingPublicationLockReason(order, hasInvoice), reopenLockReason: deliveryStockLockReason(order) || packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
+    ...(actor.isAdmin ? { customerId: id(order.user), deliveryWorker: (order.deliveryWorker === undefined ? (order.preparationMode === 'prepare_deliver' ? order.packingWorker : null) : order.deliveryWorker) ? { id: deliveryWorkerId(order), name: (order.deliveryWorker || order.packingWorker)?.name, enabled: Boolean((order.deliveryWorker || order.packingWorker)?.isWorker) } : null, reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: deliveryStockLockReason(order) || packingPublicationLockReason(order, hasInvoice), reopenLockReason: deliveryStockLockReason(order) || packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
   };
 }
 
-export async function sendToWorker({ orderId, actor, expectedRevision, workerId, preparationMode, deliveryDetails, expectedDeliveryRevision, saveCustomerLocation = false, expectedCustomerLocation }) {
+export async function sendToWorker({ orderId, actor, expectedRevision, workerId, preparationMode, deliveryDetails, expectedDeliveryRevision, saveCustomerLocation: saveDefault = false, expectedCustomerLocation, confirmedMapLocation }) {
+  if (typeof saveDefault !== "boolean") throw new ReservationError("saveCustomerLocation must be a boolean.", 400);
   if (!validId(workerId)) throw new ReservationError("Select a worker account.", 400);
   let mode;
   try { mode = validatePreparationMode(preparationMode); validateDeliveryDetails(deliveryDetails); }
@@ -141,12 +143,12 @@ export async function sendToWorker({ orderId, actor, expectedRevision, workerId,
     const publicationReason = packingPublicationLockReason(order, Boolean(order.invoice || await Invoice.exists({ order: order._id }).session(session)));
     if (publicationReason) throw new ReservationError(publicationReason);
     if ((order.deliveryRevision || 0) !== expectedDeliveryRevision) throw new ReservationError("Order instructions changed. Reload before sending.");
-    const customer = order.deliveryDetails == null || saveCustomerLocation ? await User.findById(order.user).session(session) : null;
+    const customer = order.deliveryDetails == null ? await User.findById(order.user).session(session) : null;
     const baseline = order.deliveryDetails == null ? getCustomerDeliveryDefaults(customer) : normalizeDeliveryDetails(order.deliveryDetails);
     // Omitted fields preserve the order's existing instructions, including when
     // an older client sends only address/map/notes. Explicit empty strings clear.
     let details;
-    try { details = validateDeliveryDetails({ ...baseline, ...deliveryDetails }); }
+    try { details = validateDeliveryDetails({ ...baseline, ...deliveryDetails }); validateLocationChange(baseline, details, confirmedMapLocation); }
     catch (error) { throw new ReservationError(error.message, 400); }
     if (mode === 'prepare_deliver' && !details.address && !details.googleMapsUrl) throw new ReservationError('Add an address or map for Prepare & Deliver.', 400);
     const worker = await User.findOneAndUpdate({ _id: workerId, isWorker: true }, { $inc: { staffRevision: 1 } }, { new: true, session });
@@ -161,13 +163,8 @@ export async function sendToWorker({ orderId, actor, expectedRevision, workerId,
     if (plan.changes.length || order.orderItems.some(item => rows.filter(row => isReserved(row) && id(row.product) === id(item.product)).reduce((sum, row) => sum + row.qty, 0) < item.qty)) issues.push("Reserve every ordered quantity before sending to a worker.");
     if (rows.some(row => isReserved(row) && row.qty > (row.pickedQty || 0) && stock.find(s => id(s.product) === id(row.product) && id(s.slot) === id(row.slot))?.slot?.isActive === false)) issues.push("A reserved location is inactive. Review the reservations.");
     if (issues.length) throw new ReservationError(issues.join(" "));
-    if (saveCustomerLocation) {
-      if (mode !== "prepare_deliver" || !expectedCustomerLocation) throw new ReservationError("Reload the customer's location before updating its default.", 400);
-      if (!customer) throw new ReservationError("Customer not found.", 404);
-      const old = getCustomerLocation(customer);
-      if (old.address !== expectedCustomerLocation.address || old.googleMapsUrl !== expectedCustomerLocation.googleMapsUrl) throw new ReservationError("Customer default location changed. Reload before saving.");
-      customer.address = details.address; customer.deliveryGoogleMapsUrl = details.googleMapsUrl;
-      await customer.save({ session });
+    if (saveDefault) {
+      await saveCustomerLocation({ customerId: order.user, details, expectedCustomerLocation, confirmedMapLocation, session });
     }
     const reassigned = order.packingSentAt && id(order.packingWorker) !== workerId;
     activity(order, current, !order.packingSentAt ? "SENT" : reassigned ? "REASSIGNED" : "INSTRUCTIONS_SAVED", { note: worker.name });

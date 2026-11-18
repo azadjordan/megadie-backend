@@ -3,11 +3,12 @@
 Status: implemented and locally verified; merge/push to main authorized. No data migration is required.
 Reviewed: 2026-11-02. This version replaces the first plan.
 Branch in both repositories: `feat/order-delivery-details`.
+Current location saving and concurrency rules: [shared client location rules](packing-delivery-contact.md#shared-client-location-rules-2026-11-18).
 Companion: [frontend plan](../../megadie-frontend-v2/docs/order-delivery-details-plan.md).
 
 ## 1. Goal and scope
 
-Keep two delivery-data owners: a customer has usual delivery details, and an order has its own saved destination. Courier and Prepare & Deliver use the same order destination. Editing an order never updates the customer's account or other orders. Editing customer defaults affects future orders, not saved destinations. Internal staff already know the single AE1 store; its address/contact details do not belong in this staff message or require new storage in this feature.
+Keep two delivery-data owners: a customer has usual delivery details, and an order has its own saved destination. Courier and Prepare & Deliver use the same order destination. Editing an order updates only that order unless an admin explicitly opts to save its address and map as the client default. Other existing orders keep their destinations. Editing customer defaults affects future orders, not saved destinations. Internal staff already know the single AE1 store; its address/contact details do not belong in this staff message or require new storage in this feature.
 
 This is an address-and-copy feature. It does not change quoting, pricing, invoices, payments, reservations, order statuses, or stock deduction. Copying is read-only. No address book, driver management, route planning, geocoding, map SDK, or new dependency is required.
 

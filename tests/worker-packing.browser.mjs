@@ -775,7 +775,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.getByRole("button", { name: "Update Info", exact: true }).click();
     await page.getByText("User info updated.", { exact: true }).waitFor();
     assert.equal(state.writes[0].body.isWorker, true);
-    assert.equal(state.writes[0].body.isAdmin, false);
+    assert.deepEqual(state.writes[0].body, { isWorker: true });
+    assert.equal(state.account.isAdmin, false);
   });
   await t.test("workers receive the inactivity warning and can renew the same staff session", async t => {
     const { page, state } = await fixture(t);

@@ -16,6 +16,7 @@ import Product from "../models/productModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import { errorHandler } from "../middleware/errorMiddleware.js";
+import { saveCustomerProfile } from "../utils/customerLocation.js";
 
 const uri = process.env.DELIVERY_TEST_URI || (process.env.DELIVERY_TEST_URI_FILE ? readFileSync(process.env.DELIVERY_TEST_URI_FILE, "utf8").trim() : "");
 
@@ -60,7 +61,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
   await t.test("new order captures defaults and later profile changes do not alter it", async () => {
     assert.equal(created.body.deliveryDetails.address, "Default destination");
     assert.equal(created.body.deliveryRevision, 1);
-    const update = await api("/users/account/profile", { as: customer, method: "PUT", body: { address: "New default", deliveryContactName: "Usual desk", deliveryPhoneNumber: "shared-recipient" } });
+    const update = await api("/users/account/profile", { as: customer, method: "PUT", body: { address: "New default", expectedCustomerLocation: { address: "Default destination", googleMapsUrl: "" }, deliveryContactName: "Usual desk", deliveryPhoneNumber: "shared-recipient" } });
     assert.equal(update.status, 200);
     assert.equal(update.body.data.phoneNumber, "client-phone");
     const read = await api(`/orders/${orderId}`);
@@ -73,6 +74,7 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     await api(`/users/${other._id}`, { method: "PUT", body: { deliveryPhoneNumber: "shared-recipient" } });
     assert.equal((await User.findById(other._id)).phoneNumber, "other-phone");
   });
+
   await t.test("fresh sheet is read-only, compact labeled, correctly sorted, and contains no internal data", async () => {
     const before = JSON.stringify(await Order.findById(orderId).lean());
     const result = await api(`/orders/${orderId}/fulfillment-sheet`);
@@ -225,6 +227,60 @@ test("delivery API integration on an isolated local replica set", { skip: !uri, 
     assert.equal((await api(path, { method: "PUT", body: { expectedRevision: 2, deliveryDetails: { address: "One-off address" } } })).status, 200);
     assert.equal((await Order.findById(task._id)).preparationMode, "prepare_deliver");
     assert.equal((await User.findById(customer._id)).address, "Changed by another admin");
+  });
+
+  await t.test("courier-only saves can update defaults atomically without changing packing assignment or other orders", async () => {
+    const before = await User.findById(customer._id).lean();
+    const originalOtherOrder = (await Order.findById(orderId)).deliveryDetails.toObject();
+    const task = await Order.create({ user: customer._id, status: "Shipping", packingSentAt: new Date(), packedAt: new Date(), packingWorker: admin._id,
+      orderItems: [{ product, sku: "SKU1", qty: 1, unitPrice: 1 }], deliveryDetails: newDetails, deliveryRevision: 1 });
+    const next = { ...newDetails, address: "Future warehouse", googleMapsUrl: "https://maps.app.goo.gl/warehouse" };
+    const request = { expectedRevision: 1, deliveryDetails: next, saveCustomerLocation: true,
+      expectedCustomerLocation: { address: before.address || "", googleMapsUrl: before.deliveryGoogleMapsUrl || "" } };
+    assert.equal((await api(`/orders/${task._id}/delivery-details`, { method: "PUT", body: request })).status, 200);
+    const saved = await Order.findById(task._id);
+    assert.equal(saved.deliveryDetails.address, next.address);
+    assert.equal(String(saved.packingWorker), String(admin._id));
+    const profile = await User.findById(customer._id);
+    assert.equal(profile.address, next.address);
+    for (const key of ["phoneNumber", "deliveryContactName", "deliveryPhoneNumber", "deliveryNotes"]) assert.equal(profile[key], before[key]);
+    assert.deepEqual((await Order.findById(orderId)).deliveryDetails.toObject(), originalOtherOrder);
+    const stale = await api(`/orders/${task._id}/delivery-details`, { method: "PUT", body: { ...request, expectedRevision: 2, deliveryDetails: { ...next, address: "Stale", googleMapsUrl: "" } } });
+    assert.equal(stale.status, 409);
+    assert.equal((await Order.findById(task._id)).deliveryRevision, 2);
+    await Order.updateOne({ _id: task._id }, { $set: { status: "Delivered" } });
+    assert.equal((await api(`/orders/${task._id}/delivery-details`, { method: "PUT", body: { ...request, expectedRevision: 2 } })).status, 409);
+    assert.equal((await User.findById(customer._id)).address, next.address);
+  });
+
+  await t.test("profiles validate location pairs, reject stale forms, and require review of retained map pins", async () => {
+    const owner = await User.create({ name: "Location test", email: "location@test.invalid", phoneNumber: "location-phone", password: "test-password", approvalStatus: "Approved", address: "A", deliveryGoogleMapsUrl: "https://maps.app.goo.gl/a" });
+    const base = { address: "A", googleMapsUrl: "https://maps.app.goo.gl/a" };
+    const path = `/users/${owner._id}`;
+    assert.equal((await api(path, { method: "PUT", body: { address: "B" } })).status, 400);
+    assert.equal((await api(path, { method: "PUT", body: { address: "B", expectedCustomerLocation: base } })).status, 400);
+    assert.equal((await api(path, { method: "PUT", body: { deliveryGoogleMapsUrl: "http://maps.invalid", expectedCustomerLocation: base } })).status, 400);
+    assert.equal((await api(path, { method: "PUT", body: { address: "x".repeat(2001), deliveryGoogleMapsUrl: "", expectedCustomerLocation: base } })).status, 400);
+    const changed = { address: "B", deliveryGoogleMapsUrl: base.googleMapsUrl, confirmedMapLocation: true, expectedCustomerLocation: base };
+    assert.equal((await api(path, { method: "PUT", body: changed })).status, 200);
+    assert.equal((await api(path, { method: "PUT", body: { name: "Must not persist", address: "A", deliveryGoogleMapsUrl: base.googleMapsUrl, expectedCustomerLocation: base } })).status, 409);
+    assert.equal((await User.findById(owner._id)).name, "Location test");
+    assert.equal((await api(path, { method: "PUT", body: { name: "Unrelated change" } })).status, 200);
+    assert.equal((await User.findById(owner._id)).address, "B");
+    const expected = { address: "B", googleMapsUrl: base.googleMapsUrl };
+    assert.equal((await api("/users/account/profile", { as: owner, method: "PUT", body: { address: "C", expectedCustomerLocation: expected } })).status, 400);
+    assert.equal((await api("/users/account/profile", { as: owner, method: "PUT", body: { address: "C", deliveryGoogleMapsUrl: "", expectedCustomerLocation: expected } })).status, 200);
+    assert.equal((await User.findById(owner._id)).deliveryGoogleMapsUrl, "");
+
+    // Both documents were read before a competing save. The database predicate,
+    // rather than only the initial comparison, must reject the stale write.
+    const first = await User.findById(owner._id), second = await User.findById(owner._id);
+    const old = { address: "C", googleMapsUrl: "" };
+    await saveCustomerProfile(second, { address: "D", deliveryGoogleMapsUrl: "", expectedCustomerLocation: old });
+    first.name = "Racing name";
+    await assert.rejects(saveCustomerProfile(first, { address: "E", deliveryGoogleMapsUrl: "", expectedCustomerLocation: old }), error => error.statusCode === 409);
+    assert.equal((await User.findById(owner._id)).address, "D");
+    assert.equal((await User.findById(owner._id)).name, "Unrelated change");
   });
 
 });

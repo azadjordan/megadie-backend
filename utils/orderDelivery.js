@@ -24,6 +24,13 @@ export const getCustomerLocation = (user) => ({
   address: clean(user?.address), googleMapsUrl: clean(user?.deliveryGoogleMapsUrl),
 });
 
+export function validateLocationChange(previous, next, confirmedMapLocation) {
+  if (clean(previous?.address) !== clean(next?.address) && clean(previous?.googleMapsUrl)
+    && clean(previous.googleMapsUrl) === clean(next?.googleMapsUrl) && confirmedMapLocation !== true) {
+    throw new Error("The address changed. Review the map pin and confirm it is correct, or update or clear the map link.");
+  }
+}
+
 export function validateAssignedTo(value) {
   if (typeof value === "string" && !value.trim()) {
     throw new Error("Assigned To is required.");

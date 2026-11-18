@@ -1,4 +1,5 @@
 //megadie-backend/middleware/errorMiddleware.js
+import { CustomerLocationError } from "../utils/customerLocation.js";
 const notFound = (req, res, next) => {
   const error = new Error(`Not Found - ${req.originalUrl}`);
   res.status(404);
@@ -9,6 +10,7 @@ const errorHandler = (err, req, res, next) => {
   // If a handler set a status already, use it; otherwise default to 500
   let statusCode = res.statusCode && res.statusCode !== 200 ? res.statusCode : 500;
   let message = err.message || "Server error";
+  if (err instanceof CustomerLocationError) statusCode = err.statusCode;
 
   // Log (avoid sensitive info in production)
   const logPayload = {
