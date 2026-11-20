@@ -40,3 +40,9 @@ Targeted read test:
 The real-login packing-help test now also covers filtered-list return context,
 partial payment, delivery while partly paid, finalization and retained stock
 reports. Existing worker/deletion, item editing and delivery/copy checks pass.
+
+Invoice timing is independent of packing (20 November 2026). Fully reserved,
+unassigned orders recommend Send to worker with or without an invoice. Active
+picking recommends View packing and also offers Create invoice in More when
+eligible. Invoice presence does not label an order manually prepared or awaiting
+delivery. Manual delivery actions remain available with readiness confirmation.

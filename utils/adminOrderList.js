@@ -70,7 +70,7 @@ export function adminOrderListPipeline(filter = {}) {
       { case: and(shipping, out), then: 'mark-delivered' },
       { case: and(shipping, held), then: 'mark-out-for-delivery' },
       { case: and(shipping, not(allocated)), then: 'reserve-stock' },
-      { case: and(shipping, not(published), not(invoice)), then: 'send-worker' },
+      { case: and(shipping, not(published), not(packed)), then: 'send-worker' },
       { case: and(shipping, published, not(packed)), then: 'view-packing' },
       { case: and(shipping, not(invoice)), then: 'create-invoice' },
       { case: shipping, then: 'mark-out-for-delivery' },

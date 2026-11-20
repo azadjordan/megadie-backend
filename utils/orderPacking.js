@@ -15,7 +15,6 @@ import { buildCartonLabel, resolveOrderDelivery, validatePreparationMode, valida
 import { logInventoryMovement } from "./inventoryMovement.js";
 import { orderItemsLockReason } from "./orderItemChanges.js";
 import { activePackingHelp, resolvePackingHelp } from "./packingHelpState.js";
-import { packingPublicationLockReason, packingReopenLockReason } from './packingInvoicePolicy.js';
 
 const validId = value => typeof value === "string" && mongoose.isValidObjectId(value);
 const active = { $or: [{ status: "Reserved" }, { status: { $exists: false } }] };
@@ -107,7 +106,8 @@ export async function getPackingView(orderId, actor, session = null) {
   }
   if (order.status !== "Shipping") summary.needsHelp = false;
   const delivery = resolveOrderDelivery(order);
-  const hasInvoice = actor.isAdmin && Boolean(order.invoice || await Invoice.exists({ order: order._id }).session(session));
+  const billingReference = actor.isAdmin ? order.invoice || await Invoice.exists({ order: order._id }).session(session) : null;
+  const hasInvoice = Boolean(billingReference);
   return {
     orderId: id(order), orderNumber: order.orderNumber, status: order.status,
     customerName: order.user?.name || "Unknown client",
@@ -125,7 +125,7 @@ export async function getPackingView(orderId, actor, session = null) {
     deliveryState: deliveryStockLockReason(order) ? (order.deliveryMovement?.returnedAt ? "returned" : order.deliveryMovement?.method === "courier" ? "courier" : "company") : null,
     summary, items: [...products.values()], problems,
     canPack: !problems.length && packingReadyToFinish(order, rows),
-    ...(actor.isAdmin ? { customerId: id(order.user), deliveryWorker: (order.deliveryWorker === undefined ? (order.preparationMode === 'prepare_deliver' ? order.packingWorker : null) : order.deliveryWorker) ? { id: deliveryWorkerId(order), name: (order.deliveryWorker || order.packingWorker)?.name, enabled: Boolean((order.deliveryWorker || order.packingWorker)?.isWorker) } : null, reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), sendLockReason: deliveryStockLockReason(order) || packingPublicationLockReason(order, hasInvoice), reopenLockReason: deliveryStockLockReason(order) || packingReopenLockReason(hasInvoice), unassignLockReason: packingUnassignLockReason(order, rows, hasInvoice), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
+    ...(actor.isAdmin ? { customerId: id(order.user), deliveryWorker: (order.deliveryWorker === undefined ? (order.preparationMode === 'prepare_deliver' ? order.packingWorker : null) : order.deliveryWorker) ? { id: deliveryWorkerId(order), name: (order.deliveryWorker || order.packingWorker)?.name, enabled: Boolean((order.deliveryWorker || order.packingWorker)?.isWorker) } : null, reports, reportsVersion: order.packingReportsRevision || 0, stockChecksPending: reports.filter(report => !report.checkedAt).length, activity: history, editItemsLockReason: await orderItemsLockReason(order, session), hasInvoice, invoiceId: id(billingReference), sendLockReason: deliveryStockLockReason(order), reopenLockReason: deliveryStockLockReason(order), unassignLockReason: packingUnassignLockReason(order, rows), deliveryDetails: delivery.details || {}, customerLocation: getCustomerLocation(order.user), deliverySavedToOrder: delivery.savedToOrder } : {}),
   };
 }
 
@@ -140,8 +140,6 @@ export async function sendToWorker({ orderId, actor, expectedRevision, workerId,
     const current = await lockActor(actor, session);
     if (!current.isAdmin) throw new ReservationError("Only admins can assign orders.", 403);
     const order = await lockOrder(orderId, session, { expectedRevision, allowPacked: true });
-    const publicationReason = packingPublicationLockReason(order, Boolean(order.invoice || await Invoice.exists({ order: order._id }).session(session)));
-    if (publicationReason) throw new ReservationError(publicationReason);
     if ((order.deliveryRevision || 0) !== expectedDeliveryRevision) throw new ReservationError("Order instructions changed. Reload before sending.");
     const customer = order.deliveryDetails == null ? await User.findById(order.user).session(session) : null;
     const baseline = order.deliveryDetails == null ? getCustomerDeliveryDefaults(customer) : normalizeDeliveryDetails(order.deliveryDetails);
@@ -195,8 +193,7 @@ export async function unassignPacking({ orderId, actor, expectedRevision, expect
     const order = await lockOrder(orderId, session, { expectedRevision });
     if ((order.deliveryRevision || 0) !== expectedDeliveryRevision) throw new ReservationError('Order instructions changed. Reload before removing the assignment.');
     const rows = await allocationsFor(orderId, session);
-    const hasInvoice = Boolean(order.invoice || await Invoice.exists({ order: order._id }).session(session));
-    const reason = packingUnassignLockReason(order, rows, hasInvoice);
+    const reason = packingUnassignLockReason(order, rows);
     if (reason) throw new ReservationError(reason);
     activity(order, current, 'ASSIGNMENT_REMOVED', { note: `${order.assignedTo || 'Worker'} — manual preparation; worker stopped and goods in original slots confirmed.` });
     if (order.deliveryWorker === undefined) order.deliveryWorker = deliveryWorkerId(order) || null;
@@ -223,8 +220,6 @@ export async function changePacking({ orderId, actor, expectedRevision, action, 
     assertAccess(order, current);
     if (action === "reopen") {
       if (!current.isAdmin) throw new ReservationError("Only an admin can reopen packing.", 403);
-      const reopenReason = packingReopenLockReason(Boolean(order.invoice || await Invoice.exists({ order: order._id }).session(session)));
-      if (reopenReason) throw new ReservationError(reopenReason);
       order.packedAt = undefined; order.packedBy = undefined;
       activity(order, current, "REOPENED");
     } else if (action === "packed") {

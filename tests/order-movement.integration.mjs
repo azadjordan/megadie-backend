@@ -149,7 +149,7 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
       const before = await Order.findById(f.order._id).select('+deliveryHistory').lean();
       const details = { contactName: 'New receiver', phoneNumber: '+971501234567', secondaryPhoneNumber: '041234567', address: 'Order address - ' + stage, googleMapsUrl: 'https://maps.app.goo.gl/updated', notes: 'Updated receiving instructions' };
       const path = `/orders/${f.order._id}/delivery-details`;
-      const body = { expectedRevision: before.deliveryRevision, deliveryDetails: details };
+      const body = { expectedRevision: before.deliveryRevision, deliveryDetails: details, confirmedMapLocation: true };
       expectOK(await api(path, { method: 'PUT', body }));
       const after = await Order.findById(f.order._id).select('+deliveryHistory').lean();
       assert.deepEqual(after.deliveryDetails, details);

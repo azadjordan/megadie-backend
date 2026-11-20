@@ -1,30 +1,37 @@
 # Packing, invoicing and stock-report review
 
-The normal live-packing sequence is reserve, send to worker, pick/resolve
-shortages, mark Packed, invoice, then hand over/deliver using the existing
-controls. These changes apply to live worker packing and use existing collections.
+The physical flow is reserve, assign or prepare manually, pick/resolve shortages,
+mark Packed for worker tasks, then hand over/deliver. Invoicing follows its own
+timing and uses the existing collections.
 
-## Invoice timing
+## Invoice timing (updated 2026-11-20)
 
-Order invoices are rejected while `packingSentAt` exists and `packedAt` does not.
-Picking every quantity alone does not unlock invoicing: the worker still checks
-and packs the carton. The admin details page shows the reason beside the disabled
-invoice action. The order-list primary action guides packed live orders without
-an invoice to Invoice before Deliver. Existing delivery permissions remain.
+Invoices can be created for eligible Processing, Shipping or Delivered orders
+before assignment, during picking, or after packing. An invoice alone does not
+block assignment, reassignment, reopening in store, or assignment removal.
+Reopening preserves picked quantities; removal still requires zero saved picks
+and confirmation that the worker stopped and goods are in their original slots.
+Existing custody, delivery and stock-finalization locks remain in force.
 
-First publication rejects an already linked or orphaned order invoice, before
-worker assignment, stock reservations or saved instructions can change. The
-assignment dialog explains the billing conflict and links to order billing.
-It also explains the expected sequence before publication. Existing unpublished
-orders retain their legacy invoicing/preparation paths. Existing published
-invoiced tasks remain readable and can finish picking; their financial editing
-lock still applies. No invoice or payment is automatically removed or changed.
+Billed products, ordered quantities, prices and charges stay locked. Workers can
+report shortages and switch source slots for the same product without changing
+the bill. If the client accepts fewer units, removal or substitution, the admin
+reviews billing through the existing invoice screen before changing those order
+lines. Existing payment/deletion protections apply; no bill is automatically
+cancelled or adjusted. Admin packing and item-edit restrictions link to billing.
 
-An invoiced packed task cannot be reopened until billing is resolved. Invoicing,
-publication, item changes and reopening serialize on the same Order document.
-Invoice creation uses the existing retrying transaction helper and increments
-the reservation revision; failed attempts roll back the revision and invoice.
-A concurrent publication/invoice or reopen/invoice pair cannot both succeed.
+Invoicing does not mark anything Packed or Delivered and does not deduct stock.
+A fully reserved unassigned order offers Send to worker even with an invoice;
+manual preparation and its physical-readiness confirmations remain available.
+Invoice presence is not evidence of manual preparation or readiness for delivery.
+To invoice remains the recommended-next-step queue, while No invoice includes
+other uninvoiced orders such as those still being packed.
+
+Invoice creation, item changes and packing updates still serialize on the Order
+transaction/revision fence. A stale operation reloads before retrying; invoicing
+and assignment or reopening can both finish. Duplicate invoices remain blocked,
+and simultaneous item editing cannot leave an invoice mismatched with the order.
+Creating or deleting an invoice refreshes affected order/packing caches.
 
 ## Stock-report review
 

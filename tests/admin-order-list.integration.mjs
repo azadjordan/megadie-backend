@@ -40,6 +40,7 @@ test('admin order list facts, shortcuts and legacy filters agree across all page
   await fixture('RESERVE', 'reserve-stock', { allocated: false });
   await fixture('ASSIGN', 'send-worker');
   await fixture('PICKING', 'view-packing', { published: true });
+  await fixture('PICKING-INVOICED', 'view-packing', { published: true, billed: true, balance: 0, payment: 'Paid' });
   await fixture('WORKER-SHORTAGE', 'view-packing', { published: true, short: true, report: true });
   await fixture('HELP-A', 'review-help', { published: true, short: true, help: true, report: true });
   await fixture('HELP-B', 'review-help', { published: true, short: true, help: true, missingAllocationStatus: true });
@@ -53,7 +54,7 @@ test('admin order list facts, shortcuts and legacy filters agree across all page
   await fixture('CANCELLED-INVOICE', 'open-order', { billed: true, cancelledInvoice: true });
   await fixture('BROKEN-INVOICE', 'open-order', { invoiceMissing: true });
   await fixture('ZERO', 'mark-out-for-delivery', { published: true, packed: true, billed: true, balance: 0 });
-  await fixture('LEGACY-INVOICE', 'mark-out-for-delivery', { billed: true, payment: 'PartiallyPaid', balance: 500 });
+  await fixture('LEGACY-INVOICE', 'send-worker', { billed: true, payment: 'PartiallyPaid', balance: 500 });
   await fixture('FINALIZED-PROCESSING', 'open-order', { status: 'Processing', finalized: true });
   await fixture('PACKED-RESERVATIONS', 'open-order', { published: true, packed: true, allocated: false });
   await fixture('BAD-DELIVERED', 'open-order', { status: 'Delivered', published: true });
@@ -98,6 +99,7 @@ test('admin order list facts, shortcuts and legacy filters agree across all page
   const noInvoice = await get('?work=noInvoice&limit=100'); assert.ok(noInvoice.body.data.some(row => row.orderNumber === 'PICKING'));
   const oldUnpaid = await get('?paymentStatus=notFullyPaid&limit=100'); assert.ok(oldUnpaid.body.data.some(row => row.orderNumber === 'ASSIGN')); assert.ok(oldUnpaid.body.data.some(row => row.orderNumber === 'ZERO'));
   const oldStock = await get('?work=needsStockDeduction&limit=100'); assert.ok(oldStock.body.data.some(row => row.orderNumber === 'DELIVERED-NO-INVOICE'));
-  const combined = await get('?work=toDeliver&paymentStatus=paymentDue&search=LEGACY'); assert.equal(combined.body.pagination.total, 1); assert.equal(combined.body.data[0].orderNumber, 'LEGACY-INVOICE');
+  const combined = await get('?work=toDeliver&paymentStatus=paymentDue&search=LEGACY'); assert.equal(combined.body.pagination.total, 0);
+  const invoiceFirst = await get('?work=preparation&paymentStatus=paymentDue&search=LEGACY'); assert.equal(invoiceFirst.body.pagination.total, 1); assert.equal(invoiceFirst.body.data[0].listAction, 'send-worker');
   assert.equal((await get('', worker)).status, 403); assert.equal((await get('', customer)).status, 403);
 });

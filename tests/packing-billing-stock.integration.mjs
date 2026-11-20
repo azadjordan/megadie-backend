@@ -53,38 +53,103 @@ test('packing invoice timing and stock-report checks', { skip: !uri, timeout: 12
   const invoice = f => api('/invoices/from-order/' + f.order._id, { method: 'POST', body: { dueDate: '2030-01-01' } });
   const check = (f, reportId, data) => api(f.path + '/reports/' + reportId, { method: 'PATCH', body: data });
 
-  await t.test('live packing blocks invoices until Packed, including fully picked but unpacked orders', async () => {
-    const f = await fixture(), before = (await stored(f)).reservationRevision;
-    let result = await invoice(f); assert.equal(result.status, 409); assert.match(result.body.message, /mark the order Packed/);
-    assert.equal(await Invoice.countDocuments({}), 0); assert.equal((await stored(f)).reservationRevision, before);
-    ok(await action(f, 'pick', { pickedQty: 37 })); assert.equal((await invoice(f)).status, 409);
-    ok(await action(f, 'packed')); result = await invoice(f); ok(result, 201);
-    assert.equal(result.body.data.amountMinor, 9850); assert.equal(await Invoice.countDocuments({}), 1);
-    assert.equal((await invoice(f)).status, 400); assert.equal(await Invoice.countDocuments({}), 1);
+  await t.test('invoicing works before, during, and after packing without changing physical progress', async () => {
+    for (const phase of ['unassigned', 'assigned', 'partial', 'picked', 'packed']) {
+      const f = await fixture({ published: phase !== 'unassigned', packed: phase === 'packed' });
+      if (phase === 'partial' || phase === 'picked') ok(await action(f, 'pick', { pickedQty: phase === 'partial' ? 7 : 37 }));
+      const before = await stored(f), picked = (await OrderAllocation.findById(f.allocation._id)).pickedQty;
+      const result = await invoice(f); ok(result, 201);
+      assert.equal(result.body.data.amountMinor, 9850);
+      const after = await stored(f);
+      assert.equal(Boolean(after.packedAt), Boolean(before.packedAt), phase);
+      assert.equal(after.status, before.status);
+      assert.equal(after.stockFinalizedAt, undefined);
+      assert.equal(after.deliveryMovement, undefined);
+      assert.equal((await OrderAllocation.findById(f.allocation._id)).pickedQty, picked);
+      assert.equal((await SlotItem.findOne({ product: f.product })).qty, 37);
+      assert.equal((await invoice(f)).status, 400);
+      assert.equal(await Invoice.countDocuments({ order: f.order._id }), 1);
+    }
   });
-  await t.test('legacy invoicing remains available, but already invoiced orders cannot first enter live packing', async () => {
-    const f = await fixture({ published: false }); ok(await invoice(f), 201);
-    const result = await send(f); assert.equal(result.status, 409); assert.match(result.body.message, /Live packing must start before invoicing/);
-    const order = await stored(f); assert.equal(order.packingSentAt, undefined); assert.equal(order.packingWorker, undefined);
-    assert.ok((await view(f)).sendLockReason);
+  await t.test('an invoiced order can enter live packing while its billed items stay locked', async () => {
+    const f = await fixture({ published: false }), billed = await invoice(f); ok(billed, 201);
+    ok(await send(f));
+    let sheet = await view(f), order = await stored(f);
+    assert.ok(order.packingSentAt); assert.equal(String(order.invoice), billed.body.data._id);
+    assert.equal(sheet.sendLockReason, ''); assert.equal(sheet.hasInvoice, true);
+    assert.match(sheet.editItemsLockReason, /Invoice exists/);
+    // A missing order reference cannot bypass the item lock or create a second invoice.
     await Order.updateOne({ _id: order._id }, { $unset: { invoice: '' } });
-    assert.equal((await send(f)).status, 409); // An orphaned invoice link is still billing.
+    ok(await send(f)); sheet = await view(f);
+    assert.match(sheet.editItemsLockReason, /Invoice exists/);
+    assert.equal((await invoice(f)).status, 400);
+    assert.equal(await Invoice.countDocuments({ order: f.order._id }), 1);
   });
-  await t.test('invoice creation and first publication cannot both win a race', async () => {
+  await t.test('invoicing and assignment can both finish, with a fresh retry after any revision conflict', async () => {
     const f = await fixture({ published: false });
-    const [billed, sent] = await Promise.all([invoice(f), send(f)]);
-    assert.equal([billed, sent].filter(result => [200, 201].includes(result.status)).length, 1);
-    const order = await stored(f); assert.notEqual(Boolean(order.invoice), Boolean(order.packingSentAt));
-    assert.equal(await Invoice.countDocuments({ order: order._id }), order.invoice ? 1 : 0);
+    const [billed, sent] = await Promise.all([invoice(f), send(f)]); ok(billed, 201);
+    assert.ok([200, 409].includes(sent.status), JSON.stringify(sent));
+    if (sent.status === 409) ok(await send(f));
+    const order = await stored(f); assert.ok(order.invoice); assert.ok(order.packingSentAt);
+    assert.equal(await Invoice.countDocuments({ order: order._id }), 1);
+    assert.equal(await OrderAllocation.countDocuments({ order: order._id }), 1);
   });
-  await t.test('billing blocks reopening and an invoice/reopen race preserves the same rule', async () => {
+  await t.test('an invoiced packed order can reopen in store, including concurrent invoicing', async () => {
     let f = await fixture({ packed: true }); ok(await invoice(f), 201);
-    const result = await action(f, 'reopen', {}, admin); assert.equal(result.status, 409); assert.match(result.body.message, /Resolve its billing/);
-    assert.ok((await view(f)).reopenLockReason); assert.ok((await stored(f)).packedAt);
+    ok(await action(f, 'reopen', {}, admin));
+    assert.equal((await stored(f)).packedAt, undefined);
+    assert.equal((await view(f)).reopenLockReason, '');
+    assert.equal((await OrderAllocation.findById(f.allocation._id)).pickedQty, 37);
+    assert.equal((await Invoice.findOne({ order: f.order._id })).amountMinor, 9850);
     f = await fixture({ packed: true });
-    const [billed, reopened] = await Promise.all([invoice(f), action(f, 'reopen', {}, admin)]);
-    assert.equal([billed, reopened].filter(result => [200, 201].includes(result.status)).length, 1);
-    const order = await stored(f); if (order.invoice) assert.ok(order.packedAt); else assert.equal(order.packedAt, undefined);
+    const [billed, reopened] = await Promise.all([invoice(f), action(f, 'reopen', {}, admin)]); ok(billed, 201);
+    assert.ok([200, 409].includes(reopened.status));
+    if (reopened.status === 409) ok(await action(f, 'reopen', {}, admin));
+    const order = await stored(f); assert.ok(order.invoice); assert.equal(order.packedAt, undefined);
+  });
+  await t.test('invoiced shortages allow source replacement but cannot change billed quantities or dispatch incomplete goods', async () => {
+    const f = await fixture(); ok(await invoice(f), 201);
+    ok(await action(f, 'problem', { pickedQty: 7 }));
+    assert.equal((await action(f, 'packed')).status, 409);
+    const sheet = await view(f);
+    assert.equal((await api('/orders/' + f.order._id + '/items-preview', { method: 'POST', body: { expectedRevision: sheet.version, items: [{ key: 'line-0', qty: 7 }] } })).status, 409);
+    assert.equal((await api('/orders/' + f.order._id, { method: 'PUT', body: { deliveryCharge: 0 } })).status, 400);
+    assert.equal((await api('/orders/' + f.order._id + '/movement', { method: 'POST', body: { action: 'departed', method: 'company', handler: 'Owner', expectedRevision: sheet.version } })).status, 409);
+    assert.equal((await api('/orders/' + f.order._id + '/allocations/finalize', { method: 'POST' })).status, 409);
+    const target = await Slot.create({ store: 'AE1', unit: 'B', position: 2, cbm: 1000 });
+    await SlotItem.collection.insertOne({ product: f.product, slot: target._id, qty: 30, cbm: 30 });
+    ok(await action(f, 'replace', { slotId: String(target._id), qty: 30 }));
+    const replacement = await OrderAllocation.findOne({ order: f.order._id, slot: target._id });
+    ok(await action(f, 'pick', { allocationId: String(replacement._id), pickedQty: 30 }));
+    ok(await action(f, 'packed'));
+    assert.equal((await Invoice.findOne({ order: f.order._id })).amountMinor, 9850);
+    assert.equal((await stored(f)).orderItems[0].qty, 37);
+    assert.equal((await SlotItem.findOne({ product: f.product, slot: target._id })).qty, 30);
+  });
+  await t.test('removing an invoiced assignment keeps the invoice and requires the same physical return checks', async () => {
+    const f = await fixture(), billed = await invoice(f); ok(billed, 201);
+    ok(await action(f, 'pick', { pickedQty: 7 }));
+    const remove = async () => { const sheet = await view(f); return api(f.path + '/unassign', { method: 'POST', body: { expectedRevision: sheet.version, expectedDeliveryRevision: sheet.deliveryRevision, confirmedPhysicalReturn: true } }); };
+    assert.equal((await remove()).status, 409);
+    ok(await action(f, 'correct', { pickedQty: 0, confirmedReturn: true }, admin));
+    ok(await remove());
+    const order = await stored(f); assert.equal(order.packingSentAt, undefined);
+    assert.equal(String(order.invoice), billed.body.data._id);
+    assert.equal((await Invoice.findById(order.invoice)).amountMinor, 9850);
+    assert.equal((await OrderAllocation.findById(f.allocation._id)).qty, 37);
+  });
+  await t.test('duplicate invoice races and simultaneous item edits preserve a single matching bill', async () => {
+    let f = await fixture();
+    const invoices = await Promise.all([invoice(f), invoice(f)]);
+    assert.deepEqual(invoices.map(r => r.status).sort(), [201, 400]);
+    assert.equal(await Invoice.countDocuments({ order: f.order._id }), 1);
+    f = await fixture(); const items = [{ key: 'line-0', qty: 7 }], sheet = await view(f);
+    const preview = await api('/orders/' + f.order._id + '/items-preview', { method: 'POST', body: { expectedRevision: sheet.version, items } }); ok(preview);
+    const [billed, edited] = await Promise.all([invoice(f), api('/orders/' + f.order._id + '/items', { method: 'PUT', body: { expectedRevision: sheet.version, token: preview.body.data.token, items } })]);
+    ok(billed, 201); assert.ok([200, 409].includes(edited.status));
+    const order = await stored(f), bill = await Invoice.findById(order.invoice);
+    assert.equal(bill.amountMinor, Math.round(order.totalPrice * 100));
+    assert.equal(order.orderItems[0].qty, edited.status === 200 ? 7 : 37);
   });
   await t.test('stock review changes no stock, picked counts, financial totals, worker revision or active help', async () => {
     const f = await fixture(); ok(await action(f, 'problem', { pickedQty: 7 }));

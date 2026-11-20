@@ -159,8 +159,8 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
     assert.equal((await OrderAllocation.findById(f.allocationId)).qty, 10);
   });
 
-  await t.test('withdrawal preserves completed-work and invoice safeguards', async () => {
-    for (const fields of [{ packedAt: new Date() }, { status: 'Delivered' }, { stockFinalizedAt: new Date() }, { invoice: new mongoose.Types.ObjectId() }]) {
+  await t.test('withdrawal preserves physical safeguards and leaves billing intact', async () => {
+    for (const fields of [{ packedAt: new Date() }, { status: 'Delivered' }, { stockFinalizedAt: new Date() }]) {
       const f = await fixture(); expectOK(await send(f));
       await Order.updateOne({ _id: f.order._id }, { $set: fields });
       const before = await view(f);
@@ -172,7 +172,8 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
     const f = await fixture(); expectOK(await send(f));
     const { default: Invoice } = await import('../models/invoiceModel.js');
     await Invoice.collection.insertOne({ order: f.order._id, status: 'Issued' });
-    assert.equal((await unassign(f)).status, 409, 'An invoice cannot be bypassed by clearing its order reference');
+    expectOK(await unassign(f));
+    assert.equal(await Invoice.countDocuments({ order: f.order._id }), 1, 'Removing assignment must preserve billing');
     const g = await fixture(); expectOK(await send(g));
     assert.equal((await unassign(g, { expectedDeliveryRevision: 0 })).status, 409);
   });

@@ -39,7 +39,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       task.helpRequestedItems = p.helpRequestedAt ? 1 : 0;
       task.stockChecksPending = task.reports.filter(report => !report.checkedAt).length;
       task.canPack = Boolean(task.sentAt) && !task.packedAt && task.summary.collectedItems === 1 && !task.summary.needsHelp;
-      if (admin) task.unassignLockReason = packingUnassignLockReason({ status: task.status, packingSentAt: task.sentAt, packedAt: task.packedAt, ...state.orderOverrides }, p.allocations, Boolean(state.invoice));
+      if (admin && state.invoice) { task.hasInvoice = true; task.invoiceId = state.invoice._id; task.editItemsLockReason = "Invoice exists. Order items are locked."; }
+      if (admin) task.unassignLockReason = packingUnassignLockReason({ status: task.status, packingSentAt: task.sentAt, packedAt: task.packedAt, ...state.orderOverrides }, p.allocations);
       return task;
     }
     const rawOrder = () => ({ _id: orderId, orderNumber: state.task.orderNumber, status: state.task.status, createdAt: "2026-11-11T08:00:00.000Z", user: { _id: "customer-1", name: "Ahmed Trading", email: "client@test.invalid" }, invoice: state.invoice || null, quote: null, orderItems: [{ product: { _id: "product-1", name: "Red satin ribbon 25 mm", sku: "RIB-RED-25MM" }, sku: "RIB-RED-25MM", qty: 10, unitPrice: 1 }], totalPrice: 10, deliveryCharge: 0, extraFee: 0, allocationStatus: "Allocated", preparationMode: "prepare_only", assignedTo: state.task.worker?.name || "", packingSentAt: state.task.sentAt, packedAt: state.task.packedAt, packingSummary: rebuild().summary, stockChecksPending: rebuild().stockChecksPending, helpRequestedItems: rebuild().helpRequestedItems, ...state.orderOverrides });
@@ -166,6 +167,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         state.writes.push({ action: 'create-invoice', body: request.postDataJSON() });
         if (state.holdInvoice) await new Promise(resolve => { state.finishInvoice = resolve; });
         if (state.invoiceError) return reply({ message: state.invoiceError }, 409);
+        state.task.version++;
         state.invoice = { _id: '500000000000000000000001', invoiceNumber: 'INV-TEST-1', status: 'Issued', paymentStatus: 'Unpaid', amountMinor: 1000, paidTotalMinor: 0, balanceDueMinor: 1000, currency: 'AED', minorUnitFactor: 100 };
         return reply({ data: state.invoice, message: 'Invoice created.' }, 201);
       }
@@ -479,22 +481,67 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     assert.deepEqual(await page.evaluate(() => window.__copies), [`${origin}/packing/orders/${orderId}`]);
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-assignment.png", fullPage: true });
   });
-  await t.test('invoice creation waits for live packing and publication explains existing billing locks', async t => {
+  await t.test('invoicing during packing keeps picking open and preserves the physical next step', async t => {
     const { page, state } = await fixture(t, { admin: true });
     await page.goto(`${origin}/admin/orders/${orderId}?tab=invoice`);
-    await page.getByRole('button', { name: 'Create Invoice', exact: true }).waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Create Invoice', exact: true }).isDisabled(), true);
-    await page.getByText('Finish worker packing before creating the invoice. Resolve shortages and mark the order Packed first.', { exact: true }).waitFor();
-    state.task.packedAt = '2026-11-13T08:00:00.000Z'; state.task.version++;
-    await page.reload(); assert.equal(await page.getByRole('button', { name: 'Create Invoice', exact: true }).isDisabled(), false);
-    state.task.sentAt = null; state.task.worker = null; state.task.packedAt = null;
-    state.task.sendLockReason = 'This order already has an invoice. Live packing must start before invoicing. Resolve its billing first, or continue its existing preparation process.';
+    const create = page.getByRole('button', { name: 'Create Invoice', exact: true });
+    await create.waitFor(); assert.equal(await create.isEnabled(), true);
+    await create.click();
+    const dialog = page.getByRole('dialog', { name: 'Create invoice', exact: true });
+    await dialog.getByRole('button', { name: 'Create invoice', exact: true }).click();
+    await dialog.waitFor({ state: 'hidden' });
+    assert.equal(state.task.packedAt, null);
+    assert.equal(state.task.items[0].pickedQty, 0);
+    assert.equal(state.task.status, 'Shipping');
+    await page.goto(`${origin}/admin/orders`);
+    await page.getByRole('link', { name: 'View packing', exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).count(), 0);
     await page.goto(`${origin}/admin/orders/${orderId}/packing`);
-    await page.getByRole('button', { name: 'Send to worker', exact: true }).click();
-    const dialog = page.getByRole('dialog', { name: 'Send to worker', exact: true });
-    await dialog.getByText(state.task.sendLockReason, { exact: true }).waitFor();
-    assert.equal(await dialog.getByRole('button', { name: 'Send to worker', exact: true }).isDisabled(), true);
-    assert.equal(state.writes.length, 0);
+    const edit = page.getByRole('button', { name: 'Edit order items', exact: true });
+    await edit.waitFor(); assert.equal(await edit.isDisabled(), true);
+    assert.match(await page.getByRole('link', { name: 'Review billing', exact: true }).getAttribute('href'), /admin\/invoices\/.+\/edit/);
+  });
+  for (const mobile of [false, true]) {
+    await t.test(`invoice-first worker assignment works on ${mobile ? 'mobile' : 'desktop'}`, async t => {
+      const { page, state } = await fixture(t, { admin: true, mobile, published: false });
+      await page.goto(`${origin}/admin/orders/${orderId}?tab=invoice`);
+      await page.getByRole('button', { name: 'Create Invoice', exact: true }).click();
+      const invoiceDialog = page.getByRole('dialog', { name: 'Create invoice', exact: true });
+      await invoiceDialog.getByRole('button', { name: 'Create invoice', exact: true }).click();
+      await invoiceDialog.waitFor({ state: 'hidden' });
+      const originalInvoice = structuredClone(state.invoice);
+      await page.goto(`${origin}/admin/orders`);
+      await page.getByRole('button', { name: 'Send to worker', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Send to worker', exact: true });
+      const send = dialog.getByRole('button', { name: 'Send to worker', exact: true });
+      await send.waitFor(); assert.equal(await send.isEnabled(), true);
+      assert.equal(await dialog.getByText('Invoice needs attention', { exact: true }).count(), 0);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
+      await dialog.screenshot({ path: `/tmp/megadie-invoice-first-${mobile ? 'mobile' : 'desktop'}.png` });
+      await send.click();
+      const summary = page.getByRole('dialog', { name: 'Packing worker', exact: true });
+      await summary.getByRole('button', { name: 'Close', exact: true }).click();
+      await page.getByRole('link', { name: 'View packing', exact: true }).waitFor();
+      assert.deepEqual(state.invoice, originalInvoice);
+      assert.equal(state.task.packedAt, null);
+      assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 1);
+      assert.equal(state.writes.filter(write => write.action === 'send').length, 1);
+    });
+  }
+  await t.test('reopening an invoiced packed order preserves collected quantities and billing', async t => {
+    const { page, state } = await fixture(t, { admin: true });
+    state.task.packedAt = '2026-11-20T08:00:00.000Z';
+    state.task.items[0].allocations[0].pickedQty = 10;
+    state.invoice = { _id: 'invoice', invoiceNumber: 'INV-PAID', status: 'Issued', paymentStatus: 'Paid', amountMinor: 1000, paidTotalMinor: 1000, balanceDueMinor: 0 };
+    const originalInvoice = structuredClone(state.invoice);
+    await page.goto(`${origin}/admin/orders/${orderId}/packing`);
+    const reopen = page.getByRole('button', { name: 'Reopen packing', exact: true });
+    await reopen.waitFor(); assert.equal(await reopen.isEnabled(), true);
+    await reopen.click();
+    await reopen.waitFor({ state: 'hidden' });
+    assert.equal(state.task.packedAt, null);
+    assert.equal(state.task.items[0].pickedQty, 10);
+    assert.deepEqual(state.invoice, originalInvoice);
   });
   for (const mobile of [false, true]) {
     await t.test(`a packed order has one working Invoice action and refreshes to Deliver on ${mobile ? 'mobile' : 'desktop'}`, async t => {
@@ -558,7 +605,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.getByRole('button', { name: 'To invoice 0', exact: true }).waitFor();
     assert.equal(state.writes.filter(write => write.action === 'create-invoice').length, 2);
   });
-  await t.test('manual actions remain accessible and unfinished or cancelled tasks cannot invoice', async t => {
+  await t.test('manual actions and early invoicing remain available while cancelled orders cannot invoice', async t => {
     const { page, state } = await fixture(t, { admin: true, published: false });
     state.task.status = 'Processing';
     await page.goto(`${origin}/admin/orders`);
@@ -574,7 +621,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.reload(); await page.getByRole('link', { name: 'View packing', exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Create invoice', exact: true }).count(), 0);
     await page.getByRole('button', { name: /^More actions for/ }).click();
-    assert.equal(await page.getByRole('menuitem', { name: 'Create invoice', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('menuitem', { name: 'Create invoice', exact: true }).count(), 1);
     await page.keyboard.press('Escape');
     state.task.status = 'Cancelled';
     await page.reload(); await page.getByText(state.task.orderNumber, { exact: true }).waitFor();

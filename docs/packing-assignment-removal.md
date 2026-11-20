@@ -19,14 +19,15 @@ including entering the person responsible when preparing a message.
 ## Conditions
 
 - Admin only, with an active published task on a Shipping order.
-- No Packed confirmation, invoice (including a linked or unlinked invoice record),
-  deducted allocation or stock finalization.
+- No Packed confirmation, deducted allocation or stock finalization. An invoice
+  does not block assignment removal and remains attached after removal.
 - All non-cancelled allocations have zero picked quantities. The checkbox never
   overrides saved picks. Return goods and use the existing correction flow first.
 - Current order and delivery revisions must match. A concurrent pick, reservation
   edit, reassignment or instruction change forces a refresh and a new confirmation.
 
-Completed/invoiced work retains its existing reopening and billing safeguards.
+Completed packing must be reopened first. Billed order items retain their financial
+editing locks, but billing does not block reopening unfinished preparation.
 Removal does not reopen packing, reset picked quantities, cancel an order, delete
 an invoice, release reservations, or change shelf quantities.
 

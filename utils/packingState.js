@@ -50,13 +50,12 @@ export function packingReadyToFinish(order, rows) {
     rows.every(row => row.status !== 'Deducted' && row.slot?.label && row.slot.store === 'AE1');
 }
 
-export function packingUnassignLockReason(order, allocations, hasInvoice) {
+export function packingUnassignLockReason(order, allocations) {
   if (deliveryStockLockReason(order)) return deliveryStockLockReason(order);
   if (!order.packingSentAt) return 'This order has no active worker assignment.';
   if (order.status !== 'Shipping') return 'Only unfinished orders can return to manual preparation.';
   if (order.stockFinalizedAt || allocations.some(row => row.status === 'Deducted')) return 'Stock has been deducted. The assignment cannot be removed.';
   if (order.packedAt) return 'Packing is complete. Reopen packing before removing the assignment.';
-  if (hasInvoice) return 'This order has an invoice. Review billing before removing the assignment.';
   if (allocations.some(row => row.pickedQty > 0)) return 'Return the picked goods to their original slots and correct the picked quantities to zero first.';
   return '';
 }

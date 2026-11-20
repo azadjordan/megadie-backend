@@ -6,7 +6,8 @@ their own disposable database; this checklist is for the real store trial.
 
 ## Before the first pick
 
-- Choose a Shipping order, reserve its quantities, and send it before invoicing.
+- Choose a Shipping order, reserve its quantities, and send it to the worker.
+  The invoice can be created before, during, or after packing.
 - Label its tote, carton or staging area with the full client name and order code.
   Keep paused orders physically separate when the worker switches assignments.
 - Have the worker sign in on their phone and identify the product, ordering unit
@@ -23,11 +24,12 @@ their own disposable database; this checklist is for the real store trial.
 3. Alternative stock: choose its location, then collect and confirm separately.
    Continue picking should identify the next usable slot without recording goods.
 4. No usable replacement: verify Admin help requested and the Telegram alert.
-   Continue other work. The admin calls the client and changes the order.
+   Continue other work. The admin calls the client. Changing invoiced products
+   or ordered quantities requires billing review before editing the order.
 5. Correction/return: verify the changed picked count and actual original slot.
    Confirm the return or earlier wrong count only when reducing a saved count.
 6. Completion: compare the revised list with the actual carton, mark Packed,
-   create the invoice, and confirm handover/delivery through the existing admin
+   create the invoice if it is still needed, and confirm handover/delivery through the existing admin
    action. Designate the admin responsible for that last update.
 7. Stock discrepancy: keep Stock check needed visible until the source has been
    investigated and any required count correction is complete. Observe existing
