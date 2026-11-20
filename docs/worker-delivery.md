@@ -10,6 +10,8 @@ Only admins can Assign delivery, Change delivery worker, remove an assignment, o
 
 The current delivery worker uses Mark out for delivery when the complete order leaves, then Mark delivered after complete customer receipt. Waiting for packing cannot depart. Admin-prepared orders retain the complete-preparation confirmation on departure. Returned to store under More confirms all goods are back; goods remain packed and reserved. Shelf return remains an admin action.
 
+Receipt confirmation names the client and order and states that the complete order was received. Partial, refused or failed deliveries require admin review; the confirmation reminds the worker to contact an admin before proceeding. No partial-delivery status or extra approval step is introduced.
+
 My work has Packing and Deliveries tabs. A worker with only delivery tasks lands on Deliveries. Cards show client, carton reference, delivery status, recipient/address, map/directions and calling. Details add notes and a price-free item summary. Completion stays visible on the open detail page with success feedback and leaves the active list. Delivery access does not grant picking, inventory, billing or access to other customers/orders.
 
 Admin orders offer Packing worker and Delivery worker separately. Order details and packing monitoring include a compact delivery assignment panel. Removing packing retains the independently managed delivery assignment, as explained in its dialog.
@@ -37,6 +39,8 @@ Existing `/orders` movement routes stay admin-only. Customer responses omit deli
 
 ## Corrections
 
+Completing delivery deletes the linked source quote for both admin and assigned-worker confirmations. Quote deletion, receipt status and event history commit together; a deletion failure rolls the entire confirmation back. Departure, cancelled confirmations and rejected attempts retain the quote. Invoices, payment records, picked quantities and shelf stock remain unchanged by receipt.
+
 Admin More → Correct recorded status requires a reason and acknowledgement. Mistaken receipt restores Shipping and the previous out/ready state. Mistaken departure restores ready-in-store with the packed pick ledger retained. History keeps the mistaken and correction events. Finalized/deducted stock blocks correction. Invoice/payment records remain unchanged; deleted source quotes are not recreated. Actual physical returns use Returned to store.
 
 ## Navigation
@@ -48,6 +52,7 @@ Directions use the saved Google destination/place identity when available, other
 Tests use strictly named disposable localhost replica-set databases or fully intercepted APIs. No production records are seeded.
 
 - `worker-delivery.integration.mjs`: legacy/null defaults, assignment independence, privacy/roles, invoiced orders, stale/disabled workers, missing locations, races, returns and corrections.
+- Receipt regression checks cover admin/worker quote deletion with unpaid, partly paid and paid invoices, rejected confirmation, replay and quote-deletion failure rollback. The real-login mobile flow verifies cancellation before confirmation, retained payment/stock records and quote deletion after receipt.
 - `worker-delivery.browser.mjs`: cards/details, maps/calls, waiting/completion, background revision changes, lost responses, offline, access loss, corrections and phone/desktop layouts.
 - `worker-delivery.e2e.mjs`: separate admin/packer/driver logins, admin assignment, departure/receipt, retained pick and shelf quantities.
 - Existing packing, movement, delivery, list, help and billing/stock suites remain applicable. Frontend URL tests check safe encoding and destination identity.

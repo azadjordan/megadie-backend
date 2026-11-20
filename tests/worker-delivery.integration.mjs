@@ -11,6 +11,9 @@ import Slot from "../models/slotModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
 import InventoryMovement from "../models/inventoryMovementModel.js";
+import Quote from "../models/quoteModel.js";
+import Invoice from "../models/invoiceModel.js";
+import Payment from "../models/paymentModel.js";
 import packingRoutes from "../routes/packingRoutes.js";
 import orderRoutes from "../routes/orderRoutes.js";
 import userRoutes from "../routes/userRoutes.js";
@@ -104,6 +107,59 @@ test("worker delivery assignments with an isolated replica set", { skip: !uri, t
     assert.equal(String(saved.deliveryHistory.at(-1).worker), String(worker._id));
     const list = await api('/packing/deliveries', { actor: worker }); assert.ok(!list.body.data.some(row => row.orderId === String(f.order._id)));
     assert.equal((await task(f)).deliveryState, 'delivered');
+  });
+
+  await t.test('admin and assigned-worker receipt delete the quote without changing unpaid, partial or paid billing and stock', async () => {
+    for (const actor of [other, admin]) for (const paidAmount of [0, 3000, 12000]) {
+      const f = await packed({ driver: other });
+      const quote = await Quote.create({ user: customer._id, order: f.order._id, status: 'Confirmed', requestedItems: [{ product: f.productId, qty: 10, unitPrice: 12 }] });
+      const invoice = await Invoice.create({ user: customer._id, order: f.order._id, amountMinor: 12000, dueDate: new Date('2030-01-01'), currency: 'AED', minorUnitFactor: 100 });
+      if (paidAmount) await Payment.create({ invoice: invoice._id, amountMinor: paidAmount, paymentMethod: 'Cash', receivedBy: 'Company Account' });
+      await Order.updateOne({ _id: f.order._id }, { $set: { quote: quote._id, invoice: invoice._id } });
+      const billBefore = await Invoice.findById(invoice._id).lean();
+      const paymentsBefore = await Payment.find({ invoice: invoice._id }).lean();
+      const stockBefore = await SlotItem.find({ product: f.productId }).lean();
+      const allocationsBefore = await OrderAllocation.find({ order: f.order._id }).lean();
+      expectOK(await move(f, 'departed'));
+      assert.ok(await Quote.exists({ _id: quote._id }), 'Departure must retain the quote');
+      assert.equal((await Order.findById(f.order._id)).status, 'Shipping');
+      assert.equal((await move(f, 'delivered', worker)).status, 403, 'Packing responsibility alone cannot confirm receipt');
+      assert.equal((await move(f, 'delivered', actor, { confirmedReceived: false })).status, 400);
+      assert.ok(await Quote.exists({ _id: quote._id }), 'Rejected receipt must retain the quote');
+      expectOK(await move(f, 'delivered', actor));
+      const saved = await Order.findById(f.order._id).select('+deliveryHistory');
+      assert.equal(saved.status, 'Delivered'); assert.equal(saved.quote, null);
+      assert.equal(await Quote.exists({ _id: quote._id }), null);
+      assert.equal(saved.deliveredBy, other.name); assert.ok(saved.deliveredAt);
+      assert.equal(String(saved.deliveryHistory.at(-1).actor), String(actor._id));
+      assert.equal(String(saved.deliveryHistory.at(-1).worker), String(other._id));
+      assert.equal(saved.deliveryHistory.filter(event => event.action === 'delivered').length, 1);
+      assert.equal(saved.stockFinalizedAt, undefined);
+      assert.deepEqual(await Invoice.findById(invoice._id).lean(), billBefore);
+      assert.deepEqual(await Payment.find({ invoice: invoice._id }).lean(), paymentsBefore);
+      assert.deepEqual(await SlotItem.find({ product: f.productId }).lean(), stockBefore);
+      assert.deepEqual(await OrderAllocation.find({ order: f.order._id }).lean(), allocationsBefore);
+      assert.equal((await move(f, 'delivered', actor)).status, 409);
+      assert.equal((await Order.findById(f.order._id).select('+deliveryHistory')).deliveryHistory.filter(event => event.action === 'delivered').length, 1);
+    }
+  });
+
+  await t.test('a failed quote deletion rolls back receipt and history so the assigned worker can retry safely', async () => {
+    const f = await packed({ driver: other });
+    const quote = await Quote.create({ user: customer._id, order: f.order._id, status: 'Confirmed', requestedItems: [{ product: f.productId, qty: 10, unitPrice: 12 }] });
+    await Order.updateOne({ _id: f.order._id }, { $set: { quote: quote._id } });
+    expectOK(await move(f, 'departed'));
+    const before = await Order.findById(f.order._id).select('+reservationRevision +deliveryHistory').lean();
+    const originalDelete = Quote.deleteOne;
+    try {
+      Quote.deleteOne = () => { throw new Error('Simulated quote deletion failure'); };
+      assert.equal((await move(f, 'delivered')).status, 500);
+    } finally { Quote.deleteOne = originalDelete; }
+    assert.deepEqual(await Order.findById(f.order._id).select('+reservationRevision +deliveryHistory').lean(), before);
+    assert.ok(await Quote.exists({ _id: quote._id }));
+    expectOK(await move(f, 'delivered'));
+    assert.equal((await Order.findById(f.order._id)).status, 'Delivered');
+    assert.equal(await Quote.exists({ _id: quote._id }), null);
   });
 
   await t.test('only admins may select, assign, reassign or remove delivery workers; rejected writes preserve all records', async () => {

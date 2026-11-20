@@ -76,6 +76,8 @@ test('worker delivery browser flow', { timeout: 120000 }, async t => {
     assert.equal(state.writes.length, 1); assert.equal(state.task.status, 'Shipping');
     await page.getByRole('button', { name: 'Mark delivered', exact: true }).click();
     await dialog.getByText('The customer has received the complete order.').waitFor();
+    await dialog.getByText('The customer has received the complete order.', { exact: true }).waitFor();
+    await dialog.getByText('If any items were not received or the delivery was refused, contact an admin before confirming.', { exact: true }).waitFor();
     await dialog.getByRole('button', { name: 'Mark delivered', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
     await page.getByText('Delivered', { exact: true }).waitFor(); assert.deepEqual(state.writes.map(write => write.action), ['departed', 'delivered']);
   });
