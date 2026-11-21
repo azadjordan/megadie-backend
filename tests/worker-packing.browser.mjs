@@ -43,6 +43,20 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       if (admin) task.unassignLockReason = packingUnassignLockReason({ status: task.status, packingSentAt: task.sentAt, packedAt: task.packedAt, ...state.orderOverrides }, p.allocations);
       return task;
     }
+    function completedView(task) {
+      return { orderId: task.orderId, orderNumber: task.orderNumber, customerName: task.customerName, label: task.label, version: task.version,
+        scope: 'recent-work', status: task.status, packedAt: task.packedAt, deliveredAt: null, delivery: null, canPack: false, problems: [],
+        totalItems: task.items.length, totalUnits: task.summary.totalUnits,
+        expiresAt: new Date(Date.now() + 86400000).toISOString(),
+        items: task.items.map(item => ({ productId: item.productId, sku: item.sku, name: item.name, unit: item.unit, qty: item.qty, pickedQty: item.qty, reservedQty: item.qty, allocations: [], alternatives: [] })),
+        work: [{ type: 'packed', active: true, completedAt: task.packedAt }] };
+    }
+    function workerView() {
+      const task = rebuild();
+      return !admin && task.packedAt ? task.preparationMode === 'prepare_deliver'
+        ? { ...task, scope: 'packed-handoff', totalItems: task.items.length, totalUnits: task.summary.totalUnits, work: [{ type: 'packed', active: true, completedAt: task.packedAt }] }
+        : completedView(task) : task;
+    }
     const rawOrder = () => ({ _id: orderId, orderNumber: state.task.orderNumber, status: state.task.status, createdAt: "2026-11-11T08:00:00.000Z", user: { _id: "customer-1", name: "Ahmed Trading", email: "client@test.invalid" }, invoice: state.invoice || null, quote: null, orderItems: [{ product: { _id: "product-1", name: "Red satin ribbon 25 mm", sku: "RIB-RED-25MM" }, sku: "RIB-RED-25MM", qty: 10, unitPrice: 1 }], totalPrice: 10, deliveryCharge: 0, extraFee: 0, allocationStatus: "Allocated", preparationMode: "prepare_only", assignedTo: state.task.worker?.name || "", packingSentAt: state.task.sentAt, packedAt: state.task.packedAt, packingSummary: rebuild().summary, stockChecksPending: rebuild().stockChecksPending, helpRequestedItems: rebuild().helpRequestedItems, ...state.orderOverrides });
     await context.route("**/*", async route => {
       const request = route.request(), url = new URL(request.url());
@@ -61,7 +75,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       if (path === `/user-prices/${workerId}` || path === "/price-rules") return reply({ data: [] });
       if (path === "/site-settings/maintenance-notice") return reply({ data: { enabled: false } });
       if (path === "/packing/workers") return reply({ data: [{ _id: workerId, name: "Worker Ahmed" }] });
-      const deliveryTask = row => ({ ...row, worker: row.preparationMode === 'prepare_deliver' ? row.worker : null, delivery: row.preparationMode === 'prepare_deliver' ? row.delivery : null, items: row.preparationMode === 'prepare_deliver' ? row.items : [], deliveryState: row.packedAt ? 'ready' : 'waiting', canAssign: row.status === 'Shipping', canDepart: Boolean(row.packedAt && row.preparationMode === 'prepare_deliver'), canDeliver: false, canReturn: false, canCorrect: false, readyReason: row.packedAt ? '' : 'Waiting for packing.' });
+      const deliveryTask = row => !admin && row.packedAt && row.preparationMode !== 'prepare_deliver' ? completedView(row) : ({ ...row, worker: row.preparationMode === 'prepare_deliver' ? row.worker : null, delivery: row.preparationMode === 'prepare_deliver' ? row.delivery : null, items: row.preparationMode === 'prepare_deliver' ? row.items : [], deliveryState: row.packedAt ? 'ready' : 'waiting', canAssign: row.status === 'Shipping', canDepart: Boolean(row.packedAt && row.preparationMode === 'prepare_deliver'), canDeliver: false, canReturn: false, canCorrect: false, readyReason: row.packedAt ? '' : 'Waiting for packing.' });
       if (path === '/packing/deliveries' && method === 'GET') {
         const rows = (state.boardRows || (state.task.sentAt ? [rebuild()] : [])).filter(row => row.preparationMode === 'prepare_deliver');
         return reply({ data: rows.map(deliveryTask), pagination: { page: 1, total: rows.length, hasNext: false } });
@@ -70,6 +84,26 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
         if (state.denied) return reply({ message: 'Task reassigned' }, 403);
         const row = state.boardRows?.find(row => row.orderId === path.split('/').at(-1)) || rebuild();
         return reply({ data: deliveryTask(row) });
+      }
+      if (path === '/packing/my-work' && method === 'GET') {
+        if (state.listFailed) return reply({ message: 'Cannot load' }, 503);
+        if (state.holdList) await new Promise(resolve => { state.finishList = resolve; });
+        const rows = state.boardRows || (state.task.sentAt ? [rebuild()] : []);
+        const cards = rows.filter(row => !row.packedAt || row.preparationMode === 'prepare_deliver').map(row => {
+          const driver = row.preparationMode === 'prepare_deliver', packed = Boolean(row.packedAt);
+          const kind = !packed ? 'packing' : driver ? 'delivery' : 'handoff';
+          const group = packed && !driver ? 'waiting' : 'todo';
+          return { ...row, kind, group, totalItems: row.summary.totalItems, totalUnits: row.summary.totalUnits,
+            nextAction: !packed ? row.canPack ? 'packed' : row.summary.pickedUnits > 0 ? 'continue_packing' : 'start_packing' : driver ? 'departed' : null,
+            message: packed ? driver ? 'Ready for delivery.' : 'Packing complete. Ready for collection.' : row.canPack ? 'All items collected. Pack and label the carton.' : row.helpRequestedItems ? 'Admin help requested. You can continue other picking work.' : row.summary.needsHelp ? 'Some items need attention. You can continue picking.' : 'Collect the reserved items, then pack the carton.',
+            needsHelp: row.summary.needsHelp,
+            ...(kind === 'delivery' ? deliveryTask(row) : {}),
+          };
+        });
+        return reply({ groups: Object.fromEntries(['todo', 'waiting'].map(key => {
+          const matching = cards.filter(card => card.group === key), page = Math.min(Number(url.searchParams.get(key + 'Page')) || 1, Math.max(1, Math.ceil(matching.length / 12)));
+          return [key, { data: matching.slice((page - 1) * 12, page * 12), pagination: { page, total: matching.length, hasNext: page * 12 < matching.length } }];
+        })) });
       }
       if (path === "/packing/orders" && method === "GET") {
         if (state.listFailed) return reply({ message: "Cannot load" }, 503);
@@ -84,7 +118,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       if (path === `/packing/orders/${orderId}` && method === "GET") {
         if (state.denied) return reply({ message: "Task reassigned" }, 403);
         if (state.holdRead) { state.holdRead = false; const snapshot = structuredClone(rebuild()); await new Promise(resolve => { state.finishRead = resolve; }); return reply({ data: snapshot }); }
-        return reply({ data: rebuild() });
+        return reply({ data: workerView() });
       }
       if (path.startsWith(`/packing/orders/${orderId}/reports/`) && method === 'PATCH') {
         const body = request.postDataJSON(); state.writes.push({ action: 'review-stock', body });
@@ -130,13 +164,13 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
           p.allocations.push({ allocationId: "300000000000000000000002", slotId: targetId, slot: "B2-AE1", qty: body.qty, pickedQty: 0, problemQty: 0, status: "Reserved" });
           p.alternatives[0].availableQty -= body.qty;
         } else if (action === "help") { p.helpRequestedAt ||= '2026-11-11T08:00:00.000Z'; }
-        else if (action === "packed") { task.packedAt = "2026-11-11T08:30:00.000Z"; task.packedBy = profile.name; }
+        else if (action === "packed") { task.packedAt = new Date().toISOString(); task.packedBy = profile.name; }
         else if (action === "reopen") { task.packedAt = null; task.packedBy = ""; }
         if (['problem', 'replace'].includes(action) && p.allocations.some(row => row.problemQty > 0) && !p.alternatives.some(candidate => candidate.availableQty > 0)) p.helpRequestedAt ||= '2026-11-11T08:00:00.000Z';
         task.version++;
         if (state.loseResponse || (action === "help" && state.loseHelpResponse)) { state.loseResponse = false; state.loseHelpResponse = false; return route.abort("failed"); }
         await new Promise(resolve => setTimeout(resolve, state.delay || 40));
-        return reply({ data: rebuild(), message: action === "packed" ? "Order marked Packed." : action === "send" ? "Order sent to worker." : "Saved." });
+        return reply({ data: workerView(), message: action === "packed" ? "Order marked Packed." : action === "send" ? "Order sent to worker." : "Saved." });
       }
       if (path === `/orders/${orderId}/delete-preview`) {
         state.previewReads = (state.previewReads || 0) + 1;
@@ -277,7 +311,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { mobile: true });
     await page.goto(`${origin}/`);
     await page.getByRole("heading", { name: "My work" }).waitFor();
-    await page.getByRole("link", { name: /^Start packing for/ }).click();
+    await page.getByRole("link", { name: "Start packing", exact: true }).click();
     await page.getByRole("button", { name: "Not enough here", exact: true }).waitFor();
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-checklist.png", fullPage: true });
     await page.getByRole("button", { name: "Not enough here", exact: true }).click();
@@ -290,9 +324,9 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.getByText("Picked 6 of 6", { exact: true }).waitFor();
     await page.getByRole("button", { name: /^Picked (all|remaining) /, exact: true }).click();
     await page.getByRole("button", { name: "Mark packed", exact: true }).click();
-    await page.getByText(/^Packed by Worker Ahmed/).waitFor();
+    await page.getByText('Packing complete. Your work on this order is finished.', { exact: true }).waitFor();
     assert.equal(await page.getByRole("button", { name: /^Picked (all|remaining) / }).count(), 0);
-    await page.reload(); await page.getByText(/^Packed by Worker Ahmed/).waitFor();
+    await page.reload(); await page.getByText('Packing complete. Your work on this order is finished.', { exact: true }).waitFor();
     assert.deepEqual(state.writes.map(write => write.action), ["problem", "replace", "pick", "packed"]);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-mobile.png", fullPage: true });
@@ -397,8 +431,9 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.reload();
     await page.getByRole('article', { name: 'RIB-RED-25MM', exact: true }).getByText('Admin help requested', { exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Mark packed', exact: true }).isDisabled(), true);
-    await page.getByRole('link', { name: 'Back to orders', exact: true }).click();
-    await page.getByText('Admin help requested', { exact: true }).waitFor();
+    await page.getByRole('link', { name: 'Back to active work', exact: true }).click();
+    await page.getByRole('heading', { name: 'My work', exact: true }).waitFor();
+    await page.getByText('Admin help requested. You can continue other picking work.', { exact: true }).waitFor();
     assert.deepEqual(state.writes.map(write => write.action), ['problem', 'help']);
   });
   await t.test("an uncertain help response is recovered by reading without sending another help request", async t => {
@@ -874,49 +909,48 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { published: false, mobile: true });
     state.holdList = true;
     await page.goto(`${origin}/packing`);
-    await page.getByText("Loading orders…", { exact: true }).first().waitFor();
-    assert.equal(await page.getByText("No orders waiting to pack.", { exact: true }).count(), 0);
+    await page.getByText("Loading your work…", { exact: true }).first().waitFor();
+    assert.equal(await page.getByText("No orders need your action right now.", { exact: true }).count(), 0);
     state.holdList = false; state.finishList();
-    for (const name of ["To pack", "Packed for delivery", "Ready for handoff"]) await page.getByRole("heading", { name: new RegExp(name) }).waitFor();
-    await page.getByText("No orders waiting to pack.", { exact: true }).waitFor();
-    await page.getByText("No packed delivery orders waiting.", { exact: true }).waitFor();
-    await page.getByText("No packed orders waiting for handoff.", { exact: true }).waitFor();
+    for (const name of ["To do", "Waiting"]) await page.getByRole("heading", { name: new RegExp(name) }).waitFor();
+    await page.getByText("No orders need your action right now.", { exact: true }).waitFor();
+    await page.getByText("No orders waiting on someone else.", { exact: true }).waitFor();
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-empty.png", fullPage: true });
     state.listFailed = true;
     await page.reload();
-    await page.getByText("Could not load your packing orders.", { exact: true }).waitFor();
-    assert.equal(await page.getByText("No orders waiting to pack.", { exact: true }).count(), 0);
+    await page.getByText("Could not load your work. Try Refresh.", { exact: true }).waitFor();
+    assert.equal(await page.getByText("No orders need your action right now.", { exact: true }).count(), 0);
   });
   await t.test("order cards show partial work and independently paginate the work queues", async t => {
     const { page, state } = await fixture(t);
     const base = { ...state.task, summary: { totalUnits: 100, pickedUnits: 35, remainingUnits: 65, totalItems: 3, collectedItems: 1, inProgressItems: 1, needsHelp: true } };
     state.boardRows = Array.from({ length: 16 }, (_, i) => ({ ...base, orderId: String(i), orderNumber: 'ORD-TEST-' + i, customerName: ['Ahmed Trading', 'Al Noor Textiles', 'Royal Gift Supplies'][i % 3] + ' ' + i, packedAt: i >= 13 ? '2026-11-11T08:30:00Z' : null, preparationMode: i === 13 ? 'prepare_deliver' : 'prepare_only', ...(i >= 13 ? { summary: { totalUnits: 100, pickedUnits: 100, remainingUnits: 0, totalItems: 3, collectedItems: 3, inProgressItems: 0, needsHelp: false } } : {}) }));
     await page.goto(`${origin}/packing`);
-    await page.getByRole("link", { name: /^Continue packing for Ahmed Trading 0,/ }).waitFor();
-    assert.equal(await page.getByText("35 / 100 units picked", { exact: true }).count(), 12);
-    const queue = page.getByRole("region", { name: "To pack 13", exact: true });
+    await page.getByRole("article").filter({ has: page.getByRole("heading", { name: "Ahmed Trading 0", exact: true }) }).getByRole("link", { name: "Continue packing", exact: true }).waitFor();
+    assert.equal(await page.getByText("35 of 100 units collected", { exact: true }).count(), 12);
+    const queue = page.getByRole("region", { name: "To do", exact: true });
     await queue.getByRole("button", { name: "Next", exact: true }).click();
-    await queue.getByRole("link", { name: /^Continue packing for Ahmed Trading 12,/ }).waitFor();
-    assert.equal(await queue.getByRole("link").count(), 1);
+    await queue.getByRole("article").filter({ has: page.getByRole("heading", { name: "Ahmed Trading 12", exact: true }) }).getByRole("link", { name: "Continue packing", exact: true }).waitFor();
+    assert.equal(await queue.getByRole("link", { name: "Continue packing", exact: true }).count(), 1);
     assert.equal(await page.getByRole("link", { name: /^View delivery for/ }).count(), 0);
-    assert.equal(await page.getByRole("link", { name: /^View packed order for/ }).count(), 3);
+    assert.equal(await page.getByRole("region", { name: "Waiting", exact: true }).getByRole("link", { name: "View details", exact: true }).count(), 0);
     await queue.getByRole("button", { name: "Previous", exact: true }).click();
-    await queue.getByRole("link", { name: /^Continue packing for Ahmed Trading 0,/ }).waitFor();
+    await queue.getByRole("article").filter({ has: page.getByRole("heading", { name: "Ahmed Trading 0", exact: true }) }).getByRole("link", { name: "Continue packing", exact: true }).waitFor();
     state.boardRows = [...state.boardRows.slice(0, 3), ...state.boardRows.slice(13)];
-    await page.getByRole("button", { name: "Refresh orders", exact: true }).click();
-    await page.getByRole("heading", { name: "To pack 3", exact: true }).waitFor();
+    await page.getByRole("button", { name: "Refresh active work", exact: true }).click();
+    await page.getByRole("heading", { name: /^To do.*4/, exact: false }).waitFor();
     await page.screenshot({ path: "/Users/azad/Developer/megadie/output/worker-packing-refined-home-desktop.png", fullPage: true });
     await page.setViewportSize({ width: 390, height: 844 });
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+    await page.screenshot({ path: "../output/worker-active-work-mobile.png", fullPage: true });
   });
   await t.test("packed delivery work stays visible and opens its next step and map", async t => {
     const { page, state } = await fixture(t, { mobile: true });
     state.task.preparationMode = "prepare_deliver";
-    state.task.packedAt = "2026-11-11T08:30:00.000Z"; state.task.packedBy = "Worker Ahmed";
+    state.task.packedAt = new Date().toISOString(); state.task.packedBy = "Worker Ahmed";
     state.task.items[0].allocations[0].pickedQty = 10;
     state.task.delivery = { contactName: 'Delivery recipient', phoneNumber: '+971 (50) 123-4567', secondaryPhoneNumber: '04 123 4567', address: "Warehouse road", googleMapsUrl: "https://maps.google.com/?q=Dubai", notes: "Call at arrival" };
     await page.goto(`${origin}/packing`);
-    await page.getByRole("button", { name: /^Deliveries/ }).click();
     await page.getByRole("link", { name: "View delivery", exact: true }).click();
     await page.getByText("Ready to deliver", { exact: true }).waitFor();
     assert.equal(await page.getByRole("link", { name: "Get directions", exact: true }).isVisible(), true);
@@ -945,7 +979,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.getByRole('link', { name: 'Call recipient', exact: true }).waitFor();
     state.task.preparationMode = 'prepare_only'; state.task.delivery = null;
     await page.reload();
-    await page.getByText('Recipient details are shown to the assigned delivery worker.').waitFor();
+    await page.getByText('Completed work · read only. Contact an admin about any corrections.', { exact: true }).waitFor();
+    assert.equal(await page.getByRole('button', { name: /Mark out for delivery|Mark delivered/ }).count(), 0);
     assert.equal(await page.getByText('Delivery contact', { exact: true }).count(), 0);
     assert.equal(await page.locator('a[href^="tel:"]').count(), 0);
   });
@@ -1189,7 +1224,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.getByLabel('How many did you take this time?', { exact: true }).fill('6');
     await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
     await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
-    await page.getByRole('dialog').getByText('6 picked \u00b7 4 needed from another location', { exact: true }).waitFor();
+    await page.getByRole('dialog').getByText('6 collected \u00b7 4 remaining', { exact: true }).waitFor();
     await page.getByRole('button', { name: 'Update picked total', exact: true }).waitFor();
     assert.equal(await page.getByLabel('How many did you take this time?', { exact: true }).count(), 0);
     await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
@@ -1211,16 +1246,48 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     assert.equal(await page.getByRole('button', { name: 'Mark packed', exact: true }).isDisabled(), true);
     await page.getByRole('group', { name: 'Location A1-AE1 for RIB-RED-25MM', exact: true }).getByText('4 \u00d7 100yd Roll missing', { exact: true }).waitFor();
   });
+  await t.test('another location remains actionable while an admin help request is pending', async t => {
+    const { page, state } = await fixture(t, { mobile: true });
+    const item = state.task.items[0];
+    Object.assign(item.allocations[0], { pickedQty: 6, problemQty: 4 });
+    item.helpRequestedAt = '2026-11-11T08:00:00Z';
+    await page.goto(`${origin}/packing/orders/${orderId}`);
+    await page.getByText('Review the shortage to continue at another location.', { exact: true }).waitFor();
+    assert.equal(await page.getByText('Waiting for admin', { exact: true }).count(), 0);
+    await page.getByRole('button', { name: 'Review shortage', exact: true }).click();
+    await page.getByRole('button', { name: /^Continue at B2-AE1/ }).click();
+    await page.getByRole('dialog').waitFor({ state: 'hidden' });
+    await page.getByRole('group', { name: 'Location B2-AE1 for RIB-RED-25MM', exact: true }).getByRole('button', { name: 'Picked all 4', exact: true }).waitFor();
+    assert.deepEqual(state.writes.map(write => write.action), ['replace']);
+    assert.equal(item.pickedQty, 6);
+  });
+  await t.test('active work keeps the current page and scroll position when returning from a task', async t => {
+    const { page, state } = await fixture(t, { mobile: true });
+    state.boardRows = Array.from({ length: 24 }, (_, i) => ({ ...state.task, orderId: i === 23 ? orderId : String(i), customerName: 'Work client ' + i,
+      summary: { totalUnits: 10, pickedUnits: 0, remainingUnits: 10, totalItems: 1, collectedItems: 0, inProgressItems: 0, needsHelp: false } }));
+    await page.goto(`${origin}/packing?todoPage=2`);
+    const last = page.getByRole('article').filter({ has: page.getByRole('heading', { name: 'Work client 23', exact: true }) });
+    await last.getByRole('link', { name: 'Start packing', exact: true }).scrollIntoViewIfNeeded();
+    const scroll = await page.evaluate(() => window.scrollY); assert.ok(scroll > 1000);
+    await last.getByRole('link', { name: 'Start packing', exact: true }).click();
+    await page.getByRole('button', { name: 'Picked all 10', exact: true }).waitFor();
+    await page.getByRole('link', { name: 'Back to active work', exact: true }).click();
+    await page.getByRole('heading', { name: 'My work', exact: true }).waitFor();
+    assert.equal(new URL(page.url()).searchParams.get('todoPage'), '2');
+    await page.waitForFunction(expected => Math.abs(window.scrollY - expected) < 80, scroll);
+    assert.equal(await page.getByRole('button', { name: /^Packing|^Deliveries/ }).count(), 0);
+    assert.equal(state.writes.length, 0);
+  });
   await t.test('a ready card marks packed once without opening the order and keeps completed picking blue until confirmation', async t => {
     const { page, state } = await fixture(t, { mobile: true });
     state.task.items[0].allocations[0].pickedQty = 10;
     await page.goto(`${origin}/packing`);
-    await page.getByText('10 / 10 units picked', { exact: true }).waitFor();
-    await page.getByText('Ready to pack', { exact: true }).waitFor();
+    await page.getByText('10 of 10 units collected', { exact: true }).waitFor();
+    await page.getByText('All items collected. Pack and label the carton.', { exact: true }).waitFor();
     const card = page.getByRole('article').filter({ hasText: 'Ahmed Trading' });
-    assert.match(await card.getByRole('progressbar').locator('div').getAttribute('class'), /bg-blue-500/);
+    assert.match(await card.getByRole('progressbar').locator('div').getAttribute('class'), /bg-indigo-500/);
     await card.getByRole('button', { name: 'Mark packed', exact: true }).evaluate(button => { button.click(); button.click(); });
-    await page.getByRole('link', { name: /^View packed order for/ }).waitFor();
+    await page.getByText('No orders need your action right now.', { exact: true }).waitFor();
     assert.equal(new URL(page.url()).pathname, '/packing');
     assert.equal(state.writes.filter(write => write.action === 'packed').length, 1);
     await page.screenshot({ path: '/Users/azad/Developer/megadie/output/worker-card-packed-mobile.png', fullPage: true });
@@ -1231,7 +1298,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.goto(`${origin}/packing`);
     await page.getByRole('button', { name: 'Mark packed', exact: true }).click();
     await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
-    await page.getByText('9 / 10 units picked', { exact: true }).waitFor();
+    await page.getByText('9 of 10 units collected', { exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: 'Mark packed', exact: true }).count(), 0);
     assert.equal(state.task.packedAt, null);
   });
@@ -1241,7 +1308,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     await page.goto(`${origin}/packing`);
     await page.getByRole('button', { name: 'Mark packed', exact: true }).click();
     await page.getByRole('button', { name: 'Check latest progress', exact: true }).click();
-    await page.getByRole('link', { name: /^View packed order for/ }).waitFor();
+    await page.getByText('No orders need your action right now.', { exact: true }).waitFor();
     assert.equal(state.writes.filter(write => write.action === 'packed').length, 1);
   });
 

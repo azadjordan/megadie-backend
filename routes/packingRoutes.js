@@ -3,10 +3,12 @@ import { protect, admin, staff } from "../middleware/authMiddleware.js";
 import { requireTrustedOrigin } from "../config/trustedOrigins.js";
 import * as delivery from '../controllers/workerDeliveryController.js';
 import * as work from '../controllers/workerWorkController.js';
+import * as activeWork from '../controllers/workerActiveWorkController.js';
 import { listPackingWorkers, listPackingOrders, readPackingOrder, publishPackingOrder, updatePackingOrder, checkPackingStockReport, removePackingAssignment } from "../controllers/packingController.js";
 
 const router = express.Router();
 router.use(protect, staff);
+router.get('/my-work', activeWork.list);
 router.get('/recent-work', work.list);
 router.get('/deliveries', delivery.list);
 router.get('/deliveries/:id', delivery.read);

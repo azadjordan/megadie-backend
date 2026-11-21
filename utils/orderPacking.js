@@ -1,5 +1,5 @@
 import { deliveryStockLockReason } from "./deliveryMovementState.js";
-import { deliveryWorkerId, setDeliveryWorker } from './deliveryAssignmentState.js';
+import { deliveryWorkerId, setDeliveryWorker, hasActiveWorkerWork } from './deliveryAssignmentState.js';
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
@@ -48,8 +48,10 @@ async function allocationsFor(orderId, session) {
     .sort({ createdAt: 1, _id: 1 }).session(session || null).lean();
 }
 
-export async function getPackingView(orderId, actor, session = null) {
-  const order = await Order.findOne({ _id: orderId, ...(actor.isAdmin ? {} : { packingWorker: actor._id, packingSentAt: { $ne: null } }) }).select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp +deliveryHistory")
+// The optional snapshot is internal, batch-loaded input for the worker list.
+// Access and readiness checks below are shared with individual task reads.
+export async function getPackingView(orderId, actor, session = null, snapshot = null) {
+  const order = snapshot?.order || await Order.findOne({ _id: orderId, ...(actor.isAdmin ? {} : { packingWorker: actor._id, packingSentAt: { $ne: null } }) }).select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp +deliveryHistory")
     .populate("user", actor.isAdmin ? "name phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes deliveryContactName deliveryPhoneNumber" : "name")
     .populate("packingWorker", "name isWorker isAdmin")
     .populate('deliveryWorker', 'name isWorker')
@@ -57,7 +59,8 @@ export async function getPackingView(orderId, actor, session = null) {
   if (!actor.isAdmin && (!order || order.status !== 'Shipping')) return getWorkerWorkOrder(orderId, actor, { session, version: order?.reservationRevision || 0, status: order?.status });
   if (!order) throw new ReservationError("Packing order is no longer available to this account.", 404);
   assertAccess(order, actor, { published: !actor.isAdmin });
-  if (!actor.isAdmin && deliveryWorkerId(order) === id(actor) && order.deliveryDetails == null) {
+  if (!actor.isAdmin && !hasActiveWorkerWork(order, actor._id)) return getWorkerWorkOrder(orderId, actor, { session, version: order.reservationRevision || 0, status: order.status });
+  if (!snapshot && !actor.isAdmin && deliveryWorkerId(order) === id(actor) && order.deliveryDetails == null) {
     // Older tasks can still rely on profile defaults. Only assigned delivery
     // workers reach this branch; the returned DTO below stays narrowly scoped.
     order.user = await User.findById(id(order.user)).select('name phoneNumber secondaryPhoneNumber deliveryContactName deliveryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes').session(session).lean() || order.user;
@@ -67,7 +70,7 @@ export async function getPackingView(orderId, actor, session = null) {
   const reports = order.packingReports || [];
   const history = order.packingActivity || [];
   const itemEvents = history.filter(event => event.action === "ORDER_ITEMS_CHANGED");
-  const rows = await allocationsFor(orderId, session);
+  const rows = snapshot?.rows || await allocationsFor(orderId, session);
   const help = activePackingHelp(order, rows);
   const products = new Map();
   for (const item of order.orderItems) {
@@ -76,9 +79,9 @@ export async function getPackingView(orderId, actor, session = null) {
     if (existing) existing.qty += item.qty;
     else products.set(productId, { productId, sku: item.sku, name: item.productName || item.sku, unit: "units", qty: item.qty, pickedQty: 0, reservedQty: 0, allocations: [], alternatives: [] });
   }
-  const stock = await SlotItem.find({ product: { $in: [...products.keys()] } })
+  const stock = snapshot?.stock || await SlotItem.find({ product: { $in: [...products.keys()] } })
     .populate("slot", "label store isActive").sort({ qty: 1, createdAt: -1, _id: 1 }).session(session).lean();
-  const reservations = await OrderAllocation.find({ product: { $in: [...products.keys()] }, ...active }).select("product slot qty").session(session).lean();
+  const reservations = snapshot?.reservations || await OrderAllocation.find({ product: { $in: [...products.keys()] }, ...active }).select("product slot qty").session(session).lean();
   const reserved = new Map();
   for (const row of reservations) {
     const key = `${id(row.product)}:${id(row.slot)}`;
@@ -112,7 +115,7 @@ export async function getPackingView(orderId, actor, session = null) {
   const billingReference = actor.isAdmin ? order.invoice || await Invoice.exists({ order: order._id }).session(session) : null;
   const hasInvoice = Boolean(billingReference);
   return {
-    orderId: id(order), orderNumber: order.orderNumber, status: order.status,
+    orderId: id(order), orderNumber: order.orderNumber, createdAt: order.createdAt || null, status: order.status,
     customerName: order.user?.name || "Unknown client",
     label: buildCartonLabel(order.user?.name, order.orderNumber, id(order)),
     version: order.reservationRevision || 0, deliveryRevision: order.deliveryRevision || 0,

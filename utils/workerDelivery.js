@@ -23,13 +23,26 @@ async function load(orderId, actor, session = null) {
 export async function getDeliveryTask(orderId, actor) {
   // Check recent-work rights independently of today's assignment. Closed orders
   // and former assignments must never return a destination through saved links.
-  const eligibility = actor.isAdmin ? null : await Order.findById(orderId).select('status packingWorker packingSentAt preparationMode deliveryWorker +reservationRevision').lean();
+  const eligibility = actor.isAdmin ? null : await Order.findById(orderId).select('status packedAt deliveryMovement packingWorker packingSentAt preparationMode deliveryWorker +reservationRevision').lean();
   if (!actor.isAdmin && (!eligibility || eligibility.status !== 'Shipping' || !canReadDelivery(eligibility, actor))) {
     return getWorkerWorkOrder(orderId, actor, { version: eligibility?.reservationRevision || 0, status: eligibility?.status });
   }
-  const order = await load(orderId, actor);
+  let order;
+  try { order = await load(orderId, actor); }
+  catch (error) {
+    // Completion or reassignment can race the eligibility read. A former
+    // packer may still read their own receipt, never the live delivery.
+    if (!actor.isAdmin && error instanceof ReservationError && [403, 404].includes(error.statusCode)) return getWorkerWorkOrder(orderId, actor);
+    throw error;
+  }
   // Recheck the loaded snapshot in case completion raced the first read.
   if (!actor.isAdmin && order.status !== 'Shipping') return getWorkerWorkOrder(orderId, actor, { version: order.reservationRevision || 0, status: order.status });
+  return deliveryTaskView(order, actor);
+}
+
+// Share the same permissions/readiness with the batch-loaded active-work feed.
+export async function deliveryTaskView(order, actor, readMovementReason = async () => (await getOrderMovement(id(order))).readyReason) {
+  if (!canReadDelivery(order, actor)) reject('This delivery is no longer available to your account.', 403);
   const driverId = deliveryWorkerId(order);
   const driver = order.deliveryWorker === undefined && driverId ? order.packingWorker : order.deliveryWorker;
   const assigned = driverId === id(actor);
@@ -47,10 +60,10 @@ export async function getDeliveryTask(orderId, actor) {
       ? (actor.isAdmin ? 'Delivery worker access is disabled. Assign another worker.' : 'Delivery worker access is disabled. Ask an admin to assign another worker.')
       : (actor.isAdmin ? 'Assign a delivery worker.' : 'Waiting for delivery assignment.');
     else if (!destination?.address && !destination?.googleMapsUrl) readyReason = 'Delivery location is missing. Ask an admin to add the address or map.';
-    else readyReason = (await getOrderMovement(orderId)).readyReason;
+    else readyReason = await readMovementReason();
   }
   return {
-    orderId: id(order), orderNumber: order.orderNumber, customerName: order.user?.name || 'Unknown client',
+    orderId: id(order), orderNumber: order.orderNumber, createdAt: order.createdAt || null, customerName: order.user?.name || 'Unknown client',
     label: buildCartonLabel(order.user?.name, order.orderNumber, id(order)), version: order.reservationRevision || 0,
     status: order.status, packedAt: order.packedAt || null, deliveredAt: order.deliveredAt || null,
     deliveryState: order.status === 'Delivered' ? 'delivered' : order.status === 'Cancelled' ? 'cancelled' : out ? 'out' : order.deliveryMovement?.returnedAt && !order.deliveryMovement?.slotsReturnedAt ? 'returned' : ready ? 'ready' : 'waiting',
@@ -77,7 +90,7 @@ export async function listDeliveryTasks(actor, query = {}) {
     if (error instanceof ReservationError && [403, 404].includes(error.statusCode)) return null;
     throw error;
   })));
-  return { data: data.filter(Boolean), pagination: { page, total, hasNext: page * limit < total } };
+  return { data: data.filter(task => task && task.scope !== 'recent-work'), pagination: { page, total, hasNext: page * limit < total } };
 }
 
 export async function deliveryWorkerChoices(orderId, actor) {

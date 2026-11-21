@@ -1,4 +1,5 @@
 import { reservationId as id } from './orderReservationPlan.js';
+import { deliveryIsOut } from './deliveryMovementState.js';
 
 // Do not apply a schema default: missing and explicitly unassigned are distinct.
 export const deliveryWorkerId = order => id(order.deliveryWorker === undefined
@@ -9,6 +10,16 @@ export const deliveryWorkerFilter = workerId => ({ $or: [
   { deliveryWorker: workerId },
   { deliveryWorker: { $exists: false }, packingWorker: workerId, packingSentAt: { $ne: null }, preparationMode: 'prepare_deliver' },
 ] });
+
+// Live access follows unfinished responsibility, not the historical packer.
+export const activeWorkerOrderFilter = workerId => ({ status: 'Shipping', $or: [
+  { packingWorker: workerId, packingSentAt: { $ne: null }, packedAt: null,
+    $or: [{ 'deliveryMovement.departedAt': null }, { 'deliveryMovement.returnedAt': { $ne: null } }, { 'deliveryMovement.slotsReturnedAt': { $ne: null } }] },
+  deliveryWorkerFilter(workerId),
+] });
+
+export const hasActiveWorkerWork = (order, workerId) => Boolean(id(workerId) && order?.status === 'Shipping' &&
+  (deliveryWorkerId(order) === id(workerId) || (order.packingSentAt && id(order.packingWorker) === id(workerId) && !order.packedAt && !deliveryIsOut(order))));
 
 // Used by both explicit assignments and the initial pack-and-deliver shortcut.
 export function setDeliveryWorker(order, worker, actor) {
@@ -21,5 +32,4 @@ export function setDeliveryWorker(order, worker, actor) {
     note: worker ? `Delivery assigned to ${worker.name}.` : 'Delivery assignment removed.' });
 }
 
-export const canReadDelivery = (order, actor) => Boolean(actor?.isAdmin || (actor?.isWorker &&
-  (deliveryWorkerId(order) === id(actor) || (order.packingSentAt && id(order.packingWorker) === id(actor)))));
+export const canReadDelivery = (order, actor) => Boolean(actor?.isAdmin || (actor?.isWorker && hasActiveWorkerWork(order, actor._id)));

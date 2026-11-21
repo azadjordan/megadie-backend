@@ -150,7 +150,7 @@ test('private work history, durable credit, expiry and corrections', { skip: !ur
     assert.equal((await api(`/packing/deliveries/${f.order._id}`, driver)).status, 403);
     assert.equal((await api(`/packing/orders/${f.order._id}`, packer)).status, 403);
     const active = await fixture(); await Order.updateOne({ _id: active.order._id }, { $set: { packingSentAt: new Date(Date.now() - 20 * 86400000) } });
-    assert.equal((await packing(active, packer)).scope, 'packed-handoff'); assert.ok((await task(active, driver)).delivery);
+    assert.equal((await packing(active, packer)).scope, 'recent-work'); assert.ok((await task(active, driver)).delivery);
   });
 
   await t.test('snapshots survive edits and order deletion; worker role revocation blocks existing sessions', async () => {

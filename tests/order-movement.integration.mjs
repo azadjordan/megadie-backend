@@ -10,6 +10,10 @@ import Product from "../models/productModel.js";
 import Slot from "../models/slotModel.js";
 import SlotItem from "../models/slotItemModel.js";
 import OrderAllocation from "../models/orderAllocationModel.js";
+import WorkerWork from '../models/workerWorkModel.js';
+import Quote from '../models/quoteModel.js';
+import Invoice from '../models/invoiceModel.js';
+import Payment from '../models/paymentModel.js';
 import InventoryMovement from "../models/inventoryMovementModel.js";
 import packingRoutes from "../routes/packingRoutes.js";
 import orderRoutes from "../routes/orderRoutes.js";
@@ -30,6 +34,7 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
   t.after(async () => { await mongoose.connection.dropDatabase(); await mongoose.disconnect(); });
   await OrderAllocation.createIndexes();
   await InventoryMovement.createCollection();
+  await WorkerWork.createIndexes();
   const makeUser = (name, values = {}) => User.create({ name, email: `${name}@test.invalid`, phoneNumber: name, password: "test-password", approvalStatus: "Approved", ...values });
   const admin = await makeUser("Admin", { isAdmin: true });
   const worker = await makeUser("Worker", { isWorker: true });
@@ -89,8 +94,8 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
     assert.equal((await api(`/orders/${f.order._id}/movement`, { actor: customer })).status, 403);
   });
   await t.test('company delivery, customer collection and direct receipt are truthful without invoice or invented departure', async () => {
-    const company = await fixture(); expectOK(await move(company, { method: 'company', handler: 'Owner' }));
-    assert.equal((await movement(company)).movement.handler, 'Owner');
+    const company = await fixture(); expectOK(await move(company, { method: 'company', handler: 'Momani' }));
+    assert.equal((await movement(company)).movement.handler, 'Momani');
     const collected = await fixture(); expectOK(await move(collected, { action: 'collected', method: 'collection', handler: '' }));
     const c = await movement(collected); assert.equal(c.status, 'Delivered'); assert.equal(c.movement.departedAt, undefined); assert.equal(c.history[0].action, 'collected');
     const direct = await fixture(); expectOK(await move(direct, { action: 'delivered', method: 'company', handler: 'Azad' }));
@@ -99,12 +104,72 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
   await t.test('unassigned deliveries require an explicit method and direct company receipt needs no departure', async () => {
     const f = await fixture();
     assert.equal((await move(f, { method: undefined, handler: undefined })).status, 400);
-    expectOK(await move(f, { method: 'company', handler: undefined }));
+    assert.equal((await move(f, { method: 'company', handler: undefined })).status, 400);
+    expectOK(await move(f, { method: 'company', handler: 'Momani' }));
     assert.equal((await movement(f)).movement.method, 'company');
-    assert.equal((await movement(f)).movement.handler, admin.name);
+    assert.equal((await movement(f)).movement.handler, 'Momani');
     const direct = await fixture();
-    expectOK(await move(direct, { action: 'delivered', method: 'company', handler: undefined }));
+    assert.equal((await move(direct, { action: 'delivered', method: 'company', handler: undefined })).status, 400);
+    expectOK(await move(direct, { action: 'delivered', method: 'company', handler: 'Azad' }));
     assert.equal((await movement(direct)).movement.departedAt, undefined);
+  });
+  await t.test('owner deliveries record the selected person and preserve billing, stock and worker totals', async () => {
+    for (const owner of ['Azad', 'Momani']) {
+      const f = await fixture();
+      const quote = await Quote.create({ user: customer._id, order: f.order._id, status: 'Confirmed', requestedItems: [{ product: f.productId, qty: 10, unitPrice: 12 }] });
+      const invoice = await Invoice.create({ user: customer._id, order: f.order._id, amountMinor: 12000, currency: 'AED', minorUnitFactor: 100, dueDate: new Date('2030-01-01') });
+      await Payment.create({ invoice: invoice._id, amountMinor: 3000, paymentMethod: 'Cash', receivedBy: 'Company Account' });
+      await Order.updateOne({ _id: f.order._id }, { $set: { quote: quote._id, invoice: invoice._id } });
+      const bill = await Invoice.findById(invoice._id).lean(), payments = await Payment.find({ invoice: invoice._id }).lean(), stock = await SlotItem.find({ product: f.productId }).lean();
+      expectOK(await move(f, { method: 'company', handler: ' ' + owner.toLowerCase() + ' ' }));
+      const departed = await movement(f), allocations = await OrderAllocation.find({ order: f.order._id }).select('-pickedAt -updatedAt').lean();
+      assert.equal(departed.movement.handler, owner); assert.equal(departed.movement.worker, undefined);
+      assert.equal(departed.history[0].handler, owner); assert.equal(departed.history[0].actorName, 'Admin');
+      expectOK(await move(f, { action: 'delivered', method: undefined, handler: undefined }));
+      const complete = await movement(f); assert.equal(complete.deliveredBy, owner); assert.equal(complete.history.at(-1).handler, owner);
+      assert.equal(await Quote.exists({ _id: quote._id }), null);
+      assert.deepEqual(await Invoice.findById(invoice._id).lean(), bill); assert.deepEqual(await Payment.find({ invoice: invoice._id }).lean(), payments);
+      assert.deepEqual(await SlotItem.find({ product: f.productId }).lean(), stock); assert.deepEqual(await OrderAllocation.find({ order: f.order._id }).select('-pickedAt -updatedAt').lean(), allocations);
+      assert.equal(await WorkerWork.countDocuments({ order: f.order._id, type: 'delivered' }), 0);
+    }
+  });
+  await t.test('blank and arbitrary owner names reject without changing orders or reservations', async () => {
+    const f = await fixture();
+    const before = await Order.findById(f.order._id).select('+deliveryHistory +reservationRevision').lean(), allocations = await OrderAllocation.find({ order: f.order._id }).lean();
+    for (const handler of [undefined, '', 'Owner', worker.name, 'External courier']) {
+      const result = await move(f, { method: 'company', handler }); assert.equal(result.status, 400);
+      assert.match(result.body.message, /Choose Azad or Momani/); assert.match(result.body.message, /Refresh/);
+      assert.deepEqual(await Order.findById(f.order._id).select('+deliveryHistory +reservationRevision').lean(), before);
+      assert.deepEqual(await OrderAllocation.find({ order: f.order._id }).lean(), allocations);
+    }
+    assert.equal((await api(`/orders/${f.order._id}/deliver`, { method: 'PUT', body: { deliveredBy: 'External courier' } })).status, 400);
+    expectOK(await api(`/orders/${f.order._id}/deliver`, { method: 'PUT', body: { method: 'courier', deliveredBy: 'External courier' } }));
+    assert.equal((await movement(f)).deliveredBy, 'External courier');
+  });
+  await t.test('an owner choice cannot override an assigned worker and normal worker delivery retains credit', async () => {
+    const f = await fixture(); await Order.updateOne({ _id: f.order._id }, { $set: { deliveryWorker: worker._id } });
+    const before = await Order.findById(f.order._id).select('+deliveryHistory +reservationRevision').lean();
+    assert.equal((await move(f, { method: 'company', handler: 'Azad' })).status, 409);
+    assert.deepEqual(await Order.findById(f.order._id).select('+deliveryHistory +reservationRevision').lean(), before);
+    expectOK(await move(f, { method: undefined, handler: undefined }));
+    expectOK(await move(f, { action: 'delivered', method: undefined, handler: undefined }));
+    assert.equal((await movement(f)).deliveredBy, worker.name);
+    assert.equal(await WorkerWork.countDocuments({ order: f.order._id, type: 'delivered', worker: worker._id, active: true }), 1);
+  });
+  await t.test('historical company names survive receipt, correction and return; only a new departure selects a new owner', async () => {
+    const f = await fixture(), departedAt = new Date(Date.now() - 60000);
+    await Order.updateOne({ _id: f.order._id }, { $set: { deliveryMovement: { method: 'company', handler: 'Former owner', departedAt }, deliveryHistory: [{ action: 'departed', method: 'company', handler: 'Former owner', at: departedAt, actor: admin._id, actorName: admin.name }] } });
+    await OrderAllocation.updateOne({ _id: f.allocationId }, { $set: { pickedQty: 10 } });
+    expectOK(await move(f, { action: 'delivered', method: undefined, handler: undefined }));
+    assert.equal((await movement(f)).deliveredBy, 'Former owner');
+    expectOK(await move(f, { action: 'corrected', confirmedCorrection: true, note: 'Receipt recorded by mistake' }));
+    expectOK(await move(f, { action: 'returned' }));
+    assert.equal((await movement(f)).movement.handler, 'Former owner');
+    expectOK(await move(f, { action: 'reshelved' }));
+    const old = await movement(f); assert.ok(old.history.every(event => event.handler === 'Former owner'));
+    expectOK(await move(f, { method: 'company', handler: 'Momani' }));
+    const next = await movement(f); assert.deepEqual(next.history.slice(0, -1), old.history); assert.equal(next.movement.handler, 'Momani');
+    assert.equal(await WorkerWork.countDocuments({ order: f.order._id, type: 'delivered' }), 0);
   });
   await t.test('physical confirmations and exact reservations are checked before any write', async () => {
     const f = await fixture(), v = await movement(f);
@@ -177,9 +242,9 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
     let v = await movement(f); assert.equal(v.isOut, false); assert.equal(v.holdsGoods, true); assert.equal(v.status, 'Shipping');
     assert.equal((await OrderAllocation.findById(f.allocationId)).pickedQty, 10);
     assert.equal((await api(`/orders/${f.order._id}/cancel`, { method: 'POST', body: { confirmedPhysicalReturn: true } })).status, 409);
-    expectOK(await move(f, { method: 'company', handler: 'Owner' }));
+    expectOK(await move(f, { method: 'company', handler: 'Momani' }));
     v = await movement(f); assert.deepEqual(v.history.map(e => e.action), ['departed', 'returned', 'departed']);
-    assert.equal(v.history[0].at, firstDeparture); assert.equal(v.movement.handler, 'Owner'); assert.equal(v.movement.returnedAt, undefined);
+    assert.equal(v.history[0].at, firstDeparture); assert.equal(v.movement.handler, 'Momani'); assert.equal(v.movement.returnedAt, undefined);
   });
   await t.test('reshelving is explicit, clears picked ledger and reopens packing without releasing reservations', async () => {
     const f = await fixture(); expectOK(await move(f));
@@ -207,13 +272,15 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
     expectOK(await action(f, 'pick', { allocationId: f.allocationId, pickedQty: 10 })); expectOK(await action(f, 'packed'));
     expectOK(await move(f));
     const board = (await api('/packing/orders?view=board', { actor: worker })).body.groups;
-    assert.ok(board.in_delivery.data.some(o => o.orderId === String(f.order._id)));
+    assert.ok(!board.in_delivery.data.some(o => o.orderId === String(f.order._id)));
+    assert.ok((await api('/packing/orders?view=board')).body.groups.in_delivery.data.some(o => o.orderId === String(f.order._id)));
     assert.ok(!board.ready_handoff.data.some(o => o.orderId === String(f.order._id)));
-    assert.equal((await view(f, worker)).deliveryState, 'courier');
+    assert.equal((await view(f, worker)).scope, 'recent-work');
     assert.equal((await action(f, 'reopen', {}, admin)).status, 409);
     assert.equal((await send(f, other)).status, 409);
     expectOK(await move(f, { action: 'returned' })); assert.ok((await Order.findById(f.order._id)).packedAt);
-    assert.ok((await api('/packing/orders?view=board', { actor: worker })).body.groups.ready_handoff.data.some(o => o.orderId === String(f.order._id)));
+    assert.ok(!(await api('/packing/orders?view=board', { actor: worker })).body.groups.ready_handoff.data.some(o => o.orderId === String(f.order._id)));
+    assert.ok((await api('/packing/orders?view=board')).body.groups.ready_handoff.data.some(o => o.orderId === String(f.order._id)));
     expectOK(await move(f, { action: 'collected', method: 'collection' })); assert.equal((await movement(f)).status, 'Delivered');
   });
   await t.test('concurrent departures commit once and stale updates cannot overwrite movement', async () => {

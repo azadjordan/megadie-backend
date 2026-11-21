@@ -1,4 +1,4 @@
-import { deliveryWorkerId } from '../utils/deliveryAssignmentState.js';
+import { deliveryWorkerId, activeWorkerOrderFilter } from '../utils/deliveryAssignmentState.js';
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Order from "../models/orderModel.js";
@@ -34,7 +34,7 @@ export const listPackingWorkers = handle(async (_req, res) => {
 export const listPackingOrders = handle(async (req, res) => {
   const page = Math.max(1, Math.min(10000, parseInt(req.query.page, 10) || 1));
   const limit = 50;
-  const filter = { status: "Shipping", packingSentAt: { $ne: null }, ...(req.user.isAdmin ? {} : { packingWorker: req.user._id }) };
+  const filter = { status: "Shipping", packingSentAt: { $ne: null }, ...(req.user.isAdmin ? {} : { packingWorker: req.user._id, $and: [activeWorkerOrderFilter(req.user._id)] }) };
   if (req.query.view === "board") {
     // Each queue has its own pagination. Counts cover every assignment, so an
     // empty section never means merely "none on this page of a flat list".

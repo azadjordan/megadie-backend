@@ -6,13 +6,15 @@ Packing and delivery use the existing Worker access flag and separate assignment
 
 Admin reserves goods and assigns packing. Pack & deliver initially assigns delivery to the same worker; Pack only leaves delivery unassigned unless someone was already independently assigned. Existing picking and shortage controls lead to Mark packed.
 
-Only admins can Assign delivery, Change delivery worker, remove an assignment, or list enabled workers for selection. Workers see their assigned driver name or Waiting for delivery assignment, with no assignment controls. This records responsibility, not movement. Packing, invoice, reservations and shelf quantities stay saved. Assignment remains available after packing and invoicing. During departure only an admin may reassign, with explicit acknowledgement of physical responsibility transfer.
+For deliveries without an assigned worker, admins choose Azad, Momani, Courier (with a required name), or Customer collection. Owner choices store the existing company method with the canonical owner name; they never assign a worker or generate worker delivery credit. New owner movements require an explicit valid owner, while existing departures keep their recorded name through receipt, returns and corrections.
+
+Only admins can Assign delivery, Change delivery worker, remove an assignment, or list enabled workers for selection. Workers receive their own unfinished packing or assigned delivery jobs, with no assignment controls. Once packing-only work is finished, it leaves active work and both saved task links are restricted to the worker's own recent-work receipt and its privacy window. This records responsibility, not movement. Packing, invoice, reservations and shelf quantities stay saved. Assignment remains available after packing and invoicing. During departure only an admin may reassign, with explicit acknowledgement of physical responsibility transfer.
 
 The current delivery worker uses Mark out for delivery when the complete order leaves, then Mark delivered after complete customer receipt. Waiting for packing cannot depart. Admin-prepared orders retain the complete-preparation confirmation on departure. Returned to store under More confirms all goods are back; goods remain packed and reserved. Shelf return remains an admin action.
 
 Receipt confirmation names the client and order and states that the complete order was received. Partial, refused or failed deliveries require admin review; the confirmation reminds the worker to contact an admin before proceeding. No partial-delivery status or extra approval step is introduced.
 
-My work has Packing and Deliveries tabs. A worker with only delivery tasks lands on Deliveries. Cards show client, carton reference, delivery status, recipient/address, map/directions and calling. Details add notes and a price-free item summary. Completion stays visible on the open detail page with success feedback and leaves the active list. Delivery access does not grant picking, inventory, billing or access to other customers/orders.
+My work has Active work and Recent work views. The combined active feed shows one card per order and its current packing or delivery action, with compact Waiting entries. A delivery-only worker sees delivery jobs directly, and combined assignments transition from packing to delivery without duplicate cards. Cards show client, carton reference, delivery status, recipient/address, map/directions and calling. Details add notes and a price-free item summary. Completion stays visible on the open detail page with success feedback and leaves the active list. Delivery access does not grant picking, inventory, billing or access to other customers/orders.
 
 Admin orders offer Packing worker and Delivery worker separately. Order details and packing monitoring include a compact delivery assignment panel. Removing packing retains the independently managed delivery assignment, as explained in its dialog.
 
@@ -29,7 +31,8 @@ Admin orders offer Packing worker and Delivery worker separately. Order details 
 
 Staff endpoints under `/api/packing/deliveries`:
 
-- GET `/`: assigned active orders, bounded pagination.
+- GET `/`: assigned active orders, bounded pagination. The existing delivery list endpoint is retained for compatibility and admin views.
+- GET `/api/packing/my-work`: worker-scoped unique active packing/delivery cards, To do and Waiting counts and pagination.
 - GET `/:id`: scoped task and permissions.
 - GET `/:id/workers`: admin-only selection of enabled worker ids/names.
 - POST `/:id/assignment`: admin-only; `workerId` (or admin-only null), `expectedRevision`, trusted origin; admin `confirmedHandover` required while out.

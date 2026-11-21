@@ -183,7 +183,7 @@ test("worker delivery assignments with an isolated replica set", { skip: !uri, t
     expectOK(await api(`/packing/deliveries/${f.order._id}/workers`));
     expectOK(await assign(f, worker));
     expectOK(await assign(f, null));
-    const waiting = await task(f, worker); assert.equal(waiting.worker, null); assert.equal(waiting.canAssign, false); assert.equal(waiting.readyReason, 'Waiting for delivery assignment.');
+    const waiting = await task(f, worker); assert.equal(waiting.worker, null); assert.equal(waiting.canAssign, false); assert.equal(waiting.scope, 'recent-work'); assert.equal(waiting.readyReason, '');
     expectOK(await assign(f, other));
     expectOK(await move(f, 'departed')); expectOK(await move(f, 'delivered'));
   });
@@ -196,7 +196,7 @@ test("worker delivery assignments with an isolated replica set", { skip: !uri, t
     const d = await task(f, other); assert.equal(d.delivery.address, 'Saved order location'); assert.equal(d.canDepart, true); assert.equal(d.items[0].qty, 10);
     for (const key of ['invoice', 'totalPrice', 'adminToAdminNote', 'packingActivity', 'packingReports', 'deliveryHistory', 'allocations']) assert.equal(d[key], undefined);
     assert.equal((await api(`/packing/orders/${f.order._id}`, { actor: other })).status, 403);
-    const p = await task(f, worker); assert.equal(p.delivery, null); assert.deepEqual(p.items, []); assert.equal(p.canDepart, false); assert.equal(p.canAssign, false);
+    const p = await task(f, worker); assert.equal(p.delivery, null); assert.equal(p.scope, 'recent-work'); assert.equal(p.items[0].qty, 10); assert.ok(p.items.every(item => !item.allocations.length && !item.alternatives.length)); assert.equal(p.canDepart, false); assert.equal(p.canAssign, false);
     assert.equal((await view(f, worker)).delivery, null);
     const after = await Order.findById(f.order._id).lean();
     for (const key of ['packedAt', 'packedBy', 'packingWorker', 'invoice', 'orderItems']) assert.deepEqual(after[key], before[key]);
@@ -280,7 +280,8 @@ test("worker delivery assignments with an isolated replica set", { skip: !uri, t
     const f = await packed({ mode: 'prepare_deliver', driver: other });
     const board = await api('/packing/orders?view=board', { actor: worker }); expectOK(board);
     const id = String(f.order._id);
-    assert.ok(board.body.groups.ready_handoff.data.some(row => row.orderId === id && row.preparationMode === 'prepare_only'));
+    assert.ok(!board.body.groups.ready_handoff.data.some(row => row.orderId === id));
+    assert.ok((await api('/packing/orders?view=board')).body.groups.ready_handoff.data.some(row => row.orderId === id));
     assert.ok(!board.body.groups.ready_delivery.data.some(row => row.orderId === id));
     const v = await view(f);
     expectOK(await api(`/packing/orders/${f.order._id}/send`, { method: 'POST', body: { workerId: String(worker._id), preparationMode: 'prepare_only', deliveryDetails: {}, expectedRevision: v.version, expectedDeliveryRevision: v.deliveryRevision } }));

@@ -25,6 +25,10 @@ test('worker delivery browser flow', { timeout: 120000 }, async t => {
       if (path === '/users/account/profile') return reply({ data: { _id: workerId, name: 'Omar', isWorker: !admin, isAdmin: admin, approvalStatus: 'Approved', ...metadata() } });
       if (path === '/users/session/activity') return reply({ data: metadata() });
       if (path === '/site-settings/maintenance-notice') return reply({ data: { enabled: false } });
+      if (path === '/packing/my-work') {
+        const card = { ...state.task, kind: 'delivery', group: state.task.canDepart || state.task.canDeliver ? 'todo' : 'waiting', nextAction: state.task.canDeliver ? 'delivered' : state.task.canDepart ? 'departed' : null, message: state.task.readyReason || 'Ready for delivery.', totalItems: 1, totalUnits: 10 };
+        return reply({ groups: Object.fromEntries(['todo', 'waiting'].map(key => { const data = !state.denied && state.task.status === 'Shipping' && card.group === key ? [card] : []; return [key, { data, pagination: { page: 1, total: data.length, hasNext: false } }]; })) });
+      }
       if (path === '/packing/orders') return reply({ groups: Object.fromEntries(['to_pack', 'ready_delivery', 'ready_handoff', 'in_delivery'].map(key => [key, { data: [], pagination: { page: 1, total: 0, hasNext: false } }])) });
       if (path === '/packing/deliveries') return reply({ data: state.denied || state.task.status !== 'Shipping' ? [] : [state.task], pagination: { page: 1, total: state.denied || state.task.status !== 'Shipping' ? 0 : 1, hasNext: false } });
       if (path === `/packing/deliveries/${orderId}`) return state.denied ? reply({ message: 'Reassigned' }, 403) : reply({ data: state.task });
@@ -106,7 +110,7 @@ test('worker delivery browser flow', { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t);
     Object.assign(state.task, { worker: null, delivery: null, items: [], canAssign: true, canDepart: false, readyReason: 'Waiting for delivery assignment.' });
     await page.goto(origin + '/packing/deliveries/' + orderId);
-    await page.getByText('Waiting for delivery assignment', { exact: true }).waitFor();
+    await page.getByText('Ready for collection', { exact: true }).waitFor();
     assert.equal(await page.getByRole('button', { name: /Assign delivery|Change delivery worker/ }).count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).count(), 0);
     assert.equal(state.writes.length, 0);
@@ -175,7 +179,7 @@ test('worker delivery browser flow', { timeout: 120000 }, async t => {
     await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor(); await context.setOffline(true);
     await page.getByText('Offline. Reconnect before updating delivery.').waitFor(); assert.equal(await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).isDisabled(), true);
     await context.setOffline(false); state.denied = true; await page.goto(origin + '/packing?tab=deliveries');
-    await page.getByText('No deliveries assigned to you.', { exact: false }).waitFor();
+    await page.getByText('No orders need your action right now.', { exact: true }).waitFor();
   });
   for (const width of [320, 1440]) await t.test(`delivery cards and details fit ${width}px without horizontal scrolling`, async t => {
     const { page } = await fixture(t, { width }); await page.goto(origin + '/packing?tab=deliveries'); await page.getByRole('link', { name: 'View delivery', exact: true }).waitFor();

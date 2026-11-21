@@ -13,8 +13,9 @@ import { recordWorkerWork, voidWorkerWork } from './workerWork.js';
 
 const reject = (message, code = 409) => { throw new ReservationError(message, code); };
 const selection = '+reservationRevision +deliveryHistory +packingActivity';
+const deliveryOwners = new Map([['azad', 'Azad'], ['momani', 'Momani']]);
 
-async function readyReason(order, rows, session) {
+export async function movementReadyReason(order, rows, session = null, snapshot = null) {
   if (order.status !== 'Shipping') return 'Delivery updates require an order in preparation.';
   if (order.stockFinalizedAt || rows.some(r => r.status === 'Deducted')) return 'Stock has already been finalized. Review the order.';
   if (order.packingSentAt && (!order.packedAt || !canMarkPacked(order, rows))) return 'The worker must finish and mark this order Packed before delivery.';
@@ -26,8 +27,8 @@ async function readyReason(order, rows, session) {
   }
   if (!ordered.size || ordered.size !== reserved.size || [...ordered].some(([p, q]) => reserved.get(p) !== q)) return 'Reserve all items before updating delivery.';
   const products = [...ordered.keys()];
-  const stocks = await SlotItem.find({ product: { $in: products } }).populate('slot', 'label store isActive').session(session).lean();
-  const others = await OrderAllocation.find({ product: { $in: products }, order: { $ne: order._id }, $or: [{ status: 'Reserved' }, { status: { $exists: false } }] }).session(session).lean();
+  const stocks = snapshot?.stock || await SlotItem.find({ product: { $in: products } }).populate('slot', 'label store isActive').session(session).lean();
+  const others = snapshot?.others || await OrderAllocation.find({ product: { $in: products }, order: { $ne: order._id }, $or: [{ status: 'Reserved' }, { status: { $exists: false } }] }).session(session).lean();
   const plan = buildOrderReservationPlan(order, rows, stocks, others);
   if (plan.issues.length) return plan.issues.map(i => i.message).join(' ');
   if (rows.filter(isReserved).some(r => !stocks.some(s => id(s.product) === id(r.product) && id(s.slot) === id(r.slot) && (s.slot?.isActive !== false || r.pickedQty === r.qty)))) return 'Review the reserved stock locations before updating delivery.';
@@ -45,7 +46,7 @@ async function view(order, session = null) {
     deliveryWorker: await deliveryWorkerView(order, session),
     deliveredAt: order.deliveredAt || null, deliveredBy: order.deliveredBy || '',
     manualPreparation: !order.packingSentAt, isOut: deliveryIsOut(order), holdsGoods: deliveryHoldsGoods(order),
-    readyReason: await readyReason(order, rows, session), history: order.deliveryHistory || [] };
+    readyReason: await movementReadyReason(order, rows, session), history: order.deliveryHistory || [] };
 }
 export async function getOrderMovement(orderId) {
   const order = await Order.findById(orderId).select(selection);
@@ -112,15 +113,18 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
         if (handler && handler !== driver.name) reject('The typed delivery name conflicts with the assigned worker. Change the delivery assignment first.');
         method = 'company'; handler = driver.name;
       } else {
-        // Older admin clients may still send a free-text carrier. It remains a
-        // non-worker delivery and never produces employee delivery credit.
+        // Legacy clients use deliveredBy; new owner deliveries still require an
+        // explicit known owner. Existing departures are handled above unchanged.
         if (!method && legacy) {
           if (!handler) reject('Select a delivery worker or provide the delivery method and recipient.', 400);
           method = 'company';
         }
         if (!method) reject('Choose a delivery method or assign a delivery worker.', 400);
-        if (method === 'company' && !handler) handler = actor.name;
-        if (method === 'company' && await User.exists({ isWorker: true, name: handler }).session(session)) reject('Select the worker account through Delivery worker instead of typing its name.');
+        if (method === 'company') {
+          const owner = deliveryOwners.get(handler.toLowerCase());
+          if (!owner) reject('Choose Azad or Momani, or use Assign delivery worker. Refresh the page if these choices are missing.', 400);
+          handler = owner;
+        }
       }
       if (method === 'collection') handler = 'Customer collection';
       if (method === 'courier' && !handler) reject('Enter the courier name.', 400);
@@ -154,7 +158,7 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
     } else {
       if (action === 'departed' && (out || method === 'collection')) reject('Record customer collection as completed, or return the active delivery first.');
       if (action === 'collected' && (method !== 'collection' || out)) reject('Customer collection requires the goods to be in the store.');
-      const reason = await readyReason(order, rows, session);
+      const reason = await movementReadyReason(order, rows, session);
       if (reason) reject(reason);
       if (!legacy && !order.packingSentAt && body.confirmedReady !== true) reject('Confirm the order is prepared from the reserved slots.', 400);
       if (!legacy && (action === 'delivered' || action === 'collected') && body.confirmedReceived !== true) reject('Confirm the customer has received the complete order.', 400);

@@ -9,11 +9,11 @@ const profile = { _id: '200000000000000000000001', name: 'Admin', isAdmin: true,
 
 test('delivery movement browser flow', { timeout: 120000 }, async t => {
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
-  async function fixture(t, { width = 1400, out = false, returned = false, unassigned = false } = {}) {
+  async function fixture(t, { width = 1400, out = false, returned = false, unassigned = false, legacyCompany = false } = {}) {
     const context = await browser.newContext({ viewport: { width, height: 950 } }); t.after(() => context.close());
     const state = { writes: [], unexpected: [], errors: [], fail: false, lost: false,
       order: { _id: id, orderNumber: 'ORD-MOVEMENT', user: { _id: 'client', name: 'Azad Store' }, status: 'Shipping', allocationStatus: 'Allocated', orderItems: [{ product: 'p1', sku: 'SKU1', qty: 10, unitPrice: 2 }], stockChecksPending: 0, totalPrice: 20, listAction: out ? 'mark-delivered' : 'mark-out-for-delivery', createdAt: '2026-11-16T08:00:00Z' },
-      view: { orderId: id, orderNumber: 'ORD-MOVEMENT', status: 'Shipping', version: 0, manualPreparation: true, readyReason: '', isOut: out, holdsGoods: out || returned, history: [], movement: out || returned ? { method: 'courier', handler: 'Courier A', departedAt: '2026-11-16T08:00:00Z', ...(returned ? { returnedAt: '2026-11-16T09:00:00Z' } : {}) } : null },
+      view: { orderId: id, orderNumber: 'ORD-MOVEMENT', status: 'Shipping', version: 0, manualPreparation: true, readyReason: '', isOut: out, holdsGoods: out || returned, history: [], movement: out || returned ? { method: legacyCompany ? 'company' : 'courier', handler: legacyCompany ? 'Former owner' : 'Courier A', departedAt: '2026-11-16T08:00:00Z', ...(returned ? { returnedAt: '2026-11-16T09:00:00Z' } : {}) } : null },
     };
     state.order.deliveryMovement = state.view.movement;
     state.view.deliveryWorker = unassigned ? null : { id: '200000000000000000000001', name: 'Arun', enabled: true };
@@ -83,11 +83,45 @@ test('delivery movement browser flow', { timeout: 120000 }, async t => {
     await dialog.getByRole('button', { name: 'Mark delivered', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
     assert.equal(state.view.status, 'Delivered'); assert.deepEqual(state.writes.map(w => w.action), ['departed', 'delivered']);
   });
-  await t.test('company owner delivery has an explicit method and optional name', async t => {
-    const { dialog, state } = await fixture(t, { unassigned: true });
-    await dialog.getByRole('combobox', { name: 'Delivery method', exact: true }).selectOption('company');
+  for (const [value, name, width] of [['azad', 'Azad', 1440], ['momani', 'Momani', 320]]) await t.test(`${name} is an explicit owner choice with no typed name at ${width}px`, async t => {
+    const { page, dialog, state } = await fixture(t, { unassigned: true, width });
+    const select = dialog.getByRole('combobox', { name: 'Delivery method', exact: true });
+    assert.deepEqual(await select.locator('option').allTextContents(), ['Choose delivery method', 'Azad', 'Momani', 'Courier', 'Customer collection']);
+    assert.equal(await dialog.getByRole('button', { name: 'Mark out for delivery', exact: true }).isDisabled(), true);
+    await select.selectOption(value);
+    assert.equal(await dialog.getByRole('textbox').count(), 0);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({ path: `../output/delivery-owner-${value}-${width}.png`, fullPage: true });
     await dialog.getByRole('button', { name: 'Mark out for delivery', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
-    assert.equal(state.writes[0].handler, ''); assert.equal(state.writes[0].method, 'company'); assert.equal(state.view.isOut, true);
+    assert.equal(state.writes[0].handler, name); assert.equal(state.writes[0].method, 'company'); assert.equal(state.view.isOut, true);
+  });
+  await t.test('courier requires its own name and switching choices clears stale input', async t => {
+    const { dialog, state } = await fixture(t, { unassigned: true });
+    const select = dialog.getByRole('combobox', { name: 'Delivery method', exact: true });
+    const confirm = dialog.getByRole('button', { name: 'Mark out for delivery', exact: true });
+    await select.selectOption('azad'); await select.selectOption('courier');
+    const input = dialog.getByLabel('Courier name', { exact: true });
+    assert.equal(await input.inputValue(), ''); assert.equal(await confirm.isDisabled(), true);
+    await input.fill('   '); assert.equal(await confirm.isDisabled(), true);
+    await input.fill('Courier A'); assert.equal(await confirm.isDisabled(), false);
+    await select.selectOption('momani'); assert.equal(await dialog.getByRole('textbox').count(), 0);
+    await confirm.click(); await dialog.waitFor({ state: 'hidden' });
+    assert.equal(state.writes[0].handler, 'Momani'); assert.equal(state.writes[0].method, 'company');
+  });
+  await t.test('courier choice submits its required name', async t => {
+    const { dialog, state } = await fixture(t, { unassigned: true });
+    await dialog.getByRole('combobox', { name: 'Delivery method', exact: true }).selectOption('courier');
+    await dialog.getByLabel('Courier name', { exact: true }).fill('Courier B');
+    await dialog.getByRole('button', { name: 'Mark out for delivery', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+    assert.equal(state.writes[0].handler, 'Courier B'); assert.equal(state.writes[0].method, 'courier');
+  });
+  await t.test('an older company departure completes using its recorded name without asking for an owner', async t => {
+    const { dialog, state } = await fixture(t, { out: true, unassigned: true, legacyCompany: true });
+    await dialog.getByText('Handed to: Former owner', { exact: true }).waitFor();
+    assert.equal(await dialog.getByRole('combobox').count(), 0); assert.equal(await dialog.getByRole('textbox').count(), 0);
+    await dialog.getByRole('button', { name: 'Mark delivered', exact: true }).click(); await dialog.waitFor({ state: 'hidden' });
+    assert.equal(state.writes[0].handler, undefined); assert.equal(state.writes[0].method, undefined);
+    assert.equal(state.view.deliveredBy, 'Former owner');
   });
   await t.test('customer collection uses an explicit choice without inventing departure', async t => {
     const { page, dialog, state } = await fixture(t, { unassigned: true }); await dialog.getByRole('button', { name: 'Close' }).click();

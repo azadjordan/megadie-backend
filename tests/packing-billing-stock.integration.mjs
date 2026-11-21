@@ -114,7 +114,7 @@ test('packing invoice timing and stock-report checks', { skip: !uri, timeout: 12
     const sheet = await view(f);
     assert.equal((await api('/orders/' + f.order._id + '/items-preview', { method: 'POST', body: { expectedRevision: sheet.version, items: [{ key: 'line-0', qty: 7 }] } })).status, 409);
     assert.equal((await api('/orders/' + f.order._id, { method: 'PUT', body: { deliveryCharge: 0 } })).status, 400);
-    assert.equal((await api('/orders/' + f.order._id + '/movement', { method: 'POST', body: { action: 'departed', method: 'company', handler: 'Owner', expectedRevision: sheet.version } })).status, 409);
+    assert.equal((await api('/orders/' + f.order._id + '/movement', { method: 'POST', body: { action: 'departed', method: 'company', handler: 'Azad', expectedRevision: sheet.version } })).status, 409);
     assert.equal((await api('/orders/' + f.order._id + '/allocations/finalize', { method: 'POST' })).status, 409);
     const target = await Slot.create({ store: 'AE1', unit: 'B', position: 2, cbm: 1000 });
     await SlotItem.collection.insertOne({ product: f.product, slot: target._id, qty: 30, cbm: 30 });

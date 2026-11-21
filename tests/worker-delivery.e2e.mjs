@@ -71,7 +71,11 @@ test('admin assigns a separate driver while workers only pack and record deliver
     return page;
   }
   const packingPage = await login(packer);
-  await packingPage.getByText('Waiting for delivery assignment', { exact: true }).waitFor();
+  await packingPage.getByText('No orders need your action right now.', { exact: true }).waitFor();
+  assert.equal(await packingPage.getByRole('article').count(), 0);
+  await packingPage.getByRole('button', { name: 'Recent work', exact: true }).click();
+  await packingPage.getByRole('article').getByText('Packed', { exact: true }).waitFor();
+  assert.equal(await packingPage.getByText('Al Ain warehouse', { exact: true }).count(), 0);
   assert.equal(await packingPage.getByRole('button', { name: /Assign delivery|Change delivery worker/ }).count(), 0);
   const ownerPage = await login(admin);
   await ownerPage.getByRole('button', { name: 'Assign delivery', exact: true }).click();
@@ -155,6 +159,77 @@ test('admin assigns a separate driver while workers only pack and record deliver
   const { default: WorkerWork } = await import('../models/workerWorkModel.js');
   const adminReceipt = await WorkerWork.findOne({ order: adminOrder._id, type: 'delivered', active: true });
   assert.equal(String(adminReceipt.worker), String(driver._id)); assert.equal(String(adminReceipt.actor), String(admin._id));
+
+  // A combined assignment stays a single card and leads through both tasks.
+  const combined = await Order.create({ user: customer._id, status: 'Shipping', orderItems: [{ product: productId, sku: 'RIB-TEST', qty: 2, unitPrice: 12 }], totalPrice: 24, allocationStatus: 'Allocated', packingWorker: driver._id, packingSentAt: new Date(), preparationMode: 'prepare_deliver', deliveryWorker: driver._id, deliveryDetails: { contactName: 'Combined recipient', address: 'Combined destination', phoneNumber: '+971501234567' } });
+  await OrderAllocation.create({ order: combined._id, product: productId, slot: slot._id, qty: 2, by: admin._id });
+  await deliveryPage.goto(frontend + '/packing');
+  await deliveryPage.getByRole('link', { name: 'Start packing', exact: true }).waitFor();
+  assert.equal(await deliveryPage.getByRole('article').count(), 1);
+  await deliveryPage.screenshot({ path: '../output/worker-active-work-start-mobile.png', fullPage: true });
+  await deliveryPage.getByRole('link', { name: 'Start packing', exact: true }).click();
+  await deliveryPage.getByRole('button', { name: 'Picked all 2', exact: true }).click();
+  await deliveryPage.getByRole('button', { name: 'Mark packed', exact: true }).click();
+  await deliveryPage.getByText('Packing complete', { exact: true }).waitFor();
+  await deliveryPage.getByRole('link', { name: 'Continue to delivery', exact: true }).waitFor();
+  assert.equal(await deliveryPage.getByRole('button', { name: 'Mark delivered', exact: true }).count(), 0);
+  await deliveryPage.screenshot({ path: '../output/worker-active-work-handoff-mobile.png', fullPage: true });
+  await deliveryPage.getByRole('link', { name: 'Back to active work', exact: true }).click();
+  await deliveryPage.getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor();
+  assert.equal(await deliveryPage.getByRole('article').count(), 1);
+  assert.equal(await deliveryPage.getByRole('progressbar').count(), 0);
+  await deliveryPage.getByRole('button', { name: 'Mark out for delivery', exact: true }).click();
+  await deliveryPage.getByRole('dialog').getByRole('button', { name: 'Mark out for delivery', exact: true }).click();
+  await deliveryPage.getByRole('dialog').waitFor({ state: 'hidden' });
+  await deliveryPage.getByRole('button', { name: 'Mark delivered', exact: true }).click();
+  await deliveryPage.getByRole('dialog').getByRole('button', { name: 'Mark delivered', exact: true }).click();
+  await deliveryPage.getByRole('dialog').waitFor({ state: 'hidden' });
+  await deliveryPage.getByText('No orders need your action right now.', { exact: true }).waitFor();
+  assert.equal(await deliveryPage.getByRole('article').count(), 0);
+  assert.equal((await Order.findById(combined._id)).status, 'Delivered');
+  assert.equal(await WorkerWork.countDocuments({ order: combined._id, worker: driver._id, active: true }), 2);
+
+  // Packing-only completion leaves Active work and becomes a limited receipt.
+  const packingOnly = await Order.create({ user: customer._id, status: 'Shipping', orderItems: [{ product: productId, sku: 'RIB-TEST', qty: 1, unitPrice: 12 }], totalPrice: 12, allocationStatus: 'Allocated', packingWorker: packer._id, packingSentAt: new Date(), preparationMode: 'prepare_only', deliveryWorker: driver._id, deliveryDetails: { contactName: 'PRIVATE NEXT RECIPIENT', address: 'PRIVATE NEXT DESTINATION', phoneNumber: '+971501234567' } });
+  await OrderAllocation.create({ order: packingOnly._id, product: productId, slot: slot._id, qty: 1, by: admin._id });
+  await packingPage.goto(frontend + '/packing');
+  await packingPage.getByRole('link', { name: 'Start packing', exact: true }).click();
+  await packingPage.getByRole('button', { name: 'Picked all 1', exact: true }).click();
+  await packingPage.getByRole('button', { name: 'Mark packed', exact: true }).click();
+  await packingPage.getByText('Packing complete. Your work on this order is finished.', { exact: true }).waitFor();
+  assert.equal(await packingPage.getByRole('link', { name: 'Continue to delivery', exact: true }).count(), 0);
+  assert.equal(await packingPage.getByText('PRIVATE NEXT DESTINATION', { exact: true }).count(), 0);
+  assert.equal(await packingPage.getByRole('button', { name: /Mark out for delivery|Mark delivered/ }).count(), 0);
+  await packingPage.screenshot({ path: '../output/worker-packing-only-complete-mobile.png', fullPage: true });
+  await packingPage.getByRole('link', { name: 'Back to active work', exact: true }).click();
+  await packingPage.getByText('No orders need your action right now.', { exact: true }).waitFor();
+  assert.equal(await packingPage.getByRole('article').count(), 0);
+  const packedOnlyRecord = await Order.findById(packingOnly._id);
+  assert.equal(packedOnlyRecord.status, 'Shipping'); assert.ok(packedOnlyRecord.packedAt);
+  assert.equal(String(packedOnlyRecord.packingWorker), String(packer._id)); assert.equal(String(packedOnlyRecord.deliveryWorker), String(driver._id));
+  await deliveryPage.goto(frontend + '/packing');
+  await deliveryPage.getByRole('button', { name: 'Mark out for delivery', exact: true }).waitFor();
+  assert.equal(await deliveryPage.getByRole('article').count(), 1);
+
+  // Owner choices use the same real modal/API and never create employee credit.
+  for (const [choice, name] of [['azad', 'Azad'], ['momani', 'Momani']]) {
+    const ownerOrder = await Order.create({ user: customer._id, status: 'Shipping', orderItems: [{ product: productId, sku: 'RIB-TEST', qty: 1, unitPrice: 12 }], totalPrice: 12, allocationStatus: 'Allocated', deliveryWorker: null });
+    await OrderAllocation.create({ order: ownerOrder._id, product: productId, slot: slot._id, qty: 1, by: admin._id });
+    await ownerPage.goto(frontend + '/admin/orders/' + ownerOrder._id);
+    await ownerPage.getByRole('button', { name: 'Mark out for delivery', exact: true }).first().click();
+    const ownerDialog = ownerPage.getByRole('dialog');
+    await ownerDialog.getByRole('combobox', { name: 'Delivery method', exact: true }).selectOption(choice);
+    assert.equal(await ownerDialog.getByRole('textbox').count(), 0);
+    await ownerDialog.screenshot({ path: '../output/delivery-owner-real-' + choice + '-mobile.png' });
+    await ownerDialog.getByRole('button', { name: 'Mark out for delivery', exact: true }).click(); await ownerDialog.waitFor({ state: 'hidden' });
+    assert.equal((await Order.findById(ownerOrder._id)).deliveryMovement.handler, name);
+    await ownerPage.getByRole('button', { name: 'Mark delivered', exact: true }).first().click();
+    await ownerDialog.getByText('Handed to: ' + name, { exact: true }).waitFor();
+    await ownerDialog.getByRole('button', { name: 'Mark delivered', exact: true }).click(); await ownerDialog.waitFor({ state: 'hidden' });
+    const completed = await Order.findById(ownerOrder._id).select('+deliveryHistory');
+    assert.equal(completed.deliveredBy, name); assert.equal(completed.deliveryHistory.at(-1).actorName, admin.name);
+    assert.equal(await WorkerWork.countDocuments({ order: ownerOrder._id, type: 'delivered' }), 0);
+  }
 
   if (process.env.CHECK_LEGACY_PACKING_CLIENT === '1') {
     const legacyPage = await login(packer);

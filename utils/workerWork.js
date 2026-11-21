@@ -175,6 +175,7 @@ export async function getWorkerWorkOrder(orderId, actor, { session = null, versi
   const card = groupRecords(records, false, now)[0];
   if (!card) reject('This completed task is no longer available to your account.', 403);
   return { ...card, scope: 'recent-work', version: Math.max(version, card.version), status: status || 'Completed',
+    worker: null, canAssign: false, canDepart: false, canDeliver: false, canReturn: false, canCorrect: false, readyReason: '',
     // Safe compatibility fields for consumers transitioning from an active task.
     delivery: null, deliveryState: records.some(row => row.active && row.type === 'delivered') ? 'delivered' : null,
     packedAt: records.find(row => row.active && row.type === 'packed')?.completedAt || null,
@@ -186,7 +187,7 @@ export async function getWorkerWorkOrder(orderId, actor, { session = null, versi
 export async function packingHandoffSummary(order, session, delivery = null) {
   const receipt = await WorkerWork.findOne({ order: order._id, type: 'packed', active: true }).session(session).lean();
   const facts = receipt || await snapshot(order, session);
-  return { scope: 'packed-handoff', orderId: id(order), orderNumber: facts.orderNumber, customerName: facts.customerName, label: facts.label,
+  return { scope: 'packed-handoff', orderId: id(order), orderNumber: facts.orderNumber, createdAt: order.createdAt || null, customerName: facts.customerName, label: facts.label,
     version: order.reservationRevision || 0, status: order.status, packedAt: order.packedAt, delivery,
     deliveryState: order.deliveryMovement?.departedAt && !order.deliveryMovement?.slotsReturnedAt ? (order.deliveryMovement.returnedAt ? 'returned' : order.deliveryMovement.method) : null,
     ...readOnlyPackingFields(facts.items),
