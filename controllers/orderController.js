@@ -1,5 +1,6 @@
 import { deliveryHoldsGoods, deliveryIsOut, deliveryStockLockReason } from "../utils/deliveryMovementState.js";
 import mongoose from "mongoose";
+import { preserveWorkerWork } from '../utils/workerWork.js';
 import asyncHandler from "../middleware/asyncHandler.js";
 import Order from "../models/orderModel.js";
 import Quote from "../models/quoteModel.js";
@@ -763,6 +764,8 @@ export const deleteOrder = asyncHandler(async (req, res) => {
         quoteDeleted = true;
       }
 
+      const workSource = await Order.findById(order._id).select('+packingActivity +deliveryHistory +reservationRevision').session(session);
+      await preserveWorkerWork(workSource, session);
       await order.deleteOne({ session });
 
       summary = {
@@ -1303,6 +1306,7 @@ export const updateOrder = asyncHandler(async (req, res) => {
     throw new Error("Use /api/orders/:id/cancel to cancel orders.");
   }
 
+  if (Object.hasOwn(req.body, 'deliveredBy')) { res.status(400); throw new Error('Use delivery assignment and confirmation to change delivery responsibility.'); }
   const hasInvoice = !!order.invoice;
 
   // 🔒 If an invoice exists, lock financial fields and user
@@ -1394,7 +1398,6 @@ export const updateOrder = asyncHandler(async (req, res) => {
     "status",
     "deliveryCharge", // allowed unless invoice exists (guarded above)
     "extraFee", // allowed unless invoice exists (guarded above)
-    "deliveredBy",
     "clientToAdminNote",
     "adminToAdminNote",
     "adminToClientNote",

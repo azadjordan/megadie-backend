@@ -1,3 +1,4 @@
+import { deliveryWorkerId } from '../utils/deliveryAssignmentState.js';
 import mongoose from "mongoose";
 import asyncHandler from "../middleware/asyncHandler.js";
 import Order from "../models/orderModel.js";
@@ -9,6 +10,8 @@ import { packingSummary, packingUnitSummary, packingReadyToFinish } from "../uti
 import { buildCartonLabel } from "../utils/orderDelivery.js";
 import { activePackingHelp } from "../utils/packingHelpState.js";
 import { queuePackingHelpNotifications } from "../utils/packingHelpNotifications.js";
+
+const preparationModeFor = order => deliveryWorkerId(order) && deliveryWorkerId(order) === String(order.packingWorker?._id || order.packingWorker) ? 'prepare_deliver' : 'prepare_only';
 
 const orderId = req => {
   if (!mongoose.isValidObjectId(req.params.id)) throw new ReservationError("Invalid order id.", 400);
@@ -37,10 +40,16 @@ export const listPackingOrders = handle(async (req, res) => {
     // empty section never means merely "none on this page of a flat list".
     const inDelivery = { 'deliveryMovement.departedAt': { $ne: null }, 'deliveryMovement.returnedAt': null, 'deliveryMovement.slotsReturnedAt': null };
     const inStore = { $or: [{ 'deliveryMovement.departedAt': null }, { 'deliveryMovement.returnedAt': { $ne: null } }, { 'deliveryMovement.slotsReturnedAt': { $ne: null } }] };
+    const driverExpression = { $cond: [
+      { $eq: [{ $type: '$deliveryWorker' }, 'missing'] },
+      { $cond: [{ $and: [{ $ne: [{ $ifNull: ['$packingSentAt', null] }, null] }, { $eq: ['$preparationMode', 'prepare_deliver'] }] }, '$packingWorker', null] },
+      { $ifNull: ['$deliveryWorker', null] },
+    ] };
+    const sameDriver = { $and: [{ $ne: [driverExpression, null] }, { $eq: [driverExpression, '$packingWorker'] }] };
     const definitions = {
       to_pack: { packedAt: null, ...inStore },
-      ready_delivery: { ...inStore, packedAt: { $ne: null }, preparationMode: "prepare_deliver" },
-      ready_handoff: { ...inStore, packedAt: { $ne: null }, preparationMode: { $ne: "prepare_deliver" } },
+      ready_delivery: { ...inStore, packedAt: { $ne: null }, $expr: sameDriver },
+      ready_handoff: { ...inStore, packedAt: { $ne: null }, $expr: { $not: [sameDriver] } },
       in_delivery: inDelivery,
     };
     const counts = await Order.aggregate([
@@ -49,7 +58,7 @@ export const listPackingOrders = handle(async (req, res) => {
         { $and: [ { $ne: [{ $ifNull: ['$deliveryMovement.departedAt', null] }, null] }, { $eq: [{ $ifNull: ['$deliveryMovement.returnedAt', null] }, null] }, { $eq: [{ $ifNull: ['$deliveryMovement.slotsReturnedAt', null] }, null] } ] }, 'in_delivery',
         { $cond: [
         { $eq: [{ $ifNull: ["$packedAt", null] }, null] }, "to_pack",
-        { $cond: [{ $eq: ["$preparationMode", "prepare_deliver"] }, "ready_delivery", "ready_handoff"] },
+        { $cond: [sameDriver, "ready_delivery", "ready_handoff"] },
       ] } ] }, total: { $sum: 1 } } },
     ]);
     const queues = await Promise.all(Object.entries(definitions).map(async ([key, match]) => {
@@ -58,7 +67,7 @@ export const listPackingOrders = handle(async (req, res) => {
       const requested = Math.max(1, Math.min(10000, parseInt(req.query[`${key}Page`], 10) || 1));
       const queuePage = Math.min(requested, Math.max(1, Math.ceil(total / queueLimit)));
       const rows = total ? await Order.find({ ...filter, ...match })
-        .select("orderNumber user assignedTo preparationMode packingSentAt packedAt deliveryMovement orderItems status stockFinalizedAt +packingHelp +reservationRevision")
+        .select("orderNumber user assignedTo packingWorker deliveryWorker preparationMode packingSentAt packedAt deliveryMovement orderItems status stockFinalizedAt +packingHelp +reservationRevision")
         .populate("user", "name").sort({ packingSentAt: 1, _id: 1 })
         .skip((queuePage - 1) * queueLimit).limit(queueLimit).lean() : [];
       return { key, rows, pagination: { page: queuePage, total, hasNext: queuePage * queueLimit < total } };
@@ -77,7 +86,7 @@ export const listPackingOrders = handle(async (req, res) => {
         orderId: String(order._id), orderNumber: order.orderNumber,
         customerName: order.user?.name || "Unknown client",
         label: buildCartonLabel(order.user?.name, order.orderNumber, String(order._id)),
-        preparationMode: order.preparationMode, sentAt: order.packingSentAt,
+        preparationMode: preparationModeFor(order), sentAt: order.packingSentAt,
         packedAt: order.packedAt || null, version: order.reservationRevision || 0,
         canPack: packingReadyToFinish(order, byOrder.get(String(order._id)) || []),
         deliveryState: order.deliveryMovement?.departedAt && !order.deliveryMovement?.slotsReturnedAt ? (order.deliveryMovement.returnedAt ? 'returned' : order.deliveryMovement.method === 'courier' ? 'courier' : 'company') : null,
@@ -87,11 +96,11 @@ export const listPackingOrders = handle(async (req, res) => {
     }])) });
   }
   const [rows, total] = await Promise.all([
-    Order.find(filter).select("orderNumber user assignedTo packingWorker preparationMode packingSentAt packedAt packingSummary")
+    Order.find(filter).select("orderNumber user assignedTo packingWorker deliveryWorker preparationMode packingSentAt packedAt packingSummary")
       .populate("user", "name").populate("packingWorker", "name").sort({ packedAt: 1, packingSentAt: 1, _id: 1 }).skip((page - 1) * limit).limit(limit).lean(),
     Order.countDocuments(filter),
   ]);
-  res.json({ data: rows.map(order => ({ orderId: String(order._id), orderNumber: order.orderNumber, customerName: order.user?.name || "Unknown client", workerName: order.packingWorker?.name || order.assignedTo, preparationMode: order.preparationMode, sentAt: order.packingSentAt, packedAt: order.packedAt || null, summary: order.packingSummary })), pagination: { page, total, hasNext: page * limit < total } });
+  res.json({ data: rows.map(order => ({ orderId: String(order._id), orderNumber: order.orderNumber, customerName: order.user?.name || "Unknown client", workerName: order.packingWorker?.name || order.assignedTo, preparationMode: preparationModeFor(order), sentAt: order.packingSentAt, packedAt: order.packedAt || null, summary: order.packingSummary })), pagination: { page, total, hasNext: page * limit < total } });
 });
 
 export const readPackingOrder = handle(async (req, res) => {

@@ -17,7 +17,7 @@ export class ReservationError extends Error {
 }
 
 export async function recomputeAllocationStatus(orderId, session = null) {
-  const order = await Order.findById(orderId).select("orderItems deliveryCharge extraFee totalPrice allocationStatus allocatedAt packingSentAt packingSummary status stockFinalizedAt +packingHelp").session(session);
+  const order = await Order.findById(orderId).select("orderItems deliveryCharge extraFee totalPrice deliveredAt allocationStatus allocatedAt packingSentAt packingSummary status stockFinalizedAt +packingHelp").session(session);
   if (!order) return null;
   const rows = await OrderAllocation.find({ order: orderId, $or: [{ status: "Reserved" }, { status: "Deducted" }, { status: { $exists: false } }] }).select("product qty pickedQty pickProblem status").session(session).lean();
   const totals = new Map();
@@ -53,7 +53,7 @@ export async function lockOrder(orderId, session, { expectedRevision, allowPacke
     else filter.reservationRevision = expectedRevision;
   }
   const order = await Order.findOneAndUpdate(filter, { $inc: { reservationRevision: 1 } }, { new: true, session })
-    .select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp" + (includeItemChanges ? " +itemChanges" : ""));
+    .select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp +deliveryHistory" + (includeItemChanges ? " +itemChanges" : ""));
   if (!order) {
     if (!await Order.exists({ _id: orderId }).session(session)) throw new ReservationError("Order not found.", 404);
     throw new ReservationError("Order changed. Refresh packing progress and review before saving.");

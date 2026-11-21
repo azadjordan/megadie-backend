@@ -96,14 +96,14 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
     const direct = await fixture(); expectOK(await move(direct, { action: 'delivered', method: 'company', handler: 'Azad' }));
     const d = await movement(direct); assert.equal(d.movement.departedAt, undefined); assert.deepEqual(d.history.map(e => e.action), ['delivered']);
   });
-  await t.test('a generic handover needs no method or name and direct receipt needs no departure', async () => {
-    const f = await fixture(); expectOK(await move(f, { method: undefined, handler: undefined }));
-    assert.equal((await movement(f)).movement.method, undefined);
-    assert.equal((await movement(f)).movement.handler, '');
-    expectOK(await move(f, { action: 'returned' }));
-    expectOK(await move(f, { action: 'reshelved' }));
-    const direct = await fixture(); expectOK(await move(direct, { action: 'delivered', method: undefined, handler: undefined }));
-    assert.equal((await movement(direct)).status, 'Delivered');
+  await t.test('unassigned deliveries require an explicit method and direct company receipt needs no departure', async () => {
+    const f = await fixture();
+    assert.equal((await move(f, { method: undefined, handler: undefined })).status, 400);
+    expectOK(await move(f, { method: 'company', handler: undefined }));
+    assert.equal((await movement(f)).movement.method, 'company');
+    assert.equal((await movement(f)).movement.handler, admin.name);
+    const direct = await fixture();
+    expectOK(await move(direct, { action: 'delivered', method: 'company', handler: undefined }));
     assert.equal((await movement(direct)).movement.departedAt, undefined);
   });
   await t.test('physical confirmations and exact reservations are checked before any write', async () => {
@@ -144,7 +144,7 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
     const rows = await OrderAllocation.find({ order: f.order._id }).lean();
     const stock = await SlotItem.find({ product: f.productId }).lean();
     for (const stage of ['packed', 'out', 'returned']) {
-      if (stage === 'out') expectOK(await move(f));
+      if (stage === 'out') expectOK(await move(f, { method: 'company', handler: worker.name }));
       if (stage === 'returned') expectOK(await move(f, { action: 'returned' }));
       const before = await Order.findById(f.order._id).select('+deliveryHistory').lean();
       const details = { contactName: 'New receiver', phoneNumber: '+971501234567', secondaryPhoneNumber: '041234567', address: 'Order address - ' + stage, googleMapsUrl: 'https://maps.app.goo.gl/updated', notes: 'Updated receiving instructions' };
@@ -165,7 +165,7 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
       assert.equal((await api(path, { method: 'PUT', body: { ...body, expectedRevision: after.deliveryRevision, assignedTo: 'Bypass' } })).status, 409);
       for (const actor of [worker, customer]) assert.equal((await api(path, { actor, method: 'PUT', body: { ...body, expectedRevision: after.deliveryRevision } })).status, 403);
     }
-    expectOK(await move(f, { action: 'delivered' }));
+    expectOK(await move(f, { action: 'delivered', method: 'company', handler: worker.name }));
     const delivered = await Order.findById(f.order._id);
     const result = await api(`/orders/${f.order._id}/delivery-details`, { method: 'PUT', body: { expectedRevision: delivered.deliveryRevision, deliveryDetails: { address: 'Must not change' } } });
     assert.equal(result.status, 409); assert.match(result.body.message, /delivered.*read-only/i);

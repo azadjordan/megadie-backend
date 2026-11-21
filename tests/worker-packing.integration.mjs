@@ -212,6 +212,9 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
     assert.equal(JSON.stringify(await view(f, other)).includes(recipient.phoneNumber), false);
     assert.deepEqual((await view(f)).deliveryDetails, recipient);
     expectOK(await assign(f, { workerId: String(other._id) }));
+    assert.equal((await view(f, other)).delivery, null, 'Packing changes must preserve the separate delivery assignment');
+    const delivery = (await api(`/packing/deliveries/${f.order._id}`)).body.data;
+    expectOK(await api(`/packing/deliveries/${f.order._id}/assignment`, { method: 'POST', body: { workerId: String(other._id), expectedRevision: delivery.version } }));
     assert.deepEqual((await view(f, other)).delivery, recipient);
     assert.equal((await OrderAllocation.findById(f.allocationId)).pickedQty, 3);
     assert.equal((await api(`/packing/orders/${f.order._id}`, { actor: worker })).status, 403);
@@ -428,7 +431,13 @@ test("worker packing with a disposable local replica set", { skip: !uri, timeout
       assert.equal(movement.meta.returnedPickedQty, pickedQty);
       assert.equal(movement.meta.physicalReturnConfirmed, true);
       assert.equal(String(movement.actor), String(admin._id));
-      assert.equal((await api(`/packing/orders/${f.order._id}`, { actor: worker })).status, 403);
+      const pastWork = await api(`/packing/orders/${f.order._id}`, { actor: worker });
+      assert.equal(pastWork.status, pickedQty === 10 ? 200 : 403);
+      if (pickedQty === 10) {
+        assert.equal(pastWork.body.data.scope, 'recent-work');
+        assert.equal(pastWork.body.data.delivery, null);
+        assert.deepEqual(pastWork.body.data.items[0].allocations, []);
+      }
     }
   });
   await t.test("changed picks invalidate a return acknowledgement and require a fresh delete preview", async () => {

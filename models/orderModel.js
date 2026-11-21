@@ -212,21 +212,28 @@ orderSchema.pre("validate", function (next) {
       this.orderNumber = `ORD-${yy}${mm}${dd}-${randomHex}`;
     }
 
-    let itemsSum = 0;
-    this.orderItems = (this.orderItems || []).map((it) => {
-      const unit = typeof it.unitPrice === "number" ? it.unitPrice : 0;
-      const qty  = typeof it.qty === "number" ? it.qty : 0;
-      const lineTotal = Math.max(0, unit * qty);
-      itemsSum += lineTotal;
-      const base = typeof it.toObject === "function" ? it.toObject() : it;
-      return { ...base, lineTotal };
-    });
+    // A projected stock/metadata save must not manufacture missing prices,
+    // fees or a replacement delivery timestamp.
+    const pricingChanged = this.isNew || ['orderItems', 'deliveryCharge', 'extraFee'].some(field => this.isModified(field));
+    const pricingLoaded = ['orderItems', 'orderItems.qty', 'orderItems.unitPrice', 'deliveryCharge', 'extraFee'].every(field => this.isSelected(field));
+    if (pricingChanged && !pricingLoaded) throw new Error('Load order items and fees before changing order prices.');
+    if (pricingChanged) {
+      let itemsSum = 0;
+      this.orderItems = (this.orderItems || []).map((it) => {
+        const unit = typeof it.unitPrice === "number" ? it.unitPrice : 0;
+        const qty  = typeof it.qty === "number" ? it.qty : 0;
+        const lineTotal = Math.max(0, unit * qty);
+        itemsSum += lineTotal;
+        const base = typeof it.toObject === "function" ? it.toObject() : it;
+        return { ...base, lineTotal };
+      });
 
-    const delivery = this.deliveryCharge || 0;
-    const extra    = this.extraFee || 0;
-    this.totalPrice = Math.max(0, itemsSum + delivery + extra);
+      const delivery = this.deliveryCharge || 0;
+      const extra    = this.extraFee || 0;
+      this.totalPrice = Math.max(0, itemsSum + delivery + extra);
+    }
 
-    if (this.status === "Delivered" && !this.deliveredAt) {
+    if (this.status === "Delivered" && !this.deliveredAt && this.isSelected('deliveredAt') && (this.isNew || this.isModified('status'))) {
       this.deliveredAt = new Date();
     }
 

@@ -276,4 +276,15 @@ test("worker delivery assignments with an isolated replica set", { skip: !uri, t
     assert.ok((await api(`/packing/deliveries/${f.order._id}`, { actor: other })).status >= 400);
     await User.updateOne({ _id: other._id }, { $set: { isWorker: true } });
   });
+  await t.test('packing cards and shortcuts follow the explicit delivery assignment', async () => {
+    const f = await packed({ mode: 'prepare_deliver', driver: other });
+    const board = await api('/packing/orders?view=board', { actor: worker }); expectOK(board);
+    const id = String(f.order._id);
+    assert.ok(board.body.groups.ready_handoff.data.some(row => row.orderId === id && row.preparationMode === 'prepare_only'));
+    assert.ok(!board.body.groups.ready_delivery.data.some(row => row.orderId === id));
+    const v = await view(f);
+    expectOK(await api(`/packing/orders/${f.order._id}/send`, { method: 'POST', body: { workerId: String(worker._id), preparationMode: 'prepare_only', deliveryDetails: {}, expectedRevision: v.version, expectedDeliveryRevision: v.deliveryRevision } }));
+    assert.equal(String((await Order.findById(f.order._id)).deliveryWorker), String(other._id));
+  });
+
 });

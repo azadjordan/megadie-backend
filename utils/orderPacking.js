@@ -1,5 +1,5 @@
 import { deliveryStockLockReason } from "./deliveryMovementState.js";
-import { deliveryWorkerId } from './deliveryAssignmentState.js';
+import { deliveryWorkerId, setDeliveryWorker } from './deliveryAssignmentState.js';
 import mongoose from "mongoose";
 import Order from "../models/orderModel.js";
 import User from "../models/userModel.js";
@@ -15,6 +15,7 @@ import { buildCartonLabel, resolveOrderDelivery, validatePreparationMode, valida
 import { logInventoryMovement } from "./inventoryMovement.js";
 import { orderItemsLockReason } from "./orderItemChanges.js";
 import { activePackingHelp, resolvePackingHelp } from "./packingHelpState.js";
+import { getWorkerWorkOrder, packingHandoffSummary, preserveWorkerWork, recordWorkerWork, voidWorkerWork } from './workerWork.js';
 
 const validId = value => typeof value === "string" && mongoose.isValidObjectId(value);
 const active = { $or: [{ status: "Reserved" }, { status: { $exists: false } }] };
@@ -48,18 +49,20 @@ async function allocationsFor(orderId, session) {
 }
 
 export async function getPackingView(orderId, actor, session = null) {
-  const order = await Order.findOne({ _id: orderId, ...(actor.isAdmin ? {} : { packingWorker: actor._id, packingSentAt: { $ne: null } }) }).select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp")
+  const order = await Order.findOne({ _id: orderId, ...(actor.isAdmin ? {} : { packingWorker: actor._id, packingSentAt: { $ne: null } }) }).select("+reservationRevision +packingReports +packingReportsRevision +packingActivity +packingHelp +deliveryHistory")
     .populate("user", actor.isAdmin ? "name phoneNumber secondaryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes deliveryContactName deliveryPhoneNumber" : "name")
     .populate("packingWorker", "name isWorker isAdmin")
     .populate('deliveryWorker', 'name isWorker')
     .populate("packedBy", "name").session(session).lean();
-  if (!order) throw new ReservationError("Packing order is no longer available to this account.", actor.isAdmin ? 404 : 403);
+  if (!actor.isAdmin && (!order || order.status !== 'Shipping')) return getWorkerWorkOrder(orderId, actor, { session, version: order?.reservationRevision || 0, status: order?.status });
+  if (!order) throw new ReservationError("Packing order is no longer available to this account.", 404);
   assertAccess(order, actor, { published: !actor.isAdmin });
   if (!actor.isAdmin && deliveryWorkerId(order) === id(actor) && order.deliveryDetails == null) {
     // Older tasks can still rely on profile defaults. Only assigned delivery
     // workers reach this branch; the returned DTO below stays narrowly scoped.
     order.user = await User.findById(id(order.user)).select('name phoneNumber secondaryPhoneNumber deliveryContactName deliveryPhoneNumber address deliveryGoogleMapsUrl deliveryNotes').session(session).lean() || order.user;
   }
+  if (!actor.isAdmin && order.packedAt) return packingHandoffSummary(order, session, deliveryWorkerId(order) === id(actor) ? resolveOrderDelivery(order).details : null);
   // Lean reads do not apply schema defaults to orders created before packing.
   const reports = order.packingReports || [];
   const history = order.packingActivity || [];
@@ -165,13 +168,13 @@ export async function sendToWorker({ orderId, actor, expectedRevision, workerId,
       await saveCustomerLocation({ customerId: order.user, details, expectedCustomerLocation, confirmedMapLocation, session });
     }
     const reassigned = order.packingSentAt && id(order.packingWorker) !== workerId;
+    if (order.packedAt) await preserveWorkerWork(order, session);
     activity(order, current, !order.packingSentAt ? "SENT" : reassigned ? "REASSIGNED" : "INSTRUCTIONS_SAVED", { note: worker.name });
     if (reassigned) order.packingHandoverAt = new Date();
     // Task choices are shortcuts; preserve a separately assigned driver.
     const previousDriver = deliveryWorkerId(order);
-    const followsPacker = !previousDriver || previousDriver === id(order.packingWorker);
-    if ((!order.packingSentAt && !previousDriver) || (order.packingSentAt && order.preparationMode !== mode && followsPacker)) {
-      order.deliveryWorker = mode === 'prepare_deliver' ? worker._id : null;
+    if (!order.packingSentAt && !previousDriver && mode === 'prepare_deliver') {
+      setDeliveryWorker(order, worker, current);
     } else if (order.deliveryWorker === undefined) order.deliveryWorker = previousDriver || null;
     order.packingWorker = worker._id; order.assignedTo = worker.name;
     order.packingSentAt ||= new Date(); order.preparationMode = mode;
@@ -220,6 +223,7 @@ export async function changePacking({ orderId, actor, expectedRevision, action, 
     assertAccess(order, current);
     if (action === "reopen") {
       if (!current.isAdmin) throw new ReservationError("Only an admin can reopen packing.", 403);
+      await voidWorkerWork(order, 'packed', 'reopened', session);
       order.packedAt = undefined; order.packedBy = undefined;
       activity(order, current, "REOPENED");
     } else if (action === "packed") {
@@ -227,6 +231,8 @@ export async function changePacking({ orderId, actor, expectedRevision, action, 
       if (!packingReadyToFinish(order, rows)) throw new ReservationError("Collect every ordered quantity and resolve picking shortages before marking Packed.");
       order.packedAt = new Date(); order.packedBy = current._id;
       activity(order, current, "PACKED");
+      order.packingActivity.at(-1).at = order.packedAt;
+      await recordWorkerWork({ order, type: 'packed', worker: order.packingWorker, actor: current, event: order.packingActivity.at(-1), session });
     } else {
       if (!validId(allocationId)) throw new ReservationError("Invalid reservation.", 400);
       const row = await OrderAllocation.findOne({ _id: allocationId, order: orderId, ...active }).session(session);

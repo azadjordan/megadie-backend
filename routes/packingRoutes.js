@@ -2,10 +2,12 @@ import express from "express";
 import { protect, admin, staff } from "../middleware/authMiddleware.js";
 import { requireTrustedOrigin } from "../config/trustedOrigins.js";
 import * as delivery from '../controllers/workerDeliveryController.js';
+import * as work from '../controllers/workerWorkController.js';
 import { listPackingWorkers, listPackingOrders, readPackingOrder, publishPackingOrder, updatePackingOrder, checkPackingStockReport, removePackingAssignment } from "../controllers/packingController.js";
 
 const router = express.Router();
 router.use(protect, staff);
+router.get('/recent-work', work.list);
 router.get('/deliveries', delivery.list);
 router.get('/deliveries/:id', delivery.read);
 router.get('/deliveries/:id/workers', admin, delivery.choices);

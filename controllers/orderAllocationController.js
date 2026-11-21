@@ -126,7 +126,7 @@ export const finalizeOrderAllocations = asyncHandler(async (req, res) => {
   try {
     await session.withTransaction(async () => {
       const order = await Order.findById(orderId)
-        .select("status orderItems allocationStatus invoice stockFinalizedAt packingSentAt packedAt")
+        .select("status deliveredAt orderItems deliveryCharge extraFee totalPrice allocationStatus invoice stockFinalizedAt packingSentAt packedAt")
         .session(session);
       if (!order) {
         res.status(404);

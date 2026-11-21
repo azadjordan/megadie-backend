@@ -5,8 +5,9 @@ import { transaction, ReservationError } from './orderReservations.js';
 import { reservationId as id } from './orderReservationPlan.js';
 import { buildCartonLabel, resolveOrderDelivery } from './orderDelivery.js';
 import { deliveryIsOut } from './deliveryMovementState.js';
-import { canReadDelivery, deliveryWorkerId, deliveryWorkerFilter } from './deliveryAssignmentState.js';
+import { canReadDelivery, deliveryWorkerId, deliveryWorkerFilter, setDeliveryWorker } from './deliveryAssignmentState.js';
 import { getOrderMovement } from './orderMovement.js';
+import { getWorkerWorkOrder } from './workerWork.js';
 
 const reject = (message, code = 409) => { throw new ReservationError(message, code); };
 const workerInfo = user => user ? { id: id(user), name: user.name, enabled: Boolean(user.isWorker) } : null;
@@ -20,16 +21,26 @@ async function load(orderId, actor, session = null) {
 }
 
 export async function getDeliveryTask(orderId, actor) {
+  // Check recent-work rights independently of today's assignment. Closed orders
+  // and former assignments must never return a destination through saved links.
+  const eligibility = actor.isAdmin ? null : await Order.findById(orderId).select('status packingWorker packingSentAt preparationMode deliveryWorker +reservationRevision').lean();
+  if (!actor.isAdmin && (!eligibility || eligibility.status !== 'Shipping' || !canReadDelivery(eligibility, actor))) {
+    return getWorkerWorkOrder(orderId, actor, { version: eligibility?.reservationRevision || 0, status: eligibility?.status });
+  }
   const order = await load(orderId, actor);
+  // Recheck the loaded snapshot in case completion raced the first read.
+  if (!actor.isAdmin && order.status !== 'Shipping') return getWorkerWorkOrder(orderId, actor, { version: order.reservationRevision || 0, status: order.status });
   const driverId = deliveryWorkerId(order);
   const driver = order.deliveryWorker === undefined && driverId ? order.packingWorker : order.deliveryWorker;
   const assigned = driverId === id(actor);
   const canSeeDestination = actor.isAdmin || assigned;
   const out = deliveryIsOut(order), active = order.status === 'Shipping' && !order.stockFinalizedAt;
+  const canHandle = actor.isAdmin || (assigned && (!out || order.deliveryMovement?.method === 'company'));
   const ready = Boolean(order.packedAt || (!order.packingSentAt && order.allocationStatus === 'Allocated'));
   const destination = resolveOrderDelivery(order).details;
   const details = canSeeDestination ? destination : null;
   let readyReason = '';
+  if (active && out && assigned && !canHandle) readyReason = 'This delivery is being handled outside the worker delivery flow. Ask an admin for updates.';
   if (active && !out) {
     if (!ready) readyReason = 'Waiting for packing.';
     else if (!driver?.isWorker) readyReason = driverId
@@ -46,8 +57,8 @@ export async function getDeliveryTask(orderId, actor) {
     worker: workerInfo(driver), delivery: details,
     canAssign: Boolean(actor.isAdmin && active),
     canDepart: active && !out && !readyReason && (actor.isAdmin || assigned),
-    canDeliver: active && out && (actor.isAdmin || assigned),
-    canReturn: active && out && (actor.isAdmin || assigned),
+    canDeliver: active && out && canHandle,
+    canReturn: active && out && canHandle,
     canCorrect: Boolean(actor.isAdmin && !order.stockFinalizedAt && (out || order.status === 'Delivered')),
     readyReason: canSeeDestination || !driverId ? readyReason : '',
     manualPreparation: !order.packingSentAt,
@@ -89,18 +100,16 @@ export async function assignDeliveryWorker({ orderId, actor, workerId, expectedR
     if (order.status !== 'Shipping' || order.stockFinalizedAt) reject('Delivery assignments can be changed only on unfinished orders.');
     const out = deliveryIsOut(order);
     if (out && (confirmedHandover !== true || !workerId)) reject('Confirm delivery responsibility has transferred to the selected worker.', 400);
-    const previous = deliveryWorkerId(order);
     const worker = workerId ? await User.findOneAndUpdate({ _id: workerId, isWorker: true }, { $inc: { staffRevision: 1 } }, { new: true, session }) : null;
     if (workerId && !worker) reject('This worker account is no longer enabled.');
-    order.deliveryWorker = worker?._id || null;
+    setDeliveryWorker(order, worker, current);
     // Snapshot legacy defaults once delivery is explicitly assigned.
     if (order.deliveryDetails == null) {
       const customer = await User.findById(order.user).session(session).lean();
       order.deliveryDetails = resolveOrderDelivery({ ...order.toObject(), user: customer }).details;
       order.deliveryRevision = (order.deliveryRevision || 0) + 1;
     }
-    if (out) { order.deliveryMovement.worker = worker._id; order.deliveryMovement.handler = worker.name; }
-    order.deliveryHistory.push({ action: 'assigned', worker: worker?._id, previousWorker: previous || undefined, handler: worker?.name || '', actor: current._id, actorName: current.name, note: worker ? `Delivery assigned to ${worker.name}.` : 'Delivery assignment removed.' });
+    if (out) { order.deliveryMovement.method = 'company'; order.deliveryMovement.worker = worker._id; order.deliveryMovement.handler = worker.name; }
     await order.save({ session });
   });
   // The acknowledgement refreshes admin views and the previous driver's access.

@@ -9,9 +9,10 @@ import { transaction, lockStock, ReservationError } from './orderReservations.js
 import { reservationId as id, isReserved, buildOrderReservationPlan } from './orderReservationPlan.js';
 import { canMarkPacked, packingSummary } from './packingState.js';
 import { deliveryHoldsGoods, deliveryIsOut } from './deliveryMovementState.js';
+import { recordWorkerWork, voidWorkerWork } from './workerWork.js';
 
 const reject = (message, code = 409) => { throw new ReservationError(message, code); };
-const selection = '+reservationRevision +deliveryHistory';
+const selection = '+reservationRevision +deliveryHistory +packingActivity';
 
 async function readyReason(order, rows, session) {
   if (order.status !== 'Shipping') return 'Delivery updates require an order in preparation.';
@@ -32,10 +33,16 @@ async function readyReason(order, rows, session) {
   if (rows.filter(isReserved).some(r => !stocks.some(s => id(s.product) === id(r.product) && id(s.slot) === id(r.slot) && (s.slot?.isActive !== false || r.pickedQty === r.qty)))) return 'Review the reserved stock locations before updating delivery.';
   return '';
 }
+async function deliveryWorkerView(order, session) {
+  const workerId = deliveryWorkerId(order);
+  const worker = workerId ? await User.findById(workerId).select('name isWorker').session(session).lean() : null;
+  return worker ? { id: workerId, name: worker.name, enabled: Boolean(worker.isWorker) } : null;
+}
 async function view(order, session = null) {
   const rows = await OrderAllocation.find({ order: order._id }).session(session).lean();
   return { orderId: id(order), orderNumber: order.orderNumber, status: order.status,
     version: order.reservationRevision || 0, movement: order.deliveryMovement || null,
+    deliveryWorker: await deliveryWorkerView(order, session),
     deliveredAt: order.deliveredAt || null, deliveredBy: order.deliveredBy || '',
     manualPreparation: !order.packingSentAt, isOut: deliveryIsOut(order), holdsGoods: deliveryHoldsGoods(order),
     readyReason: await readyReason(order, rows, session), history: order.deliveryHistory || [] };
@@ -70,6 +77,7 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
       if (legacy || !['departed', 'delivered', 'returned'].includes(action)) reject('Only admins can make this delivery change.', 403);
       if (['method', 'handler', 'deliveryCharge', 'extraFee', 'deliveredBy', 'adminToAdminNote', 'adminToClientNote'].some(key => Object.hasOwn(body, key))) reject('Workers can record delivery events only.', 400);
       if (action === 'delivered' && !deliveryIsOut(order)) reject('Record Out for delivery before confirming customer receipt.');
+      if (['delivered', 'returned'].includes(action) && deliveryIsOut(order) && order.deliveryMovement?.method !== 'company') reject('This delivery is being handled outside the worker delivery flow. Ask an admin to update it.');
       if (action === 'departed' && order.deliveryDetails == null) {
         const customer = await User.findById(order.user).session(session).lean();
         order.deliveryDetails = resolveOrderDelivery({ ...order.toObject(), user: customer }).details;
@@ -83,30 +91,47 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
     let quoteDeleted = false;
     const current = order.deliveryMovement;
     const out = deliveryIsOut(order), held = deliveryHoldsGoods(order);
-    let method = body.method, handler = body.handler ?? '';
-    if (!actor.isAdmin && action === 'departed') { method = 'company'; handler = actor.name; }
-    if (actor.isAdmin && action === 'departed' && deliveryWorkerId(order) && body.handler === undefined) {
-      const driver = await User.findById(deliveryWorkerId(order)).select('name').session(session);
-      handler = driver?.name || '';
-    }
-    if (action === 'collected' && method === undefined) method = 'collection';
-    if (action === 'returned' || action === 'reshelved' || (action === 'delivered' && out)) {
-      method = current?.method; handler = current?.handler || '';
-    } else if (legacy) {
-      handler = String(body.deliveredBy || order.deliveredBy || '').trim();
-      method = handler === 'Pick Up By Client' ? 'collection' : 'company';
-    }
+    const driverId = deliveryWorkerId(order);
+    const driver = driverId ? (action === 'departed'
+      ? await User.findOneAndUpdate({ _id: driverId, isWorker: true }, { $inc: { staffRevision: 1 } }, { new: true, session }).select('name isWorker')
+      : await User.findById(driverId).select('name isWorker').session(session)) : null;
+    let method = body.method;
+    const suppliedHandler = legacy ? body.deliveredBy : body.handler;
+    if (suppliedHandler != null && (typeof suppliedHandler !== 'string' || suppliedHandler.trim().length > 120)) reject('Keep Handed to within 120 characters.', 400);
+    let handler = suppliedHandler?.trim() || '';
     if (method !== undefined && !['courier', 'company', 'collection'].includes(method)) reject('Invalid delivery method.', 400);
-    if (method === 'collection') handler = 'Customer collection';
-    if (typeof handler !== 'string' || handler.trim().length > 120) reject('Keep Handed to within 120 characters.', 400);
-    if (legacy && !out && !handler.trim()) reject('Delivered by is required.', 400);
-    handler = handler.trim();
+    if (['returned', 'reshelved', 'corrected'].includes(action) || (action === 'delivered' && out)) {
+      method = current?.method || (driverId ? 'company' : undefined);
+      handler = current?.handler || (method === 'company' ? driver?.name || '' : '');
+      if (action === 'delivered' && ((body.method && body.method !== method) || (suppliedHandler?.trim() && suppliedHandler.trim() !== handler))) reject('Delivery responsibility changed. Review the assigned delivery person before confirming.');
+    } else {
+      if (action === 'collected' || (legacy && handler === 'Pick Up By Client')) method = 'collection';
+      if (driverId) {
+        if (method && method !== 'company') reject('Remove or change the delivery worker assignment before choosing another delivery method.');
+        if (!driver || (action === 'departed' && !driver.isWorker)) reject('Assign an enabled delivery worker before departure.');
+        if (handler && handler !== driver.name) reject('The typed delivery name conflicts with the assigned worker. Change the delivery assignment first.');
+        method = 'company'; handler = driver.name;
+      } else {
+        // Older admin clients may still send a free-text carrier. It remains a
+        // non-worker delivery and never produces employee delivery credit.
+        if (!method && legacy) {
+          if (!handler) reject('Select a delivery worker or provide the delivery method and recipient.', 400);
+          method = 'company';
+        }
+        if (!method) reject('Choose a delivery method or assign a delivery worker.', 400);
+        if (method === 'company' && !handler) handler = actor.name;
+        if (method === 'company' && await User.exists({ isWorker: true, name: handler }).session(session)) reject('Select the worker account through Delivery worker instead of typing its name.');
+      }
+      if (method === 'collection') handler = 'Customer collection';
+      if (method === 'courier' && !handler) reject('Enter the courier name.', 400);
+    }
     const rows = await OrderAllocation.find({ order: orderId }).session(session).lean();
     await lockStock({ product: { $in: order.orderItems.map(i => i.product) } }, session);
     if (action === 'corrected') {
       if (!actor.isAdmin || body.confirmedCorrection !== true || !note.trim()) reject('Confirm this was recorded by mistake and give a reason.', 400);
       if (rows.some(row => row.status === 'Deducted')) reject('Stock has been finalized. This delivery cannot be corrected here.');
       if (order.status === 'Delivered') {
+        await voidWorkerWork(order, 'delivered', 'delivery_corrected', session);
         order.status = 'Shipping'; order.deliveredAt = undefined; order.deliveredBy = undefined;
       } else if (out) {
         // The confirmation means departure never happened. Preserve the pick
@@ -123,6 +148,7 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
       if (rows.some(r => r.status === 'Deducted')) reject('Finalized stock cannot be returned through this action.');
       await OrderAllocation.updateMany({ order: orderId, $or: [{ status: 'Reserved' }, { status: { $exists: false } }] }, { $set: { pickedQty: 0, pickProblem: false, pickedAt: now, pickedBy: actor._id } }, { session });
       order.deliveryMovement.slotsReturnedAt = now;
+      await voidWorkerWork(order, 'packed', 'reshelved', session);
       order.packedAt = undefined; order.packedBy = undefined;
       order.packingSummary = packingSummary(order, rows.map(r => ({ ...r, pickedQty: 0, pickProblem: false })));
     } else {
@@ -151,6 +177,9 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
     }
     const eventAction = method === 'collection' && action === 'delivered' ? 'collected' : action;
     order.deliveryHistory.push({ action: eventAction, method, handler, worker: deliveryWorkerId(order) || undefined, actor: actor._id, actorName: actor.name, note: note.trim(), at: now });
+    if (eventAction === 'delivered' && method === 'company') {
+      await recordWorkerWork({ order, type: 'delivered', worker: deliveryWorkerId(order), actor, event: order.deliveryHistory.at(-1), session });
+    }
     await order.save({ session });
     return legacy ? { order, quoteDeleted } : view(order, session);
   });
