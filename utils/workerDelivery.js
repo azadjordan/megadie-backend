@@ -3,7 +3,7 @@ import Order from '../models/orderModel.js';
 import User from '../models/userModel.js';
 import { transaction, ReservationError } from './orderReservations.js';
 import { reservationId as id } from './orderReservationPlan.js';
-import { buildCartonLabel, resolveOrderDelivery } from './orderDelivery.js';
+import { buildCartonLabel, deliveryLocationReason, resolveOrderDelivery } from './orderDelivery.js';
 import { deliveryIsOut } from './deliveryMovementState.js';
 import { canReadDelivery, deliveryWorkerId, deliveryWorkerFilter, setDeliveryWorker } from './deliveryAssignmentState.js';
 import { getOrderMovement } from './orderMovement.js';
@@ -56,10 +56,9 @@ export async function deliveryTaskView(order, actor, readMovementReason = async 
   if (active && out && assigned && !canHandle) readyReason = 'This delivery is being handled outside the worker delivery flow. Ask an admin for updates.';
   if (active && !out) {
     if (!ready) readyReason = 'Waiting for packing.';
-    else if (!driver?.isWorker) readyReason = driverId
-      ? (actor.isAdmin ? 'Delivery worker access is disabled. Assign another worker.' : 'Delivery worker access is disabled. Ask an admin to assign another worker.')
-      : (actor.isAdmin ? 'Assign a delivery worker.' : 'Waiting for delivery assignment.');
-    else if (!destination?.address && !destination?.googleMapsUrl) readyReason = 'Delivery location is missing. Ask an admin to add the address or map.';
+    else if (!driverId) readyReason = actor.isAdmin ? await readMovementReason() : 'Waiting for delivery assignment.';
+    else if (!driver?.isWorker) readyReason = actor.isAdmin ? 'Delivery worker access is disabled. Assign another worker.' : 'Delivery worker access is disabled. Ask an admin to assign another worker.';
+    else if (deliveryLocationReason(destination)) readyReason = deliveryLocationReason(destination);
     else readyReason = await readMovementReason();
   }
   return {
@@ -69,7 +68,9 @@ export async function deliveryTaskView(order, actor, readMovementReason = async 
     deliveryState: order.status === 'Delivered' ? 'delivered' : order.status === 'Cancelled' ? 'cancelled' : out ? 'out' : order.deliveryMovement?.returnedAt && !order.deliveryMovement?.slotsReturnedAt ? 'returned' : ready ? 'ready' : 'waiting',
     worker: workerInfo(driver), delivery: details,
     canAssign: Boolean(actor.isAdmin && active),
-    canDepart: active && !out && !readyReason && (actor.isAdmin || assigned),
+    // This endpoint handles assigned-worker delivery. Other admin methods are
+    // selected in the order movement dialog, where no worker is required.
+    canDepart: active && !out && Boolean(driverId) && !readyReason && (actor.isAdmin || assigned),
     canDeliver: active && out && canHandle,
     canReturn: active && out && canHandle,
     canCorrect: Boolean(actor.isAdmin && !order.stockFinalizedAt && (out || order.status === 'Delivered')),

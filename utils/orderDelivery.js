@@ -13,6 +13,9 @@ export const normalizeDeliveryDetails = (value = {}) => Object.fromEntries(
   Object.keys(DELIVERY_FIELDS).map((key) => [key, clean(value?.[key])])
 );
 
+export const deliveryLocationReason = details => clean(details?.address) || clean(details?.googleMapsUrl)
+  ? '' : 'Delivery location is missing. An admin must add an address or map before departure.';
+
 export const PREPARATION_MODES = ["prepare_only", "prepare_deliver"];
 
 export function validatePreparationMode(value) {

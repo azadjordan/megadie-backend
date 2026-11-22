@@ -78,7 +78,7 @@ test('admin assigns a separate driver while workers only pack and record deliver
   assert.equal(await packingPage.getByText('Al Ain warehouse', { exact: true }).count(), 0);
   assert.equal(await packingPage.getByRole('button', { name: /Assign delivery|Change delivery worker/ }).count(), 0);
   const ownerPage = await login(admin);
-  await ownerPage.getByRole('button', { name: 'Assign delivery', exact: true }).click();
+  await ownerPage.getByRole('button', { name: 'Assign delivery worker', exact: true }).click();
   const assignment = ownerPage.getByRole('dialog'); await assignment.getByLabel('Delivery worker', { exact: true }).selectOption(String(driver._id));
   await assignment.getByRole('button', { name: 'Save delivery assignment' }).click(); await assignment.waitFor({ state: 'hidden' });
   assert.equal(String((await Order.findById(order._id)).deliveryWorker), String(driver._id));

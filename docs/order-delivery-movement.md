@@ -6,12 +6,12 @@ Delivery records sit on the existing Order. No courier directory, new role, or m
 
 The normal flow is **Ready → Out for delivery → Delivered**.
 
-- Ready orders show **Mark out for delivery**. Its short confirmation has one optional **Handed to** name, for a courier or someone from the company. No method selection or routine checkbox is needed.
+- Ready orders show **Mark out for delivery**. Its confirmation uses the assigned delivery worker. Without one, the admin chooses Azad, Momani, Courier (with a name), or Customer collection. A small assignment shortcut uses the same delivery-worker dialog as the Delivery section.
 - After departure, the next action is **Mark delivered**. Its confirmation records actual customer receipt.
 - Before departure, **Mark delivered** is available under More for customer collection or delivery that already happened. No departure timestamp is invented.
 - **Delivery history** is available under More. It preserves each attempt and actor without cluttering routine confirmations.
 
-The same actions appear on Order details. Only the next routine action is prominent. Icons accompany each action. Courier and company deliveries share the blue Out for delivery badge.
+The same actions appear on Order details. Only the next routine action is prominent; the Delivery panel manages assignments without repeating status buttons. Worker assignment is optional for the other delivery methods. Icons accompany each action. Courier and company deliveries share the blue Out for delivery badge.
 
 The explicit confirmation button acknowledges the physical event. Live packing still requires all items picked and Packed. For manual preparation, the confirmation explains that the complete order must be prepared from its reserved slots; the server records those sources as picked to protect shelf counts.
 
@@ -41,7 +41,9 @@ The existing PUT `/api/orders/:id/deliver` remains a receipt action, uses the sa
 
 The current delivery snapshot and admin-only history preserve each attempt's actual timestamp, handler and actor. Existing method details and notes remain readable in history. The history is excluded from list queries; internal movement data is stripped from customer responses. The worker delivery extension provides scoped assignments and movement controls through separate staff endpoints; see [Worker delivery](worker-delivery.md). Picking stays read-only while goods are away.
 
-The confirmation guards repeated submission. Names are optional and a missing name is never invented. After any uncertain/conflicting save, the admin checks latest delivery details and confirms again. Reading a committed event recovers a lost response without repeating it. A departure confirmation never silently changes into a receipt action after refresh.
+The movement response separates stock readiness (`readyReason`) from departure readiness (`departureReadyReason`). An assigned worker needs enabled access and an address or map before departure, whether the admin or worker records it. Missing location details do not block recording customer receipt after departure. Legacy locations are snapshotted from the client default when needed.
+
+The confirmation guards repeated submission. Worker names come from the saved assignment; owner names come from the selected owner and courier names are required. After any uncertain/conflicting save, the admin checks latest delivery details and confirms again. Reading a committed event recovers a lost response without repeating it. A departure confirmation never silently changes into a receipt action after refresh.
 
 ## Validation / release
 

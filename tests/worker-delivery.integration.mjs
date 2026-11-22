@@ -263,6 +263,54 @@ test("worker delivery assignments with an isolated replica set", { skip: !uri, t
     assert.equal((await task(f, other)).worker.id, String(other._id));
     assert.equal((await view(f, worker)).preparationMode, 'prepare_only');
   });
+  await t.test('admin and worker departure paths require the same assigned-worker destination and rejected attempts change nothing', async () => {
+    const f = await packed({ driver: other });
+    await Order.updateOne({ _id: f.order._id }, { $set: { deliveryDetails: { address: '', googleMapsUrl: '' } } });
+    const d = await task(f, admin);
+    const general = (await api(`/orders/${f.order._id}/movement`)).body.data;
+    assert.equal(d.canDepart, false);
+    assert.equal(general.departureReadyReason, d.readyReason);
+    assert.match(general.departureReadyReason, /location is missing/);
+    const before = await Order.findById(f.order._id).select('+reservationRevision +deliveryHistory').lean();
+    for (const actor of [admin, other]) assert.equal((await move(f, 'departed', actor)).status, 409);
+    const rejected = await api(`/orders/${f.order._id}/movement`, { method: 'POST', body: { action: 'departed', expectedRevision: general.version, confirmedReady: true } });
+    assert.equal(rejected.status, 409);
+    const after = await Order.findById(f.order._id).select('+reservationRevision +deliveryHistory').lean();
+    assert.equal(after.reservationRevision, before.reservationRevision);
+    assert.deepEqual(after.deliveryHistory, before.deliveryHistory);
+    assert.deepEqual(after.deliveryMovement, before.deliveryMovement);
+
+    await Order.updateOne({ _id: f.order._id }, { $set: { deliveryDetails: { googleMapsUrl: 'https://maps.app.goo.gl/test-location' } } });
+    const ready = (await api(`/orders/${f.order._id}/movement`)).body.data;
+    assert.equal(ready.departureReadyReason, ''); assert.equal((await task(f, other)).canDepart, true);
+    expectOK(await api(`/orders/${f.order._id}/movement`, { method: 'POST', body: { action: 'departed', expectedRevision: ready.version, confirmedReady: true } }));
+    // A later location edit must not prevent recording an actual customer receipt.
+    await Order.updateOne({ _id: f.order._id }, { $set: { deliveryDetails: { address: '' } } });
+    assert.equal((await api(`/orders/${f.order._id}/movement`)).body.data.readyReason, '');
+    expectOK(await move(f, 'delivered', other));
+  });
+  await t.test('admin preparation can use a delivery worker without a packing assignment and snapshots legacy destinations', async () => {
+    const f = await fixture();
+    await Order.updateOne({ _id: f.order._id }, { $set: { deliveryWorker: other._id }, $unset: { deliveryDetails: 1 } });
+    const d = await task(f, admin);
+    assert.equal(d.canDepart, true); assert.equal(d.manualPreparation, true);
+    const general = (await api(`/orders/${f.order._id}/movement`)).body.data;
+    assert.equal(general.departureReadyReason, '');
+    expectOK(await api(`/orders/${f.order._id}/movement`, { method: 'POST', body: { action: 'departed', expectedRevision: general.version, confirmedReady: true } }));
+    assert.equal((await Order.findById(f.order._id)).deliveryDetails.address, 'Order destination');
+    expectOK(await move(f, 'delivered', other));
+  });
+  await t.test('worker assignment and a destination are optional for owner, courier and customer collection methods', async () => {
+    for (const [method, handler] of [['company', 'Azad'], ['company', 'Momani'], ['courier', 'Courier A'], ['collection', '']]) {
+      const f = await fixture();
+      await Order.updateOne({ _id: f.order._id }, { $set: { deliveryDetails: { address: '' }, deliveryWorker: null } });
+      const d = await task(f, admin);
+      assert.equal(d.readyReason, ''); assert.equal(d.canDepart, false);
+      const general = (await api(`/orders/${f.order._id}/movement`)).body.data;
+      assert.equal(general.departureReadyReason, '');
+      expectOK(await api(`/orders/${f.order._id}/movement`, { method: 'POST', body: { action: method === 'collection' ? 'collected' : 'departed', method, handler, expectedRevision: general.version, confirmedReady: true, confirmedReceived: true } }));
+    }
+  });
   await t.test('disabled targets, stale destination changes and a missing location cannot be bypassed', async () => {
     const f = await packed({ driver: other });
     const disabled = await makeUser('Disabled', { isWorker: false });

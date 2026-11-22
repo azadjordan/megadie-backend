@@ -503,12 +503,41 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     assert.equal(await page.getByRole("heading", { name: "Ahmed Trading", exact: true }).count(), 0);
     assert.equal(await page.getByRole("button", { name: "Not enough here", exact: true }).count(), 0);
   });
+  await t.test('assigning packing clearly preserves a separately assigned delivery worker', async t => {
+    const { page, state } = await fixture(t, { admin: true, published: false });
+    state.task.deliveryWorker = { id: '200000000000000000000099', name: 'Delivery Arun', enabled: true };
+    state.task.preparationMode = 'prepare_deliver';
+    await page.goto(`${origin}/admin/orders/${orderId}`);
+    await page.getByRole('button', { name: 'Assign packing', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Assign packing', exact: true });
+    await dialog.getByRole('combobox', { name: 'Packing worker', exact: true }).waitFor();
+    await dialog.getByText('Delivery worker: Delivery Arun', { exact: true }).waitFor();
+    await dialog.getByText(/Delivery stays with this worker/).waitFor();
+    assert.equal(await dialog.getByRole('radio').count(), 0);
+    await dialog.getByRole('button', { name: 'Assign packing', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Packing worker', exact: true }).waitFor();
+    assert.equal(state.writes[0].body.workerId, workerId);
+    assert.equal(state.writes[0].body.preparationMode, 'prepare_only');
+    assert.equal(state.task.deliveryWorker.name, 'Delivery Arun');
+  });
+  await t.test('pack and deliver names the selected worker before publishing the shortcut', async t => {
+    const { page, state } = await fixture(t, { admin: true, published: false });
+    await page.goto(`${origin}/admin/orders/${orderId}`);
+    await page.getByRole('button', { name: 'Assign packing', exact: true }).click();
+    const dialog = page.getByRole('dialog', { name: 'Assign packing', exact: true });
+    await dialog.getByRole('radio', { name: 'Pack & deliver', exact: true }).check();
+    await dialog.getByText('Delivery worker: Worker Ahmed', { exact: true }).waitFor();
+    await dialog.getByText('The selected worker will pack and deliver this order.', { exact: true }).waitFor();
+    await dialog.getByRole('button', { name: 'Assign packing', exact: true }).click();
+    await page.getByRole('dialog', { name: 'Packing worker', exact: true }).waitFor();
+    assert.equal(state.writes[0].body.preparationMode, 'prepare_deliver');
+  });
   await t.test("admin can send an existing fully reserved order without using WhatsApp", async t => {
     const { page, state } = await fixture(t, { admin: true, published: false });
     await page.goto(`${origin}/admin/orders/${orderId}`);
-    await page.getByRole("button", { name: "Send to worker", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Send to worker", exact: true });
-    await dialog.getByRole("button", { name: "Send to worker", exact: true }).click();
+    await page.getByRole("button", { name: "Assign packing", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Assign packing", exact: true });
+    await dialog.getByRole("button", { name: "Assign packing", exact: true }).click();
     await page.getByText("Order sent to worker.", { exact: true }).waitFor();
     assert.equal(state.writes[0].body.workerId, workerId);
     assert.equal(state.writes[0].body.preparationMode, "prepare_only");
@@ -546,9 +575,9 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
       await invoiceDialog.waitFor({ state: 'hidden' });
       const originalInvoice = structuredClone(state.invoice);
       await page.goto(`${origin}/admin/orders`);
-      await page.getByRole('button', { name: 'Send to worker', exact: true }).click();
-      const dialog = page.getByRole('dialog', { name: 'Send to worker', exact: true });
-      const send = dialog.getByRole('button', { name: 'Send to worker', exact: true });
+      await page.getByRole('button', { name: 'Assign packing', exact: true }).click();
+      const dialog = page.getByRole('dialog', { name: 'Assign packing', exact: true });
+      const send = dialog.getByRole('button', { name: 'Assign packing', exact: true });
       await send.waitFor(); assert.equal(await send.isEnabled(), true);
       assert.equal(await dialog.getByText('Invoice needs attention', { exact: true }).count(), 0);
       assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth));
@@ -649,7 +678,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const dialog = page.getByRole('dialog', { name: 'Create invoice', exact: true });
     await dialog.waitFor(); await dialog.getByRole('button', { name: 'Cancel', exact: true }).click();
     state.task.status = 'Shipping';
-    await page.reload(); await page.getByRole('button', { name: 'Send to worker', exact: true }).waitFor();
+    await page.reload(); await page.getByRole('button', { name: 'Assign packing', exact: true }).waitFor();
     await openOrderTool(page, 'Mark out for delivery');
     await page.getByRole('dialog', { name: 'Mark out for delivery', exact: true }).getByRole('button', { name: 'Close', exact: true }).click();
     state.task.sentAt = '2026-11-13T08:00:00.000Z';
@@ -1013,7 +1042,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const dialog = page.getByRole("dialog", { name: "Packing worker", exact: true });
     await dialog.getByRole("link", { name: "View packing", exact: true }).waitFor();
     assert.equal(await dialog.getByRole("combobox").count(), 0);
-    await dialog.getByRole("button", { name: "Change assignment", exact: true }).click();
+    await dialog.getByRole("button", { name: "Change packing worker", exact: true }).click();
     assert.equal(await dialog.getByRole("button", { name: "Save changes", exact: true }).isDisabled(), true);
     assert.equal(await dialog.getByRole("radio").count(), 0);
     assert.equal(await dialog.getByLabel('Recipient name', { exact: true }).inputValue(), 'Existing recipient');
@@ -1031,7 +1060,7 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     assert.equal(await dialog.getByRole("combobox").count(), 0);
     assert.equal(state.writes.at(-1).body.preparationMode, "prepare_deliver");
     assert.deepEqual(state.writes.at(-1).body.deliveryDetails, { contactName: 'New recipient', phoneNumber: '+971 50 123 4567', secondaryPhoneNumber: '04 123 4567', address: 'Warehouse road', googleMapsUrl: '', notes: '' });
-    await dialog.getByRole('button', { name: 'Change assignment', exact: true }).click();
+    await dialog.getByRole('button', { name: 'Change packing worker', exact: true }).click();
     assert.equal(await dialog.getByLabel('Recipient name', { exact: true }).inputValue(), 'New recipient');
     assert.equal(await dialog.getByRole('button', { name: 'Save changes', exact: true }).isDisabled(), true);
   });
@@ -1083,8 +1112,8 @@ test("worker packing browser interactions", { timeout: 120000 }, async t => {
     const { page, state } = await fixture(t, { admin: true, published: false });
     state.task.items[0].allocations[0].qty = 6;
     await page.goto(`${origin}/admin/orders/${orderId}`);
-    await page.getByRole("button", { name: "Send to worker", exact: true }).click();
-    const dialog = page.getByRole("dialog", { name: "Send to worker", exact: true });
+    await page.getByRole("button", { name: "Assign packing", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Assign packing", exact: true });
     await dialog.getByRole("radio", { name: "Pack & deliver", exact: true }).check();
     await dialog.getByRole("link", { name: "Review reservations", exact: true }).click();
     await dialog.getByText("Discard unsaved changes?", { exact: true }).waitFor();

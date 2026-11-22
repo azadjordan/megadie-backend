@@ -4,19 +4,19 @@ Packing and delivery use the existing Worker access flag and separate assignment
 
 ## Flow and UI
 
-Admin reserves goods and assigns packing. Pack & deliver initially assigns delivery to the same worker; Pack only leaves delivery unassigned unless someone was already independently assigned. Existing picking and shortage controls lead to Mark packed.
+Admin reserves goods and uses Assign packing. When no driver is assigned, Pack & deliver assigns delivery to the selected packing worker and names that worker before saving. When a delivery worker is already assigned, the form shows who will deliver and assigns packing only, preserving that driver. Later packing changes also leave delivery separate. Existing picking and shortage controls lead to Mark packed.
 
 For deliveries without an assigned worker, admins choose Azad, Momani, Courier (with a required name), or Customer collection. Owner choices store the existing company method with the canonical owner name; they never assign a worker or generate worker delivery credit. New owner movements require an explicit valid owner, while existing departures keep their recorded name through receipt, returns and corrections.
 
 Only admins can Assign delivery, Change delivery worker, remove an assignment, or list enabled workers for selection. Workers receive their own unfinished packing or assigned delivery jobs, with no assignment controls. Once packing-only work is finished, it leaves active work and both saved task links are restricted to the worker's own recent-work receipt and its privacy window. This records responsibility, not movement. Packing, invoice, reservations and shelf quantities stay saved. Assignment remains available after packing and invoicing. During departure only an admin may reassign, with explicit acknowledgement of physical responsibility transfer.
 
-The current delivery worker uses Mark out for delivery when the complete order leaves, then Mark delivered after complete customer receipt. Waiting for packing cannot depart. Admin-prepared orders retain the complete-preparation confirmation on departure. Returned to store under More confirms all goods are back; goods remain packed and reserved. Shelf return remains an admin action.
+The current delivery worker uses Mark out for delivery when the complete order leaves, then Mark delivered after complete customer receipt. Waiting for packing cannot depart. Assigned-worker departure needs enabled worker access and an address or map, including when an admin records departure. A later missing location does not block a real customer receipt. Admin-prepared orders retain the complete-preparation confirmation on departure. Returned to store under More confirms all goods are back; goods remain packed and reserved. Shelf return remains an admin action.
 
 Receipt confirmation names the client and order and states that the complete order was received. Partial, refused or failed deliveries require admin review; the confirmation reminds the worker to contact an admin before proceeding. No partial-delivery status or extra approval step is introduced.
 
 My work has Active work and Recent work views. The combined active feed shows one card per order and its current packing or delivery action, with compact Waiting entries. A delivery-only worker sees delivery jobs directly, and combined assignments transition from packing to delivery without duplicate cards. Cards show client, carton reference, delivery status, recipient/address, map/directions and calling. Details add notes and a price-free item summary. Completion stays visible on the open detail page with success feedback and leaves the active list. Delivery access does not grant picking, inventory, billing or access to other customers/orders.
 
-Admin orders offer Packing worker and Delivery worker separately. Order details and packing monitoring include a compact delivery assignment panel. Removing packing retains the independently managed delivery assignment, as explained in its dialog.
+Admin orders offer Packing worker and Delivery worker separately. Order details keep status actions together and use the compact Delivery panel for assignment only. Packing monitoring retains its delivery controls. An unassigned worker does not mean delivery is blocked: owners, couriers and customer collection use the admin movement dialog. Removing packing retains the independently managed delivery assignment, as explained in its dialog.
 
 ## Data and consistency
 

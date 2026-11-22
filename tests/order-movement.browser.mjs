@@ -9,7 +9,7 @@ const profile = { _id: '200000000000000000000001', name: 'Admin', isAdmin: true,
 
 test('delivery movement browser flow', { timeout: 120000 }, async t => {
   const browser = await chromium.launch({ headless: true }); t.after(() => browser.close());
-  async function fixture(t, { width = 1400, out = false, returned = false, unassigned = false, legacyCompany = false } = {}) {
+  async function fixture(t, { width = 1400, out = false, returned = false, unassigned = false, legacyCompany = false, missingDestination = false } = {}) {
     const context = await browser.newContext({ viewport: { width, height: 950 } }); t.after(() => context.close());
     const state = { writes: [], unexpected: [], errors: [], fail: false, lost: false,
       order: { _id: id, orderNumber: 'ORD-MOVEMENT', user: { _id: 'client', name: 'Azad Store' }, status: 'Shipping', allocationStatus: 'Allocated', orderItems: [{ product: 'p1', sku: 'SKU1', qty: 10, unitPrice: 2 }], stockChecksPending: 0, totalPrice: 20, listAction: out ? 'mark-delivered' : 'mark-out-for-delivery', createdAt: '2026-11-16T08:00:00Z' },
@@ -17,6 +17,7 @@ test('delivery movement browser flow', { timeout: 120000 }, async t => {
     };
     state.order.deliveryMovement = state.view.movement;
     state.view.deliveryWorker = unassigned ? null : { id: '200000000000000000000001', name: 'Arun', enabled: true };
+    state.view.departureReadyReason = missingDestination ? 'Delivery location is missing. An admin must add an address or map before departure.' : '';
     await context.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
       if (!url.pathname.startsWith('/api/')) return url.origin === origin ? route.continue() : route.abort();
@@ -27,7 +28,7 @@ test('delivery movement browser flow', { timeout: 120000 }, async t => {
       if (path === '/users/account/profile') return reply({ data: { ...profile, ...metadata() } });
       if (path === '/users/session/activity') return reply({ data: metadata() });
       if (path === '/site-settings/maintenance-notice') return reply({ data: { enabled: false } });
-      if (path === `/packing/deliveries/${id}` && method === 'GET') return reply({ data: { orderId: id, customerName: 'Azad Store', orderNumber: 'ORD-MOVEMENT', version: state.view.version, worker: null, delivery: null, deliveryState: state.view.isOut ? 'out' : 'ready', canAssign: true, canDepart: false, canDeliver: false, canReturn: false, canCorrect: false, items: [], status: state.order.status } });
+      if (path === `/packing/deliveries/${id}` && method === 'GET') return reply({ data: { orderId: id, customerName: 'Azad Store', orderNumber: 'ORD-MOVEMENT', version: state.view.version, worker: state.view.deliveryWorker, delivery: null, deliveryState: state.view.isOut ? 'out' : 'ready', canAssign: true, canDepart: !state.view.isOut && Boolean(state.view.deliveryWorker) && !state.view.departureReadyReason, canDeliver: state.view.isOut, canReturn: state.view.isOut, canCorrect: state.view.isOut, readyReason: state.view.departureReadyReason, items: [], status: state.order.status } });
       if (path === '/orders/work-summary') return reply({ data: {} });
       if (path === '/orders' && method === 'GET') return reply({ data: [state.order], pagination: { page: 1, totalPages: 1, total: 1, limit: 20 } });
       if (path === `/orders/${id}` && method === 'GET') return reply({ data: state.order });
@@ -68,6 +69,36 @@ test('delivery movement browser flow', { timeout: 120000 }, async t => {
     await page.getByRole('button', { name: /^More actions for / }).click();
     await page.getByRole('menuitem', { name: label, exact: true }).click();
   }
+  await t.test('admin departure shows its location blocker without blocking receipt after departure', async t => {
+    const { dialog, state } = await fixture(t, { missingDestination: true });
+    await dialog.getByText(/Delivery location is missing/).waitFor();
+    assert.equal(await dialog.getByRole('button', { name: 'Mark out for delivery', exact: true }).isDisabled(), true);
+    assert.equal(state.writes.length, 0);
+    const departed = await fixture(t, { out: true, missingDestination: true });
+    assert.equal(await departed.dialog.getByRole('button', { name: 'Mark delivered', exact: true }).isDisabled(), false);
+    await departed.dialog.getByRole('button', { name: 'Mark delivered', exact: true }).click();
+    await departed.dialog.waitFor({ state: 'hidden' });
+    assert.equal(departed.state.writes[0].action, 'delivered');
+  });
+  await t.test('order details has one departure action while its panel keeps delivery assignment', async t => {
+    const { page, dialog } = await fixture(t);
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.goto(origin + `/admin/orders/${id}`);
+    const panel = page.getByRole('region', { name: 'Delivery assignment', exact: true });
+    await panel.getByRole('button', { name: 'Change delivery worker', exact: true }).waitFor();
+    assert.equal(await panel.getByRole('button', { name: 'Mark out for delivery', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Mark out for delivery', exact: true }).count(), 1);
+  });
+  await t.test('owner and courier delivery do not look like a missing worker assignment', async t => {
+    const { page, dialog } = await fixture(t, { unassigned: true });
+    await dialog.getByRole('button', { name: 'Close', exact: true }).click();
+    await page.goto(origin + `/admin/orders/${id}`);
+    const panel = page.getByRole('region', { name: 'Delivery assignment', exact: true });
+    await panel.getByText('Ready to deliver', { exact: true }).waitFor();
+    await panel.getByText(/Worker assignment is optional/).waitFor();
+    assert.equal(await panel.getByText('Waiting for delivery assignment', { exact: true }).count(), 0);
+    await panel.getByRole('button', { name: 'Assign delivery worker', exact: true }).waitFor();
+  });
   await t.test('assigned delivery uses its account without typed names', async t => {
     const { page, state, dialog } = await fixture(t);
     assert.equal(await dialog.getByRole('combobox').count(), 0); assert.equal(await dialog.getByRole('checkbox').count(), 0);
@@ -172,7 +203,7 @@ test('delivery movement browser flow', { timeout: 120000 }, async t => {
     const { page, dialog } = await fixture(t, { out: true }); await dialog.getByRole('button', { name: 'Close' }).click();
     await page.goto(origin + `/admin/orders/${id}`);
     await page.getByLabel('Delivery movement').getByText('Out for delivery', { exact: true }).waitFor();
-    assert.equal(await page.getByRole('button', { name: 'Send to worker', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'Assign packing', exact: true }).count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Edit items', exact: true }).isDisabled(), true);
     assert.equal(await page.getByRole('button', { name: 'Mark delivered', exact: true }).count(), 1);
     await page.getByRole('button', { name: 'Mark delivered', exact: true }).click();

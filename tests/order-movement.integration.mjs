@@ -147,7 +147,7 @@ test("delivery movement with a disposable local replica set", { skip: !uri, time
     assert.equal((await movement(f)).deliveredBy, 'External courier');
   });
   await t.test('an owner choice cannot override an assigned worker and normal worker delivery retains credit', async () => {
-    const f = await fixture(); await Order.updateOne({ _id: f.order._id }, { $set: { deliveryWorker: worker._id } });
+    const f = await fixture(); await Order.updateOne({ _id: f.order._id }, { $set: { deliveryWorker: worker._id, deliveryDetails: { address: 'Worker delivery destination' } } });
     const before = await Order.findById(f.order._id).select('+deliveryHistory +reservationRevision').lean();
     assert.equal((await move(f, { method: 'company', handler: 'Azad' })).status, 409);
     assert.deepEqual(await Order.findById(f.order._id).select('+deliveryHistory +reservationRevision').lean(), before);

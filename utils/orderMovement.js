@@ -4,7 +4,7 @@ import SlotItem from '../models/slotItemModel.js';
 import Quote from '../models/quoteModel.js';
 import User from '../models/userModel.js';
 import { deliveryWorkerId } from './deliveryAssignmentState.js';
-import { resolveOrderDelivery } from './orderDelivery.js';
+import { deliveryLocationReason, resolveOrderDelivery } from './orderDelivery.js';
 import { transaction, lockStock, ReservationError } from './orderReservations.js';
 import { reservationId as id, isReserved, buildOrderReservationPlan } from './orderReservationPlan.js';
 import { canMarkPacked, packingSummary } from './packingState.js';
@@ -39,14 +39,23 @@ async function deliveryWorkerView(order, session) {
   const worker = workerId ? await User.findById(workerId).select('name isWorker').session(session).lean() : null;
   return worker ? { id: workerId, name: worker.name, enabled: Boolean(worker.isWorker) } : null;
 }
+async function workerDepartureReason(order, enabled, session = null) {
+  if (!deliveryWorkerId(order)) return '';
+  if (!enabled) return 'Assign an enabled delivery worker before departure.';
+  const customer = order.deliveryDetails == null ? await User.findById(order.user).session(session).lean() : null;
+  return deliveryLocationReason(resolveOrderDelivery({ ...order.toObject(), user: customer }).details);
+}
 async function view(order, session = null) {
   const rows = await OrderAllocation.find({ order: order._id }).session(session).lean();
+  const worker = await deliveryWorkerView(order, session);
+  const readyReason = await movementReadyReason(order, rows, session);
   return { orderId: id(order), orderNumber: order.orderNumber, status: order.status,
     version: order.reservationRevision || 0, movement: order.deliveryMovement || null,
-    deliveryWorker: await deliveryWorkerView(order, session),
+    deliveryWorker: worker,
     deliveredAt: order.deliveredAt || null, deliveredBy: order.deliveredBy || '',
     manualPreparation: !order.packingSentAt, isOut: deliveryIsOut(order), holdsGoods: deliveryHoldsGoods(order),
-    readyReason: await movementReadyReason(order, rows, session), history: order.deliveryHistory || [] };
+    readyReason, departureReadyReason: readyReason || await workerDepartureReason(order, worker?.enabled, session),
+    history: order.deliveryHistory || [] };
 }
 export async function getOrderMovement(orderId) {
   const order = await Order.findById(orderId).select(selection);
@@ -79,13 +88,6 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
       if (['method', 'handler', 'deliveryCharge', 'extraFee', 'deliveredBy', 'adminToAdminNote', 'adminToClientNote'].some(key => Object.hasOwn(body, key))) reject('Workers can record delivery events only.', 400);
       if (action === 'delivered' && !deliveryIsOut(order)) reject('Record Out for delivery before confirming customer receipt.');
       if (['delivered', 'returned'].includes(action) && deliveryIsOut(order) && order.deliveryMovement?.method !== 'company') reject('This delivery is being handled outside the worker delivery flow. Ask an admin to update it.');
-      if (action === 'departed' && order.deliveryDetails == null) {
-        const customer = await User.findById(order.user).session(session).lean();
-        order.deliveryDetails = resolveOrderDelivery({ ...order.toObject(), user: customer }).details;
-        order.deliveryRevision = (order.deliveryRevision || 0) + 1;
-      }
-      const destination = order.deliveryDetails;
-      if (action === 'departed' && destination != null && !destination.address && !destination.googleMapsUrl) reject('Delivery location is missing. Ask an admin to add the address or map.');
     }
     if ((order.status !== 'Shipping' && !(actor.isAdmin && action === 'corrected' && order.status === 'Delivered')) || order.stockFinalizedAt) reject('Only unfinished deliveries can be updated.');
     const now = new Date();
@@ -96,6 +98,15 @@ export async function updateOrderMovement({ orderId, actor, body, legacy = false
     const driver = driverId ? (action === 'departed'
       ? await User.findOneAndUpdate({ _id: driverId, isWorker: true }, { $inc: { staffRevision: 1 } }, { new: true, session }).select('name isWorker')
       : await User.findById(driverId).select('name isWorker').session(session)) : null;
+    if (action === 'departed' && driverId) {
+      if (order.deliveryDetails == null) {
+        const customer = await User.findById(order.user).session(session).lean();
+        order.deliveryDetails = resolveOrderDelivery({ ...order.toObject(), user: customer }).details;
+        order.deliveryRevision = (order.deliveryRevision || 0) + 1;
+      }
+      const reason = await workerDepartureReason(order, driver?.isWorker, session);
+      if (reason) reject(reason);
+    }
     let method = body.method;
     const suppliedHandler = legacy ? body.deliveredBy : body.handler;
     if (suppliedHandler != null && (typeof suppliedHandler !== 'string' || suppliedHandler.trim().length > 120)) reject('Keep Handed to within 120 characters.', 400);
