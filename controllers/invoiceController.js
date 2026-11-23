@@ -118,6 +118,23 @@ async function applyPdfMedia(page) {
 }
 
 const ALLOWED_STATUSES = new Set(["Issued", "Cancelled"]);
+const CUSTOMER_INVOICE_SUMMARY_FIELDS = [
+  "source",
+  "invoiceItems",
+  "invoiceNumber",
+  "status",
+  "amountMinor",
+  "currency",
+  "minorUnitFactor",
+  "paidTotalMinor",
+  "balanceDueMinor",
+  "paymentStatus",
+  "invoiceDate",
+  "dueDate",
+  "createdAt",
+  "order",
+].join(" ");
+const CUSTOMER_PAYMENT_FIELDS = "amountMinor paymentMethod paymentDate reference receivedBy createdAt";
 
 /**
  * @desc    Get my invoices (filtered + paginated)
@@ -179,24 +196,7 @@ export const getMyInvoices = asyncHandler(async (req, res) => {
   const [total, items] = await Promise.all([
     Invoice.countDocuments(q),
     Invoice.find(q)
-      .select(
-        [
-          "source",
-          "invoiceItems",
-          "invoiceNumber",
-          "status",
-          "amountMinor",
-          "currency",
-          "minorUnitFactor",
-          "paidTotalMinor",
-          "balanceDueMinor",
-          "paymentStatus",
-          "invoiceDate",
-          "dueDate",
-          "createdAt",
-          "order",
-        ].join(" ")
-      )
+      .select(CUSTOMER_INVOICE_SUMMARY_FIELDS)
       .sort({ invoiceDate: -1, createdAt: -1 })
       .skip(skip)
       .limit(limit)
@@ -327,14 +327,20 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
 
   const ownerId = String(authProbe.user);
   const requesterId = String(req.user?._id);
+  const requesterIsAdmin = isAdminUser(req);
 
-  if (!isAdminUser(req) && ownerId !== requesterId) {
+  if (!requesterIsAdmin && ownerId !== requesterId) {
     res.status(403);
     throw new Error("Not authorized to view this invoice.");
   }
 
-  // 2) Now fetch full invoice with safe populates
-  const invoice = await Invoice.findById(id)
+  const invoiceQuery = Invoice.findById(id);
+  if (!requesterIsAdmin) {
+    invoiceQuery.where({ user: req.user._id })
+      .select(`${CUSTOMER_INVOICE_SUMMARY_FIELDS} user updatedAt cancelledAt`);
+  }
+
+  const invoice = await invoiceQuery
     .populate({
       path: "user",
       select: "name email phoneNumber",
@@ -363,15 +369,7 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
     .populate({
       path: "payments",
       options: { sort: { paymentDate: -1, createdAt: -1 } },
-      select: [
-        "amountMinor",
-        "paymentMethod",
-        "paymentDate",
-        "note",
-        "reference",
-        "receivedBy",
-        "createdAt",
-      ].join(" "),
+      select: requesterIsAdmin ? `${CUSTOMER_PAYMENT_FIELDS} note` : CUSTOMER_PAYMENT_FIELDS,
     })
     .lean();
 
@@ -381,7 +379,7 @@ export const getInvoiceById = asyncHandler(async (req, res) => {
     throw new Error("Invoice not found.");
   }
 
-  res.json(invoice);
+  res.set("Cache-Control", "private, no-store").json(invoice);
 });
 
 /**
@@ -413,25 +411,7 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
   }
 
   const invoice = await Invoice.findById(id)
-    .select(
-      [
-        "source",
-        "invoiceItems",
-        "invoiceNumber",
-        "status",
-        "amountMinor",
-        "currency",
-        "minorUnitFactor",
-        "paidTotalMinor",
-        "balanceDueMinor",
-        "paymentStatus",
-        "invoiceDate",
-        "dueDate",
-        "createdAt",
-        "user",
-        "order",
-      ].join(" ")
-    )
+    .select(`${CUSTOMER_INVOICE_SUMMARY_FIELDS} user`)
     .populate({
       path: "user",
       select: "name email",
@@ -453,14 +433,7 @@ export const getInvoicePDF = asyncHandler(async (req, res) => {
     .populate({
       path: "payments",
       options: { sort: { paymentDate: -1, createdAt: -1 } },
-      select: [
-        "amountMinor",
-        "paymentMethod",
-        "paymentDate",
-        "reference",
-        "receivedBy",
-        "createdAt",
-      ].join(" "),
+      select: CUSTOMER_PAYMENT_FIELDS,
     })
     .lean();
 

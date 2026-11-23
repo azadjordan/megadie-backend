@@ -7,6 +7,7 @@ import cookieParser from 'cookie-parser';
 import User from '../models/userModel.js';
 import Order from '../models/orderModel.js';
 import Invoice from '../models/invoiceModel.js';
+import Payment from '../models/paymentModel.js';
 import Product from '../models/productModel.js';
 import Slot from '../models/slotModel.js';
 import SlotItem from '../models/slotItemModel.js';
@@ -203,5 +204,66 @@ test('packing invoice timing and stock-report checks', { skip: !uri, timeout: 12
     const latest = await view(f); assert.equal(latest.items[0].pickedQty, 8); assert.equal(latest.reports.length, 2);
     assert.equal(latest.stockChecksPending, review.status === 200 ? 1 : 2);
     assert.equal(Boolean(latest.reports[0].checkedAt), review.status === 200); assert.equal(latest.reports[1].checkedAt, undefined);
+  });
+
+  await t.test('invoice and payment notes are visible only to admins', async () => {
+    const f = await fixture();
+    const result = await invoice(f);
+    ok(result, 201);
+    const manual = await Invoice.create({
+      user: customer._id,
+      source: 'Manual',
+      amountMinor: 2500,
+      dueDate: '2030-01-01',
+      invoiceItems: [{ description: 'Sample materials', qty: 1, unitPriceMinor: 2500, lineTotalMinor: 2500 }],
+    });
+    const otherCustomer = await makeUser('OtherClient');
+
+    for (const billed of [result.body.data, manual]) {
+      const path = '/invoices/' + billed._id;
+      const adminNote = 'Internal invoice comment';
+      const paymentNote = 'Internal payment comment';
+      const cancelReason = 'Internal cancellation reason';
+      await Payment.create({
+        invoice: billed._id,
+        user: customer._id,
+        amountMinor: 1000,
+        paymentMethod: 'Cash',
+        receivedBy: 'Company Account',
+        reference: 'PAYMENT-REFERENCE',
+        note: paymentNote,
+      });
+      const status = billed.source === 'Manual' ? 'Cancelled' : 'Issued';
+      ok(await api(path, {
+        method: 'PUT',
+        body: { adminNote, status, ...(status === 'Cancelled' && { cancelReason }) },
+      }));
+
+      const customerView = await api(path, { actor: customer });
+      ok(customerView);
+      assert.equal(customerView.body.invoiceNumber, billed.invoiceNumber);
+      assert.equal(customerView.body.status, status);
+      assert.equal(customerView.body.user._id, String(customer._id));
+      assert.equal(customerView.body.balanceDueMinor, billed.amountMinor - 1000);
+      assert.equal(customerView.body.payments.length, 1);
+      assert.equal(customerView.body.payments[0].amountMinor, 1000);
+      assert.equal(customerView.body.payments[0].reference, 'PAYMENT-REFERENCE');
+      assert.equal(Object.hasOwn(customerView.body, 'adminNote'), false);
+      assert.equal(Object.hasOwn(customerView.body, 'cancelReason'), false);
+      assert.equal(Object.hasOwn(customerView.body.payments[0], 'note'), false);
+      if (status === 'Issued') {
+        assert.equal(customerView.body.order.orderNumber, f.order.orderNumber);
+      } else {
+        assert.ok(customerView.body.cancelledAt);
+        assert.equal(customerView.body.invoiceItems[0].description, 'Sample materials');
+      }
+
+      const adminView = await api(path);
+      ok(adminView);
+      assert.equal(adminView.body.adminNote, adminNote);
+      assert.equal(adminView.body.payments[0].note, paymentNote);
+      if (status === 'Cancelled') assert.equal(adminView.body.cancelReason, cancelReason);
+      assert.equal((await api(path, { actor: otherCustomer })).status, 403);
+    }
   });
 });
