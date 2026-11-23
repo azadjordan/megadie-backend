@@ -175,7 +175,7 @@ async function applyInvoiceDeltaMinorAtomic(invoiceId, deltaMinor, options = {})
       {
         $set: {
           paidTotalMinor: {
-            $max: [0, { $add: ["$paidTotalMinor", delta] }],
+            $max: [0, { $add: [{ $ifNull: ["$paidTotalMinor", 0] }, delta] }],
           },
         },
       },

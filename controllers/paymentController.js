@@ -8,6 +8,7 @@ import Payment, {
 import CustomerPaymentReceipt from "../models/customerPaymentReceiptModel.js";
 import Invoice from "../models/invoiceModel.js";
 import User from "../models/userModel.js";
+import { recordPaymentRequest } from "../utils/paymentRequests.js";
 
 /* -----------------------
    Helpers
@@ -303,11 +304,10 @@ export const allocateCustomerPayment = asyncHandler(async (req, res) => {
   }
 
   const parsedPaymentDate = parsePaymentDate(res, paymentDate);
-  const session = await mongoose.startSession();
-  let payload = null;
-
-  try {
-    await session.withTransaction(async () => {
+  const payload = await recordPaymentRequest(
+    req, res, ["customer", userId.toLowerCase()],
+    [majorAmount, paymentMethod, receivedByTrimmed, parsedPaymentDate, getTrimmedString(note), getTrimmedString(reference)],
+    async (session) => {
       const customer = await findPaymentCustomer(res, userId, session);
       const invoices = await findCustomerUnpaidInvoices(userId, session);
       if (!invoices.length) {
@@ -317,7 +317,7 @@ export const allocateCustomerPayment = asyncHandler(async (req, res) => {
 
       const { currency, minorUnitFactor } = getInvoiceCurrencyMeta(res, invoices);
       const amountMinor = toMinorUnits(majorAmount, minorUnitFactor);
-      if (!Number.isFinite(amountMinor) || amountMinor <= 0) {
+      if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
         res.status(400);
         throw new Error("Payment amount is invalid.");
       }
@@ -379,7 +379,7 @@ export const allocateCustomerPayment = asyncHandler(async (req, res) => {
         { session, ordered: true }
       );
 
-      payload = {
+      return {
         receipt,
         payments,
         customer,
@@ -390,10 +390,8 @@ export const allocateCustomerPayment = asyncHandler(async (req, res) => {
         balanceAfterPaymentMinor: preview.balanceAfterPaymentMinor,
         allocations,
       };
-    });
-  } finally {
-    session.endSession();
-  }
+    }
+  );
 
   res.status(201).json({
     success: true,
@@ -428,53 +426,56 @@ export const addPaymentToInvoice = asyncHandler(async (req, res) => {
     throw new Error("Payment amount must be a positive number.");
   }
 
-  const invoice = await Invoice.findById(invoiceId)
-    .select("user status minorUnitFactor paymentStatus balanceDueMinor")
-    .lean();
-
-  if (!invoice) {
-    res.status(404);
-    throw new Error("Invoice not found.");
-  }
-
-  if (invoice.status !== "Issued") {
-    res.status(400);
-    throw new Error("Payments can only be added to Issued invoices.");
-  }
-
-  if (
-    invoice.paymentStatus === "Paid" ||
-    (typeof invoice.balanceDueMinor === "number" && invoice.balanceDueMinor <= 0)
-  ) {
-    res.status(400);
-    throw new Error("Invoice is already paid.");
-  }
-
   const parsedPaymentDate = parsePaymentDate(res, paymentDate);
+  const paymentNote = typeof note === "string" ? note.trim() : note;
+  const paymentReference = typeof reference === "string" ? reference.trim() : reference;
+  const payment = await recordPaymentRequest(
+    req, res, ["invoice", invoiceId.toLowerCase()],
+    [majorAmount, paymentMethod, receivedByTrimmed, parsedPaymentDate, paymentNote, paymentReference],
+    async (session) => {
+      const invoice = await Invoice.findById(invoiceId)
+        .select("user status minorUnitFactor amountMinor paidTotalMinor paymentStatus balanceDueMinor")
+        .session(session)
+        .lean();
 
-  const amountMinor = toMinorUnits(majorAmount, invoice.minorUnitFactor || 100);
-  if (!Number.isFinite(amountMinor) || amountMinor <= 0) {
-    res.status(400);
-    throw new Error("Payment amount is invalid.");
-  }
-  if (
-    typeof invoice.balanceDueMinor === "number" &&
-    amountMinor > invoice.balanceDueMinor
-  ) {
-    res.status(400);
-    throw new Error("Payment amount cannot exceed the invoice balance.");
-  }
+      if (!invoice) {
+        res.status(404);
+        throw new Error("Invoice not found.");
+      }
+      if (invoice.status !== "Issued") {
+        res.status(400);
+        throw new Error("Payments can only be added to Issued invoices.");
+      }
 
-  const payment = await Payment.create({
-    invoice: invoiceId,
-    user: invoice.user,
-    amountMinor,
-    paymentMethod,
-    receivedBy: receivedByTrimmed,
-    paymentDate: parsedPaymentDate,
-    note: typeof note === "string" ? note.trim() : note,
-    reference: typeof reference === "string" ? reference.trim() : reference,
-  });
+      const balanceDue = getInvoiceBalanceMinor(invoice);
+      if (invoice.paymentStatus === "Paid" || balanceDue <= 0) {
+        res.status(400);
+        throw new Error("Invoice is already paid.");
+      }
+
+      const amountMinor = toMinorUnits(majorAmount, invoice.minorUnitFactor || 100);
+      if (!Number.isSafeInteger(amountMinor) || amountMinor <= 0) {
+        res.status(400);
+        throw new Error("Payment amount is invalid.");
+      }
+      if (amountMinor > balanceDue) {
+        res.status(400);
+        throw new Error("Payment amount cannot exceed the invoice balance.");
+      }
+
+      const [recorded] = await Payment.create([{
+        invoice: invoiceId,
+        user: invoice.user,
+        amountMinor,
+        paymentMethod,
+        receivedBy: receivedByTrimmed,
+        paymentDate: parsedPaymentDate,
+        note: paymentNote,
+        reference: paymentReference,
+      }], { session });
+      return recorded;
+    }
+  );
 
   res.status(201).json({
     success: true,
@@ -623,22 +624,25 @@ export const deletePayment = asyncHandler(async (req, res) => {
     throw new Error("Invalid payment id.");
   }
 
-  const payment = await Payment.findById(id).select(
-    "_id invoice amountMinor receipt"
-  );
-  if (!payment) {
-    res.status(404);
-    throw new Error("Payment not found.");
-  }
+  const payment = await mongoose.connection.transaction(async (session) => {
+    const existing = await Payment.findById(id)
+      .select("_id invoice amountMinor receipt")
+      .session(session);
+    if (!existing) {
+      res.status(404);
+      throw new Error("Payment not found.");
+    }
 
-  if (payment.receipt) {
-    res.status(400);
-    throw new Error(
-      "Payments recorded through a customer receipt cannot be deleted individually."
-    );
-  }
+    if (existing.receipt) {
+      res.status(400);
+      throw new Error(
+        "Payments recorded through a customer receipt cannot be deleted individually."
+      );
+    }
 
-  await payment.deleteOne();
+    await existing.deleteOne({ session });
+    return existing;
+  });
 
   res.json({
     message: "Payment deleted and invoice balance updated.",
